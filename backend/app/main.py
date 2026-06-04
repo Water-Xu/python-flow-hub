@@ -28,6 +28,8 @@ from app.api import (
     router_versions,
     router_gateway,
     router_jupyter,
+    router_platform,
+    router_dashboard,
 )
 from app.config import get_settings
 from app.core.mq.consumer_manager import get_consumer_manager
@@ -107,6 +109,8 @@ app.include_router(router_mq.router)
 app.include_router(router_auth.router)
 app.include_router(router_versions.router)
 app.include_router(router_gateway.router)
+app.include_router(router_platform.router)
+app.include_router(router_dashboard.router)
 if settings.deployment_mode == "local":
     app.include_router(router_jupyter.router)
 

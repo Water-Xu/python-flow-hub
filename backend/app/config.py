@@ -66,6 +66,45 @@ class Settings(BaseSettings):
 
     rabbitmq_url: str = "amqp://pyflow:pyflow@localhost:5672//lhy-styon"
 
+    # ── 块运行时中间件接入（让中台启动的 Flow / 调用块连到集群内 redis/mq/db/minio）──
+    # 开关：是否向 Block Deployment 注入中间件连接（共享 Secret + NetworkPolicy egress 放行）
+    block_inject_middleware: bool = True
+    # 注入给块的连接串（默认复用控制面同一套；可单独指定业务库/独立 redis 等）。
+    # 空字符串表示沿用对应控制面连接（见 effective_block_* 派生）。
+    block_redis_url: str = ""
+    block_rabbitmq_url: str = ""
+    block_db_dsn: str = ""
+    block_minio_endpoint: str = ""
+    block_minio_access_key: str = ""
+    block_minio_secret_key: str = ""
+    # 中间件（RabbitMQ/MinIO/ES/Nacos）所在命名空间（pyflow 跨 ns 访问需放行）
+    middleware_namespace: str = "lhy-styon"
+    # 命名空间内放行的中间件端口（逗号分隔）：amqp/mgmt/minio/minio-console/es/nacos
+    middleware_ns_ports: str = "5672,15672,9000,9001,9200,8848"
+    # VPC 私网中间件 egress 白名单（Memorystore Redis / Cloud SQL 等，cidr:port 逗号分隔）
+    # 例：10.0.1.0/24:6379,10.196.0.3/32:5432
+    block_egress_cidrs: str = "10.0.1.0/24:6379,10.196.0.3/32:5432"
+    # 块连接中间件的共享 Secret 名（运行时由 orchestrator 从 block_* 渲染到 pyflow-blocks）
+    block_middleware_secret: str = "pyflow-block-middleware"
+
+    def effective_block_redis_url(self) -> str:
+        return self.block_redis_url or self.redis_url
+
+    def effective_block_rabbitmq_url(self) -> str:
+        return self.block_rabbitmq_url or self.rabbitmq_url
+
+    def effective_block_db_dsn(self) -> str:
+        return self.block_db_dsn or self.db_dsn
+
+    def effective_block_minio_endpoint(self) -> str:
+        return self.block_minio_endpoint or self.minio_endpoint
+
+    def effective_block_minio_access_key(self) -> str:
+        return self.block_minio_access_key or self.minio_access_key
+
+    def effective_block_minio_secret_key(self) -> str:
+        return self.block_minio_secret_key or self.minio_secret_key
+
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "minioadmin"
     minio_secret_key: str = "minioadmin"

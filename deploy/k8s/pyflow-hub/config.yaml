@@ -16,6 +16,31 @@ data:
   # 必须用跨命名空间 FQDN，否则裸 service 名解析不到 → 导出失败刷 Error Reporting
   PYFLOW_OTLP_ENDPOINT: "http://otel-collector.lhy-styon.svc.cluster.local:4318"
   PYFLOW_SATOKEN_VERIFY_URL: "http://lhy-styon-gateway:8201/lhy-styon-auth/token/verify"
+
+  # ── 块运行时中间件接入（让中台启动的 Flow / 调用块连到集群内 redis/mq/db/minio）──
+  # 部署时自动渲染共享 Secret(pyflow-block-middleware) 注入每个块(envFrom)，并放行 NetworkPolicy egress。
+  PYFLOW_BLOCK_INJECT_MIDDLEWARE: "true"
+  PYFLOW_BLOCK_MIDDLEWARE_SECRET: "pyflow-block-middleware"
+  # 中间件所在命名空间（RabbitMQ/MinIO/ES/Nacos 均在 lhy-styon）+ 放行端口
+  PYFLOW_MIDDLEWARE_NAMESPACE: "lhy-styon"
+  PYFLOW_MIDDLEWARE_NS_PORTS: "5672,15672,9000,9001,9200,8848"
+  # VPC 私网中间件 egress 白名单（Memorystore Redis Cluster 子网 / Cloud SQL 私网 IP）
+  # Redis discovery endpoint 10.0.1.0/24:6379；Cloud SQL 私网 IP 10.196.0.3/32:5432
+  PYFLOW_BLOCK_EGRESS_CIDRS: "10.0.1.0/24:6379,10.196.0.3/32:5432"
+  # 默认块连接复用控制面同一套（block_* 留空时回退 redis_url/rabbitmq_url/db_dsn/minio_*）。
+  # 如需块连业务库/独立 redis，可在此覆盖（敏感串放 pyflow-hub-secret）：
+  # PYFLOW_BLOCK_DB_DSN / PYFLOW_BLOCK_REDIS_URL / PYFLOW_BLOCK_RABBITMQ_URL
 # ⚠️ 敏感连接串（pyflow-hub-secret）不落仓库明文（决策 8/14），由运维一次性创建：
 #   kubectl create secret generic pyflow-hub-secret -n pyflow-blocks --from-literal=... （见 deploy skill）
 # CICD 不 apply 该 Secret，避免覆盖真实凭据。
+#
+# ── GCP / GKE 中间件连接速查（lhy-styon-dev 集群，us-central1-a）──────────────
+# 中间件        | 集群内地址 (FQDN) / VPC IP                          | 端口   | 凭据来源
+# PostgreSQL    | <CLOUD_SQL_PRIVATE_IP>  (实例 lhy-styon-pg)        | 5432  | pyflow-hub-secret(PYFLOW_DB_DSN, 库 pyflow)
+# Redis Cluster | 10.0.1.x  (Memorystore discovery endpoint)        | 6379  | 无密码(VPC 私网)
+# RabbitMQ      | rabbitmq.lhy-styon.svc.cluster.local              | 5672  | rabbitmq-secret(user lhy-styon, vhost /lhy-styon)
+# RabbitMQ Mgmt | rabbitmq.lhy-styon.svc.cluster.local              | 15672 | 同上(KEDA 读队列深度)
+# MinIO         | minio.lhy-styon.svc.cluster.local                 | 9000  | minio-secret(user minioadmin)
+# Elasticsearch | elasticsearch.lhy-styon.svc.cluster.local         | 9200  | 无(security 关闭)
+# Nacos         | nacos-registry.lhy-styon.svc.cluster.local        | 8848  | nacos-secret
+# OTel Collector| otel-collector.lhy-styon.svc.cluster.local        | 4318  | Workload Identity

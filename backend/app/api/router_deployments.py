@@ -22,12 +22,18 @@ class DeploymentCreateRequest(BaseModel):
     environment: str = "local"  # local | k8s
 
 
+class DeploymentEnvRequest(BaseModel):
+    env_vars: dict[str, str] = {}
+    secret_refs: dict[str, str] = {}
+
+
 def _dep_dict(d: FlowDeployment) -> dict:
     return {
         "id": d.id, "flow_id": d.flow_id, "flow_version_id": d.flow_version_id,
         "name": d.name, "environment": d.environment, "status": d.status,
         "resource_prefix": d.resource_prefix, "entry_endpoint": d.entry_endpoint,
         "block_statuses": d.block_statuses or [], "created_at": d.created_at,
+        "env_vars": d.env_vars or {}, "secret_refs": d.secret_refs or {},
     }
 
 
@@ -76,6 +82,21 @@ async def create_deployment(
     return _dep_dict(dep)
 
 
+@router.put("/{deployment_id}/env")
+async def update_deployment_env(
+    deployment_id: str,
+    req: DeploymentEnvRequest,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.DEPLOYER)),
+):
+    """配置部署级环境变量（注入该部署全部块；下次部署生效）。"""
+    dep = await _get(session, deployment_id)
+    dep.env_vars = req.env_vars or {}
+    dep.secret_refs = req.secret_refs or {}
+    await session.commit()
+    return _dep_dict(dep)
+
+
 @router.get("/{deployment_id}/precheck")
 async def precheck_deployment(
     deployment_id: str,
@@ -94,9 +115,9 @@ async def render_manifests(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(require_role(Role.DEPLOYER)),
 ):
-    """渲染 K8s manifest 预览（不 apply）。"""
+    """渲染 K8s manifest 预览（不 apply；含全局/部署级环境变量与中间件接入）。"""
     dep = await _get(session, deployment_id)
-    specs = await orchestrator.build_specs(session, dep.flow_id)
+    specs = await orchestrator.build_deployment_specs(session, dep)
     ctx = orchestrator._build_context(dep)
     return {"manifests": orchestrator.render_all_manifests(specs, ctx)}
 

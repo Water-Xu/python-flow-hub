@@ -109,6 +109,24 @@ export const deploymentApi = {
   precheck: (id: string) => client.get<any, any>(`/api/deployments/${id}/precheck`),
   /** 渲染 K8s manifest 预览（不 apply） */
   manifests: (id: string) => client.get<any, any>(`/api/deployments/${id}/manifests`),
+  /** 配置部署级环境变量（注入该部署全部块，下次部署生效，DEPLOYER） */
+  updateEnv: (id: string, data: { env_vars: Record<string, string>; secret_refs?: Record<string, string> }) =>
+    client.put<any, any>(`/api/deployments/${id}/env`, data),
+}
+
+/** 平台级全局环境变量 + 中间件接入信息 */
+export const platformApi = {
+  listEnv: () => client.get<any, any[]>('/api/platform/env').then(ensureArray<any>),
+  upsertEnv: (data: { env_key: string; env_value: string; description?: string }) =>
+    client.post<any, any>('/api/platform/env', data),
+  deleteEnv: (id: string) => client.delete(`/api/platform/env/${id}`),
+  middleware: () => client.get<any, any>('/api/platform/middleware'),
+}
+
+/** 链路监控看板 */
+export const dashboardApi = {
+  overview: () => client.get<any, any>('/api/dashboard/overview'),
+  flowRunTrace: (runId: string) => client.get<any, any>(`/api/dashboard/flow-runs/${runId}/trace`),
 }
 
 export const versionApi = {

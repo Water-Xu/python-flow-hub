@@ -17,6 +17,10 @@ const precheck = ref<any>(null)
 const manifests = ref<any[]>([])
 const detailTab = ref('status')
 
+// 部署级环境变量编辑
+const envRows = ref<{ key: string; value: string }[]>([])
+const envSaving = ref(false)
+
 let timer: number | undefined
 
 async function load() {
@@ -80,12 +84,44 @@ async function doDestroy(row: any) {
   load()
 }
 
+function loadEnvRows(dep: any) {
+  const ev = dep?.env_vars || {}
+  envRows.value = Object.keys(ev).map((k) => ({ key: k, value: String(ev[k]) }))
+}
+
+function addEnvRow() {
+  envRows.value.push({ key: '', value: '' })
+}
+
+function removeEnvRow(i: number) {
+  envRows.value.splice(i, 1)
+}
+
+async function saveEnv() {
+  if (!detail.value) return
+  const env_vars: Record<string, string> = {}
+  for (const r of envRows.value) {
+    if (r.key.trim()) env_vars[r.key.trim()] = r.value
+  }
+  envSaving.value = true
+  try {
+    await deploymentApi.updateEnv(detail.value.id, { env_vars })
+    detail.value.env_vars = env_vars
+    ElMessage.success('环境变量已保存（下次部署生效）')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '保存失败')
+  } finally {
+    envSaving.value = false
+  }
+}
+
 async function openDetail(row: any) {
   detail.value = row
   drawer.value = true
   detailTab.value = 'status'
   precheck.value = null
   manifests.value = []
+  loadEnvRows(row)
   if (row.environment === 'k8s') {
     try {
       const res = await deploymentApi.status(row.id)
@@ -214,6 +250,20 @@ onBeforeUnmount(() => timer && clearInterval(timer))
             <pre class="cap">{{ JSON.stringify(precheck.capacity, null, 2) }}</pre>
           </div>
         </el-tab-pane>
+        <el-tab-pane label="环境变量" name="env">
+          <p class="dim env-tip">
+            部署级环境变量注入该部署下全部块（优先级：全局 &lt; 部署 &lt; 块）。敏感凭据请用 Secret，勿在此明文存密码。
+          </p>
+          <div v-for="(r, i) in envRows" :key="i" class="env-row">
+            <el-input v-model="r.key" placeholder="变量名" style="width: 38%" />
+            <el-input v-model="r.value" placeholder="值" style="width: 50%" />
+            <el-button link type="danger" @click="removeEnvRow(i)"><el-icon><Delete /></el-icon></el-button>
+          </div>
+          <div class="env-actions">
+            <el-button size="small" @click="addEnvRow"><el-icon><Plus /></el-icon> 添加</el-button>
+            <el-button size="small" type="primary" :loading="envSaving" @click="saveEnv">保存</el-button>
+          </div>
+        </el-tab-pane>
         <el-tab-pane label="Manifest 预览" name="manifests">
           <el-button size="small" type="primary" @click="loadManifests">渲染 manifest</el-button>
           <div v-for="(m, idx) in manifests" :key="idx" class="manifest">
@@ -257,6 +307,9 @@ onBeforeUnmount(() => timer && clearInterval(timer))
   margin-top: 12px;
   animation: fade 0.25s ease;
 }
+.env-tip { margin: 0 0 12px; line-height: 1.6; }
+.env-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.env-actions { display: flex; gap: 8px; margin-top: 6px; }
 .cap,
 .manifest pre {
   background: var(--pf-bg-soft, #f5f7fa);

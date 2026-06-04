@@ -7,6 +7,7 @@ from app.models.rbac import PyFlowUserRole, PyFlowResourceGrant
 from app.models.deployment import FlowDeployment
 from app.models.api_portal import PublishedApi
 from app.models.version import BlockVersion, FlowVersion
+from app.models.platform_env import PlatformEnv
 
 __all__ = [
     "Block",
@@ -21,4 +22,5 @@ __all__ = [
     "PublishedApi",
     "BlockVersion",
     "FlowVersion",
+    "PlatformEnv",
 ]

@@ -12,6 +12,7 @@ from app.core.k8s.manifest_generator import (
     derive_max_replica,
     gcp_scope_precheck,
     gpu_precheck,
+    middleware_egress_rules,
     min_replicas_for,
     parse_cpu_millicores,
     parse_mem_mib,
@@ -132,3 +133,58 @@ def test_network_policy_gcp_egress_whitelist():
     ports = [p["port"] for rule in np["spec"]["egress"] for p in rule.get("ports", [])]
     assert 443 in ports
     assert 53 in ports  # kube-dns
+
+
+def test_middleware_egress_rules_ns_and_cidr():
+    rules = middleware_egress_rules(
+        middleware_namespace="lhy-styon",
+        ns_ports=[5672, 15672, 9000],
+        cidr_ports=[("10.0.1.0/24", 6379), ("10.196.0.3/32", 5432)],
+    )
+    # 命名空间规则按 metadata.name 选中 lhy-styon
+    ns_rule = rules[0]
+    assert ns_rule["to"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] == "lhy-styon"
+    ns_ports = [p["port"] for p in ns_rule["ports"]]
+    assert ns_ports == [5672, 15672, 9000]
+    # VPC 私网 ipBlock 规则
+    cidrs = [r["to"][0]["ipBlock"]["cidr"] for r in rules[1:]]
+    assert "10.0.1.0/24" in cidrs and "10.196.0.3/32" in cidrs
+    redis_rule = next(r for r in rules if r["to"][0].get("ipBlock", {}).get("cidr") == "10.0.1.0/24")
+    assert redis_rule["ports"][0]["port"] == 6379
+
+
+def test_network_policy_injects_middleware_egress():
+    spec = BlockDeploySpec("b1", "n", execution_mode="async_mq")
+    egress = middleware_egress_rules(
+        middleware_namespace="lhy-styon", ns_ports=[5672], cidr_ports=[("10.0.1.0/24", 6379)]
+    )
+    ctx = DeployContext(inject_middleware=True, middleware_egress=egress)
+    np = build_network_policy(spec, ctx)
+    ports = [p["port"] for rule in np["spec"]["egress"] for p in rule.get("ports", [])]
+    assert 5672 in ports and 6379 in ports and 53 in ports
+    # 关闭注入则不放行中间件
+    np2 = build_network_policy(spec, DeployContext(inject_middleware=False, middleware_egress=egress))
+    ports2 = [p["port"] for rule in np2["spec"]["egress"] for p in rule.get("ports", [])]
+    assert 5672 not in ports2 and 53 in ports2
+
+
+def test_build_deployment_envfrom_middleware_secret():
+    spec = BlockDeploySpec("abcdef12-0000", "n", execution_mode="sync_http",
+                           env_vars={"FOO": "bar"})
+    ctx = DeployContext(runner_image="runner:1", inject_middleware=True,
+                        middleware_secret="pyflow-block-middleware")
+    dep = build_deployment(spec, ctx, min_replicas=1)
+    container = dep["spec"]["template"]["spec"]["containers"][0]
+    secret_names = [e["secretRef"]["name"] for e in container["envFrom"]]
+    assert "pyflow-block-middleware" in secret_names
+    # 合并后的非敏感 env 直接注入
+    env_names = {e["name"]: e.get("value") for e in container["env"]}
+    assert env_names.get("FOO") == "bar"
+
+
+def test_build_deployment_no_middleware_when_disabled():
+    spec = BlockDeploySpec("abcdef12-0000", "n", execution_mode="sync_http")
+    ctx = DeployContext(runner_image="runner:1", inject_middleware=False, middleware_secret="x")
+    dep = build_deployment(spec, ctx, min_replicas=1)
+    container = dep["spec"]["template"]["spec"]["containers"][0]
+    assert container["envFrom"] == []

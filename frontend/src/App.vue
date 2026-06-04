@@ -14,6 +14,7 @@ const isLoginPage = computed(() => route.path === '/login')
 
 const menus = computed(() => {
   const base = [
+    { path: '/dashboard', label: '链路看板', icon: 'Odometer' },
     { path: '/blocks', label: '调用块', icon: 'Grid' },
     { path: '/flows', label: '流程编排', icon: 'Share' },
     { path: '/mq-monitor', label: 'MQ 监控', icon: 'MessageBox' },
@@ -21,6 +22,7 @@ const menus = computed(() => {
     { path: '/api-admin', label: '接口管理', icon: 'Management' },
     { path: '/deployments', label: '部署中心', icon: 'Promotion' },
     { path: '/executions', label: '执行历史', icon: 'Histogram' },
+    { path: '/platform-settings', label: '平台设置', icon: 'Setting' },
   ]
   // ADMIN 才显示角色管理
   if (authStore.isAdmin) {

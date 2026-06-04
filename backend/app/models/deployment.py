@@ -24,3 +24,7 @@ class FlowDeployment(Base, UUIDMixin, TimestampMixin):
     entry_endpoint: Mapped[str] = mapped_column(String(256), default="")
     copied_from_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     block_statuses: Mapped[list] = mapped_column(JSON, default=list)
+    # 部署级环境变量（注入该部署下全部块；非敏感；优先级：全局 < 部署 < 块）
+    env_vars: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 部署级 secret 引用（env_name -> secret_key，敏感值走 K8s Secret）
+    secret_refs: Mapped[dict] = mapped_column(JSON, default=dict)

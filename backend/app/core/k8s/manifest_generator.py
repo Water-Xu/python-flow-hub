@@ -73,6 +73,10 @@ class DeployContext:
     ksa_default: str = "pyflow-block-default"
     ksa_bigquery: str = "pyflow-block-bq"
     ksa_storage: str = "pyflow-block-gcs"
+    # 中间件接入（让块连到集群内 redis/mq/db/minio）
+    inject_middleware: bool = False
+    middleware_secret: str = ""              # 共享中间件连接 Secret 名（空=不注入 envFrom）
+    middleware_egress: list[dict[str, Any]] = field(default_factory=list)
 
     def ksa_for(self, block_type: str) -> str:
         if block_type == "gcp_bigquery":
@@ -187,11 +191,15 @@ def build_deployment(spec: BlockDeploySpec, ctx: DeployContext, *, min_replicas:
         {"name": "PYFLOW_PROTOCOL_VERSION", "value": RUNTIME_PROTOCOL_VERSION},
         {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
     ]
-    # 非敏感 env_vars 直接注入
+    # 非敏感 env_vars 直接注入（已含全局/部署级合并结果，见 orchestrator）
     for k, v in (spec.env_vars or {}).items():
         env.append({"name": k, "value": str(v)})
     # 敏感值走 K8s Secret（决策 14：DB 不落明文）
     env_from = []
+    # 共享中间件连接 Secret（REDIS_URL/RABBITMQ_URL/DATABASE_URL/MINIO_*）：放在最前，
+    # 块自身 secret 可覆盖同名键（envFrom 后者优先）。
+    if ctx.inject_middleware and ctx.middleware_secret:
+        env_from.append({"secretRef": {"name": ctx.middleware_secret}})
     if spec.secret_refs:
         env_from.append({"secretRef": {"name": f"pyflow-{spec.block_short}-secrets"}})
 
@@ -259,10 +267,40 @@ def build_service(spec: BlockDeploySpec, ctx: DeployContext) -> dict[str, Any] |
     }
 
 
+def middleware_egress_rules(
+    *,
+    middleware_namespace: str,
+    ns_ports: list[int],
+    cidr_ports: list[tuple[str, int]],
+) -> list[dict[str, Any]]:
+    """中间件 egress 白名单（决策 1/14）：让块连到集群内/VPC 中间件。
+
+    - middleware_namespace（如 lhy-styon）内的 RabbitMQ/MinIO/ES/Nacos：按 namespaceSelector + 端口放行；
+    - VPC 私网中间件（Memorystore Redis / Cloud SQL）：按 ipBlock CIDR + 端口放行。
+    """
+    rules: list[dict[str, Any]] = []
+    if middleware_namespace and ns_ports:
+        rules.append({
+            "to": [{
+                "namespaceSelector": {
+                    "matchLabels": {"kubernetes.io/metadata.name": middleware_namespace}
+                }
+            }],
+            "ports": [{"protocol": "TCP", "port": p} for p in ns_ports],
+        })
+    for cidr, port in cidr_ports:
+        rules.append({
+            "to": [{"ipBlock": {"cidr": cidr}}],
+            "ports": [{"protocol": "TCP", "port": port}],
+        })
+    return rules
+
+
 def build_network_policy(spec: BlockDeploySpec, ctx: DeployContext) -> dict[str, Any]:
     """egress deny-all + 白名单（决策 1/14）。
 
-    普通块：仅放行 kube-dns(53)；GCP 托管块额外放行 Private Google Access（443）。
+    普通块：放行 kube-dns(53) + 配置的中间件白名单（redis/mq/db/minio）；
+    GCP 托管块额外放行 Private Google Access（443）。
     """
     labels = _labels(spec, ctx)
     egress: list[dict[str, Any]] = [
@@ -277,12 +315,9 @@ def build_network_policy(spec: BlockDeploySpec, ctx: DeployContext) -> dict[str,
             "to": [{"ipBlock": {"cidr": "199.36.153.8/30"}}, {"ipBlock": {"cidr": "199.36.153.4/30"}}],
             "ports": [{"protocol": "TCP", "port": 443}],
         })
-    # async 块需要连 RabbitMQ；同步块需要被控制面访问（ingress 默认放行同 ns）
-    if spec.consumes_mq:
-        egress.append({
-            "to": [{"namespaceSelector": {}}],
-            "ports": [{"protocol": "TCP", "port": 5672}, {"protocol": "TCP", "port": 15672}],
-        })
+    # 中间件接入：redis / rabbitmq / 数据库 / minio 白名单（按上下文配置放行给所有块）
+    if ctx.inject_middleware and ctx.middleware_egress:
+        egress.extend(ctx.middleware_egress)
     return {
         "apiVersion": "networking.k8s.io/v1",
         "kind": "NetworkPolicy",

@@ -58,7 +58,7 @@ lhy-styon-python-flow-hub/
 │   │   │   ├── sandbox/     # docker_executor(dev) / k8s_executor(即席 Job)
 │   │   │   ├── flow/        # DAG + flow_runner（含续跑）+ k8s_orchestration + flow_run_store(lease/fence)
 │   │   │   ├── mq/          # 拓扑生成 + 消费者部署管理（不亲自消费生产队列）
-│   │   │   ├── k8s/         # manifest_generator / deployment_manager / keda_manager / cluster_monitor / image_builder / orchestrator
+│   │   │   ├── k8s/         # manifest_generator / deployment_manager / keda_manager / cluster_monitor / image_builder / middleware / orchestrator
 │   │   │   ├── versioning/  # version_manager(先MinIO后DB+对账) / diff_service
 │   │   │   ├── storage/     # MinIO 客户端（可注入，便于单测）
 │   │   │   ├── jupyter/     # kernel_manager（仅 local 模式）
@@ -66,7 +66,7 @@ lhy-styon-python-flow-hub/
 │   │   ├── auth/            # sa_token_client + rbac（平台级角色 + 资源级 ACL）
 │   │   ├── models/          # SQLAlchemy ORM（含 BlockVersion/FlowVersion）
 │   │   ├── observability/   # structlog / Prometheus / OTel
-│   │   └── migrations/      # Alembic（独立 Cloud SQL 库；0001~0004）
+│   │   └── migrations/      # Alembic（独立 Cloud SQL 库；0001~0005）
 │   └── Dockerfile
 ├── pyflow_runtime/          # 执行侧共享库：幂等状态机/条件引擎/输入映射/回复/退避/沙箱常量
 ├── runner/                  # runner 镜像（Dockerfile / Dockerfile.deps 依赖层 / Dockerfile.gpu）
@@ -137,6 +137,10 @@ npm run dev
 6. **部署中心**（Phase 4a）：新建 FlowDeployment → 容量/GPU/scope 预检 → 一键部署到 K8s
    （生成 Deployment + Service + KEDA ScaledObject + NetworkPolicy）→ 实时副本状态 / Manifest 预览 / 销毁。
 7. **调试执行 (Jupyter)**（Phase 5，仅 local）：块编辑器「调试执行」标签页，多 Cell 交互式开发，与生产执行链路完全隔离。
+8. **链路看板**：首页「链路看板」总览资源计数、24h 执行成功率/趋势、最近整流链路（点击查看节点级 trace）、
+   最近块执行、中间件依赖连通性，作为轻量 Python 调用链路监控。
+9. **平台设置 / 环境变量**：「平台设置」配置**全局环境变量**（注入所有 K8s 部署的块）与查看**中间件接入**信息；
+   部署中心详情「环境变量」标签配置**部署级环境变量**。优先级：全局 < 部署 < 块（更具体者覆盖）。
 
 > 同步调用入口：`POST /flow/{deployment_id}/invoke`（整流编排，FlowRun lease+fence 续跑）、`POST /invoke/{block_id}`（单块）。
 
@@ -194,6 +198,44 @@ git push master
 
 ---
 
+## 块连接中间件（redis / mq / 数据库 / minio）
+
+中台启动的 **Flow / 调用块**（运行在 `pyflow-blocks` 命名空间）可直接连到集群内中间件：部署时
+orchestrator 自动渲染共享 Secret **`pyflow-block-middleware`** 注入每个块（`envFrom`），并按白名单
+放行 NetworkPolicy egress（默认 deny-all 基线之上）。块内 Python 代码按约定环境变量读取连接：
+
+```python
+import os
+db_url    = os.environ["DATABASE_URL"]     # PostgreSQL
+redis_url = os.environ["REDIS_URL"]        # Redis Cluster
+amqp_url  = os.environ["RABBITMQ_URL"]     # RabbitMQ
+minio_ep  = os.environ["MINIO_ENDPOINT"]   # MinIO（+ MINIO_ACCESS_KEY / MINIO_SECRET_KEY）
+```
+
+- 开关与白名单：`PYFLOW_BLOCK_INJECT_MIDDLEWARE` / `PYFLOW_MIDDLEWARE_NAMESPACE` / `PYFLOW_MIDDLEWARE_NS_PORTS` /
+  `PYFLOW_BLOCK_EGRESS_CIDRS`（详见 `.env.example` 与 `deploy/k8s/pyflow-hub/config.yaml`）。
+- 默认块连接复用控制面同一套；如需块连业务库/独立 redis，用 `PYFLOW_BLOCK_DB_DSN` / `PYFLOW_BLOCK_REDIS_URL` /
+  `PYFLOW_BLOCK_RABBITMQ_URL` 单独覆盖（敏感串放 Secret）。手动覆盖模板见
+  `deploy/k8s/pyflow-blocks/block-middleware-secret.example.yaml`。
+
+### GCP / GKE 中间件连接速查（集群 `lhy-styon-dev`，`us-central1-a`）
+
+> pyflow 在 `pyflow-blocks` 命名空间，访问 `lhy-styon` 命名空间内中间件**必须用跨命名空间 FQDN**。
+
+| 中间件 | 集群内地址 (FQDN) / VPC IP | 端口 | 用户 | 凭据来源 |
+| --- | --- | --- | --- | --- |
+| PostgreSQL（业务库 ai_outfit） | `<CLOUD_SQL_PRIVATE_IP>`（实例 `lhy-styon-pg`，VPC 私网） | 5432 | `lhy_app` | `app-db-secret` / Secret Manager `pg-password` |
+| PostgreSQL（pyflow 独立库） | 同实例，库 `pyflow` | 5432 | `pyflow` | `pyflow-hub-secret`（`PYFLOW_DB_DSN`） |
+| Redis Cluster | `10.0.1.x`（Memorystore discovery endpoint，VPC 私网，非 K8s Service） | 6379 | — | 无密码 |
+| RabbitMQ | `rabbitmq.lhy-styon.svc.cluster.local` | 5672 | `lhy-styon` | `rabbitmq-secret`（vhost `/lhy-styon`） |
+| RabbitMQ Management | `rabbitmq.lhy-styon.svc.cluster.local` | 15672 | `lhy-styon` | 同上（KEDA 读队列深度） |
+| MinIO | `minio.lhy-styon.svc.cluster.local` | 9000 | `minioadmin` | `minio-secret`（bucket `pyflow-versions`） |
+| Elasticsearch | `elasticsearch.lhy-styon.svc.cluster.local` | 9200 | — | 无（security 关闭） |
+| Nacos | `nacos-registry.lhy-styon.svc.cluster.local` | 8848 | `nacos` | `nacos-secret` |
+| OTel Collector | `otel-collector.lhy-styon.svc.cluster.local` | 4318 | — | Workload Identity |
+
+---
+
 ## 错误码
 
 号段对齐现有平台（1xxxx 认证 / 4xxxx 请求 / 5xxxx 系统），PyFlowHub 用每段内 `x18xx` 子区间：
@@ -218,9 +260,11 @@ git push master
 | 4b 镜像与供应链 | ✅ 已实现 | image_builder（Cloud Build + requirements_hash 分层缓存）、最小权限构建 SA、依赖白名单/wheel 优先/pip-audit、协议版本门禁 |
 | 4c GPU 与托管块 | ✅ 已实现 | GPU manifest（禁 gVisor）+ 配额/CUDA 兼容预检、GCP 托管块 Workload Identity KSA + egress 白名单 + scope 预检 |
 | 5 Jupyter | ✅ 已实现 | jupyter_client 内核（仅 local 模式）、Cell UI 组件，与生产执行链路完全解耦 |
+| 中间件接入 | ✅ 已实现 | 块连 redis/mq/db/minio（共享 Secret 注入 + NetworkPolicy egress 白名单）、全局/部署级环境变量（全局<部署<块） |
+| 链路看板 | ✅ 已实现 | 资源计数 / 24h 成功率·趋势 / 整流链路节点级 trace / 块执行 / 中间件依赖连通性 |
 
-> 测试：`tests/` 共 58 项核心单测（幂等/接管/退避/条件引擎/回复/manifest 安全上下文/容量·GPU·scope 预检/版本 sha 对账/续跑），
-> 运行 `pytest -q`（AIR：全自动 / 独立 / 可重复，零外部服务）。
+> 测试：`tests/` 共 69 项核心单测（幂等/接管/退避/条件引擎/回复/manifest 安全上下文/容量·GPU·scope 预检/
+> 中间件 egress·env 合并/版本 sha 对账/续跑/镜像分层），运行 `pytest -q`（AIR：全自动 / 独立 / 可重复，零外部服务）。
 
 ---
 

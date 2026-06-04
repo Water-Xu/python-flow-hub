@@ -1,12 +1,17 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
-  { path: '/', redirect: '/blocks' },
+  { path: '/', redirect: '/dashboard' },
   {
     path: '/login',
     name: 'login',
     component: () => import('@/views/login/Login.vue'),
     meta: { public: true },
+  },
+  {
+    path: '/dashboard',
+    name: 'dashboard',
+    component: () => import('@/views/dashboard/Dashboard.vue'),
   },
   {
     path: '/blocks',
@@ -52,6 +57,11 @@ const routes = [
     path: '/api-admin',
     name: 'api-admin',
     component: () => import('@/views/api-admin/ApiAdmin.vue'),
+  },
+  {
+    path: '/platform-settings',
+    name: 'platform-settings',
+    component: () => import('@/views/platform-settings/PlatformSettings.vue'),
   },
   {
     path: '/rbac-admin',

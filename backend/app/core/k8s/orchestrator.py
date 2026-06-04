@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.core.k8s import cluster_monitor, deployment_manager, image_builder, keda_manager
+from app.core.k8s import cluster_monitor, deployment_manager, image_builder, keda_manager, middleware
 from app.core.storage.minio_client import get_storage
 from app.core.k8s.manifest_generator import (
     BlockDeploySpec,
@@ -27,8 +27,10 @@ from app.errors import PYFLOW_K8S_DEPLOY_FAILED, BusinessException
 from app.models.block import Block
 from app.models.deployment import FlowDeployment
 from app.models.flow import FlowNode
+from app.models.platform_env import PlatformEnv
 from app.models.version import BlockVersion
 from app.observability.logging import get_logger
+from sqlalchemy import select as _select
 
 logger = get_logger("pyflow.k8s.orchestrator")
 settings = get_settings()
@@ -43,7 +45,29 @@ def _build_context(deployment: FlowDeployment) -> DeployContext:
         ksa_default=settings.ksa_default,
         ksa_bigquery=settings.ksa_bigquery,
         ksa_storage=settings.ksa_storage,
+        inject_middleware=settings.block_inject_middleware,
+        middleware_secret=settings.block_middleware_secret if settings.block_inject_middleware else "",
+        middleware_egress=middleware.build_egress_for_settings(settings) if settings.block_inject_middleware else [],
     )
+
+
+async def load_global_env(session: AsyncSession) -> dict[str, str]:
+    """加载平台级全局环境变量（注入所有部署的块）。"""
+    rows = (await session.execute(_select(PlatformEnv))).scalars().all()
+    return {r.env_key: r.env_value for r in rows}
+
+
+def merge_env_into_specs(
+    specs: list[BlockDeploySpec],
+    *,
+    global_env: dict[str, str],
+    deployment_env: dict[str, str],
+    deployment_secret_refs: dict[str, str],
+) -> None:
+    """env 优先级：全局 < 部署 < 块（更具体者覆盖）；secret_refs 同理。"""
+    for spec in specs:
+        spec.env_vars = {**global_env, **(deployment_env or {}), **(spec.env_vars or {})}
+        spec.secret_refs = {**(deployment_secret_refs or {}), **(spec.secret_refs or {})}
 
 
 async def build_specs(session: AsyncSession, flow_id: str) -> list[BlockDeploySpec]:
@@ -81,6 +105,21 @@ async def build_specs(session: AsyncSession, flow_id: str) -> list[BlockDeploySp
             version_id=version_id,
             code_path=code_path,
         ))
+    return specs
+
+
+async def build_deployment_specs(
+    session: AsyncSession, deployment: FlowDeployment
+) -> list[BlockDeploySpec]:
+    """构建部署描述并合并 全局/部署级 环境变量（统一入口）。"""
+    specs = await build_specs(session, deployment.flow_id)
+    global_env = await load_global_env(session)
+    merge_env_into_specs(
+        specs,
+        global_env=global_env,
+        deployment_env=deployment.env_vars or {},
+        deployment_secret_refs=deployment.secret_refs or {},
+    )
     return specs
 
 
@@ -147,8 +186,11 @@ def run_prechecks(specs: list[BlockDeploySpec]) -> dict[str, Any]:
 
 
 def render_all_manifests(specs: list[BlockDeploySpec], ctx: DeployContext) -> list[dict[str, Any]]:
-    """渲染全部 manifest：KEDA 鉴权（一次）+ 各 Block 资源。"""
+    """渲染全部 manifest：中间件连接 Secret + KEDA 鉴权（各一次）+ 各 Block 资源。"""
     manifests: list[dict[str, Any]] = []
+    # 共享中间件连接 Secret（让块连 redis/mq/db/minio）
+    if ctx.inject_middleware and ctx.middleware_secret:
+        manifests.append(middleware.build_middleware_secret(settings, ctx.namespace))
     if any(s.consumes_mq for s in specs):
         manifests.extend(keda_manager.build_rabbitmq_auth_manifests(ctx.namespace))
     for spec in specs:
@@ -165,7 +207,7 @@ async def deploy(session: AsyncSession, deployment: FlowDeployment) -> dict[str,
     """执行一键部署。"""
     from app.observability.metrics import K8S_DEPLOY
 
-    specs = await build_specs(session, deployment.flow_id)
+    specs = await build_deployment_specs(session, deployment)
     if not specs:
         raise BusinessException(PYFLOW_K8S_DEPLOY_FAILED, "no deployable blocks in flow")
 
@@ -207,7 +249,7 @@ async def destroy(session: AsyncSession, deployment: FlowDeployment) -> dict[str
     """销毁部署：删除全部 K8s 资源。"""
     from app.observability.metrics import K8S_DEPLOY
 
-    specs = await build_specs(session, deployment.flow_id)
+    specs = await build_deployment_specs(session, deployment)
     ctx = _build_context(deployment)
     manifests = render_all_manifests(specs, ctx)
     await deployment_manager.delete_manifests(manifests, ctx.namespace)
