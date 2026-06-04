@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,30 @@ class DeploymentEnvRequest(BaseModel):
     secret_refs: dict[str, str] = {}
 
 
+# CPU：'100m' / '0.5' / '2'；内存：'256Mi' / '1Gi' / '512M'
+_CPU_PATTERN = r"^\d+(\.\d+)?m?$"
+_MEM_PATTERN = r"^\d+(\.\d+)?(Ki|Mi|Gi|Ti|Pi|K|M|G|T|P)?$"
+_GPU_TYPE_PATTERN = r"^[a-z0-9-]+$"
+
+
+class BlockResourceSpec(BaseModel):
+    """单个 Block 的 Pod 资源覆盖（仅作用于本部署；空字段表示沿用块默认值）。"""
+
+    cpu_request: str | None = Field(default=None, pattern=_CPU_PATTERN)
+    memory_request: str | None = Field(default=None, pattern=_MEM_PATTERN)
+    cpu_limit: str | None = Field(default=None, pattern=_CPU_PATTERN)
+    memory_limit: str | None = Field(default=None, pattern=_MEM_PATTERN)
+    gpu_enabled: bool | None = None
+    gpu_count: int | None = Field(default=None, ge=1, le=8)
+    gpu_type: str | None = Field(default=None, pattern=_GPU_TYPE_PATTERN, max_length=64)
+
+
+class DeploymentResourceRequest(BaseModel):
+    """部署级 Pod 资源覆盖：{block_id: BlockResourceSpec}。"""
+
+    resource_overrides: dict[str, BlockResourceSpec] = {}
+
+
 def _dep_dict(d: FlowDeployment) -> dict:
     return {
         "id": d.id, "flow_id": d.flow_id, "flow_version_id": d.flow_version_id,
@@ -34,6 +58,7 @@ def _dep_dict(d: FlowDeployment) -> dict:
         "resource_prefix": d.resource_prefix, "entry_endpoint": d.entry_endpoint,
         "block_statuses": d.block_statuses or [], "created_at": d.created_at,
         "env_vars": d.env_vars or {}, "secret_refs": d.secret_refs or {},
+        "resource_overrides": d.resource_overrides or {},
     }
 
 
@@ -97,15 +122,65 @@ async def update_deployment_env(
     return _dep_dict(dep)
 
 
+@router.get("/{deployment_id}/resources")
+async def list_deployment_resources(
+    deployment_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.VIEWER)),
+):
+    """列出该部署各 Block 的 Pod 资源（块默认值 / 部署级覆盖 / 生效值）。"""
+    dep = await _get(session, deployment_id)
+    return await orchestrator.list_block_resources(session, dep)
+
+
+@router.put("/{deployment_id}/resources")
+async def update_deployment_resources(
+    deployment_id: str,
+    req: DeploymentResourceRequest,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.DEPLOYER)),
+):
+    """配置部署级 Pod 资源覆盖（按 block_id 覆盖 CPU/内存/GPU；下次部署生效）。"""
+    dep = await _get(session, deployment_id)
+    overrides: dict[str, dict] = {}
+    for block_id, spec in (req.resource_overrides or {}).items():
+        # 仅保留显式设置的字段，空值不写入（沿用块默认）
+        cleaned = {k: v for k, v in spec.model_dump().items() if v is not None}
+        if cleaned:
+            overrides[block_id] = cleaned
+    dep.resource_overrides = overrides
+    await session.commit()
+    return _dep_dict(dep)
+
+
+@router.post("/{deployment_id}/resources/precheck")
+async def precheck_deployment_resources(
+    deployment_id: str,
+    req: DeploymentResourceRequest,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.VIEWER)),
+):
+    """对“尚未保存”的资源覆盖做实时容量/GPU/scope 预检（编辑时即时反馈，不落库）。"""
+    dep = await _get(session, deployment_id)
+    specs = await orchestrator.build_specs(session, dep.flow_id)
+    overrides: dict[str, dict] = {}
+    for block_id, spec in (req.resource_overrides or {}).items():
+        cleaned = {k: v for k, v in spec.model_dump().items() if v is not None}
+        if cleaned:
+            overrides[block_id] = cleaned
+    orchestrator.merge_resource_overrides_into_specs(specs, overrides)
+    return orchestrator.run_prechecks(specs)
+
+
 @router.get("/{deployment_id}/precheck")
 async def precheck_deployment(
     deployment_id: str,
     session: AsyncSession = Depends(get_session),
     _: str = Depends(require_role(Role.DEPLOYER)),
 ):
-    """容量 + GPU + scope 预检（不部署）。"""
+    """容量 + GPU + scope 预检（含部署级资源覆盖；不部署）。"""
     dep = await _get(session, deployment_id)
-    specs = await orchestrator.build_specs(session, dep.flow_id)
+    specs = await orchestrator.build_deployment_specs(session, dep)
     return orchestrator.run_prechecks(specs)
 
 

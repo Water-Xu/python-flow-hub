@@ -26,7 +26,7 @@ _EXEC_BOOTSTRAP = (
     "import os,sys,json,base64\n"
     "from pyflow_runtime.executor import execute_user_code\n"
     "p=json.loads(base64.b64decode(os.environ['PYFLOW_EXEC_PAYLOAD_B64']))\n"
-    "r=execute_user_code(p['code'],p.get('inputs',{}))\n"
+    "r=execute_user_code(p['code'],p.get('inputs',{}),p.get('entrypoint','run'))\n"
     "sys.stdout.write('\\n" + _RESULT_MARKER + "'+json.dumps(r,default=str))\n"
 )
 
@@ -110,9 +110,13 @@ def _build_job_manifest(job_name: str, payload_b64: str) -> dict[str, Any]:
     }
 
 
-def _run_job_sync(code: str, inputs: dict[str, Any], timeout: int) -> ExecutionOutput:
+def _run_job_sync(
+    code: str, inputs: dict[str, Any], timeout: int, entrypoint: str = "run"
+) -> ExecutionOutput:
     batch_api, core_api = _k8s_clients()
-    payload = json.dumps({"code": code, "inputs": inputs}, default=str)
+    payload = json.dumps(
+        {"code": code, "inputs": inputs, "entrypoint": entrypoint}, default=str
+    )
     payload_b64 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
     if len(payload_b64) > 900_000:
         raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, "block payload too large for k8s job env")
@@ -240,13 +244,14 @@ async def execute_in_k8s_job(
     code: str,
     inputs: dict[str, Any],
     *,
+    entrypoint: str = "run",
     timeout: int | None = None,
 ) -> ExecutionOutput:
     """在 GKE 上通过一次性 Job 执行用户块代码。"""
     timeout = timeout or settings.execution_timeout
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(_run_job_sync, code, inputs, timeout),
+            asyncio.to_thread(_run_job_sync, code, inputs, timeout, entrypoint),
             timeout=timeout + 30,
         )
     except asyncio.TimeoutError as exc:

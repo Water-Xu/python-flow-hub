@@ -22,8 +22,12 @@ async def execute_block(
     inputs: dict[str, Any],
     login_id: str,
     flow_run_id: str | None = None,
+    entrypoint: str = "run",
 ) -> ExecutionRecord:
-    """执行单个块，落库历史，输出经 WS Hub 推送。"""
+    """执行单个块，落库历史，输出经 WS Hub 推送。
+
+    :param entrypoint: 调用脚本中的哪个入口函数（默认 ``run``，支持一脚本多函数）
+    """
     record = ExecutionRecord(
         block_id=block_id, login_id=login_id, flow_run_id=flow_run_id,
         status="running", inputs=inputs,
@@ -34,7 +38,7 @@ async def execute_block(
 
     start = time.perf_counter()
     try:
-        result = await run_block(code, inputs)
+        result = await run_block(code, inputs, entrypoint=entrypoint)
         await hub.publish_output(execution_id, result.stdout or "", "stdout")
         if result.stderr:
             await hub.publish_output(execution_id, result.stderr, "stderr")

@@ -6,6 +6,8 @@ import posixpath
 import zipfile
 from typing import Any
 
+from pyflow_runtime.executor import discover_entrypoints
+
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,6 +46,15 @@ _MAX_ZIP_BYTES = 10 * 1024 * 1024
 _MAX_SCRIPT_BLOCKS = 200
 
 router = APIRouter(prefix="/api/flows", tags=["flows"])
+
+
+def _discover_script_entrypoints(code: str) -> list[dict[str, Any]]:
+    """静态扫描脚本入口函数，回填导入块的 entrypoints（不执行用户代码）。"""
+    return [
+        {"name": ep["name"], "description": ep.get("docstring", ""),
+         "params": ep.get("params", [])}
+        for ep in discover_entrypoints(code or "")
+    ]
 
 
 async def _get_flow(session: AsyncSession, flow_id: str) -> Flow:
@@ -138,6 +149,7 @@ async def import_flow_zip(
             draft_code=code,
             input_ports=[{"name": "inputs", "type": "any", "required": False}],
             output_ports=[{"name": "output", "type": "any", "required": False}],
+            entrypoints=_discover_script_entrypoints(code),
             execution_mode="sync_http",
         ))
         session.add(FlowNode(
@@ -321,9 +333,11 @@ async def run_flow_endpoint(
         if not block_id:
             raise BusinessException(PYFLOW_EXEC_INPUT_INVALID, f"node {node.get('id')} missing block_id")
         block = block_cache[block_id]
+        entrypoint = (node.get("config") or {}).get("entrypoint") or "run"
         record = await execute_block(
             session, block_id=block.id, code=block.draft_code or "",
             inputs=inputs, login_id=login_id, flow_run_id=flow_run.id,
+            entrypoint=entrypoint,
         )
         if record.status != "success":
             detail = (record.stderr or "block execution failed").strip()[:500]

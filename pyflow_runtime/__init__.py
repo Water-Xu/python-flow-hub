@@ -12,12 +12,20 @@ __version__ = "0.1.0"
 RUNTIME_PROTOCOL_VERSION = "1"
 
 from pyflow_runtime.condition_engine import evaluate_condition  # noqa: E402
+from pyflow_runtime.executor import (  # noqa: E402
+    DEFAULT_ENTRYPOINT,
+    discover_entrypoints,
+    execute_user_code,
+)
 from pyflow_runtime.input_mapper import map_inputs  # noqa: E402
 from pyflow_runtime.reply_builder import build_reply, render_reply_routing_key  # noqa: E402
 
 __all__ = [
     "__version__",
     "RUNTIME_PROTOCOL_VERSION",
+    "DEFAULT_ENTRYPOINT",
+    "discover_entrypoints",
+    "execute_user_code",
     "evaluate_condition",
     "map_inputs",
     "build_reply",

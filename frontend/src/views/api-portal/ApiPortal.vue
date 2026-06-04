@@ -12,6 +12,18 @@ const selectedApi = ref<PublishedApi | null>(null)
 const docsData = ref<any>(null)
 const docsLoading = ref(false)
 
+// ── 接口测试 ──────────────────────────────────────────────────────────────
+const testDialogVisible = ref(false)
+const testApi = ref<PublishedApi | null>(null)
+const testBody = ref('{\n  "inputs": {}\n}')
+const testSending = ref(false)
+const testResult = ref<{
+  ok: boolean
+  httpStatus: number
+  latencyMs: number
+  data: any
+} | null>(null)
+
 const form = ref({
   name: '',
   description: '',
@@ -89,6 +101,62 @@ async function viewDocs(api: PublishedApi) {
     docsData.value = await apiPortalApi.getDocs(api.id)
   } finally {
     docsLoading.value = false
+  }
+}
+
+function openTest(api: PublishedApi, presetBody?: any) {
+  testApi.value = api
+  testResult.value = null
+  if (presetBody) {
+    testBody.value = JSON.stringify(presetBody, null, 2)
+  } else {
+    testBody.value = '{\n  "inputs": {}\n}'
+  }
+  testDialogVisible.value = true
+}
+
+function formatBody() {
+  try {
+    testBody.value = JSON.stringify(JSON.parse(testBody.value), null, 2)
+  } catch {
+    ElMessage.warning('JSON 格式有误，无法格式化')
+  }
+}
+
+async function sendTest() {
+  if (!testApi.value) return
+  if (testApi.value.status !== 'active') {
+    return ElMessage.warning(`接口当前为「${testApi.value.status}」状态，请先激活后再测试`)
+  }
+  let payload: any
+  try {
+    payload = testBody.value.trim() ? JSON.parse(testBody.value) : {}
+  } catch {
+    return ElMessage.error('请求体不是合法 JSON，请检查后重试')
+  }
+  testSending.value = true
+  testResult.value = null
+  const start = performance.now()
+  try {
+    const res = await apiPortalApi.invoke(testApi.value.path, payload)
+    const latency = performance.now() - start
+    testResult.value = {
+      ok: res.status >= 200 && res.status < 300,
+      httpStatus: res.status,
+      latencyMs: latency,
+      data: res.data,
+    }
+    // 测试也会计入调用统计，刷新卡片数据
+    load()
+  } catch (e: any) {
+    testResult.value = {
+      ok: false,
+      httpStatus: e?.response?.status ?? 0,
+      latencyMs: performance.now() - start,
+      data: e?.response?.data ?? { error: e?.message || '请求失败（网络错误或服务不可达）' },
+    }
+  } finally {
+    testSending.value = false
   }
 }
 
@@ -187,6 +255,9 @@ onMounted(load)
           <el-button size="small" @click="viewDocs(api)">
             <el-icon><Document /></el-icon> 文档
           </el-button>
+          <el-button size="small" type="primary" plain @click="openTest(api)">
+            <el-icon><Promotion /></el-icon> 测试
+          </el-button>
           <el-button
             size="small"
             :type="api.status === 'active' ? 'warning' : 'success'"
@@ -267,10 +338,14 @@ onMounted(load)
             <el-collapse accordion>
               <el-collapse-item
                 v-for="block in docsData.blocks"
-                :key="block.block_id"
+                :key="block.node_id || block.block_id"
                 :title="block.block_name"
               >
                 <p class="dim" style="margin:0 0 8px">{{ block.description || '暂无描述' }}</p>
+                <p style="margin:0 0 8px">
+                  <strong>入口函数：</strong>
+                  <code>{{ block.entrypoint || 'run' }}</code>
+                </p>
                 <div class="port-grid">
                   <div>
                     <strong>输入端口</strong>
@@ -308,6 +383,94 @@ onMounted(load)
           </div>
         </template>
       </div>
+      <template #footer v-if="docsData && selectedApi">
+        <el-button @click="docsDialogVisible = false">关闭</el-button>
+        <el-button
+          type="primary"
+          @click="docsDialogVisible = false; openTest(selectedApi, docsData.request_example)"
+        >
+          <el-icon style="margin-right:6px"><Promotion /></el-icon>在线测试
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 接口测试 Dialog -->
+    <el-dialog
+      v-model="testDialogVisible"
+      title="接口在线测试"
+      width="720px"
+      top="6vh"
+      class="test-dialog"
+    >
+      <template v-if="testApi">
+        <div class="test-target">
+          <el-tag type="success" effect="dark">POST</el-tag>
+          <code class="test-path">{{ testApi.invoke_path }}</code>
+          <el-tag
+            :type="statusType[testApi.status] || 'info'"
+            size="small"
+            effect="plain"
+          >{{ testApi.status }}</el-tag>
+        </div>
+
+        <div class="test-section">
+          <div class="test-section-head">
+            <h4>请求体（Mock 数据 · JSON）</h4>
+            <el-button text size="small" @click="formatBody">
+              <el-icon style="margin-right:4px"><MagicStick /></el-icon>格式化
+            </el-button>
+          </div>
+          <el-input
+            v-model="testBody"
+            type="textarea"
+            :rows="8"
+            spellcheck="false"
+            class="test-editor"
+            placeholder='{ "inputs": { "key": "value" } }'
+          />
+        </div>
+
+        <div class="test-actions">
+          <el-button
+            type="primary"
+            :loading="testSending"
+            @click="sendTest"
+          >
+            <el-icon v-if="!testSending" style="margin-right:6px"><Promotion /></el-icon>
+            {{ testSending ? '请求中…' : '发送测试请求' }}
+          </el-button>
+          <span class="dim" style="margin-left:12px">将真实调用接口，结果计入调用统计</span>
+        </div>
+
+        <transition name="resp-fade">
+          <div v-if="testResult" class="test-section resp-block">
+            <div class="resp-head">
+              <h4>响应结果</h4>
+              <div class="resp-meta">
+                <el-tag
+                  :type="testResult.ok ? 'success' : 'danger'"
+                  effect="dark"
+                  size="small"
+                >
+                  <el-icon style="margin-right:4px">
+                    <CircleCheck v-if="testResult.ok" />
+                    <CircleClose v-else />
+                  </el-icon>
+                  HTTP {{ testResult.httpStatus || '—' }}
+                </el-tag>
+                <el-tag type="info" size="small" effect="plain">
+                  <el-icon style="margin-right:4px"><Timer /></el-icon>
+                  {{ testResult.latencyMs.toFixed(0) }} ms
+                </el-tag>
+              </div>
+            </div>
+            <pre class="code-block resp-code">{{ JSON.stringify(testResult.data, null, 2) }}</pre>
+          </div>
+        </transition>
+      </template>
+      <template #footer>
+        <el-button @click="testDialogVisible = false">关闭</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -487,5 +650,82 @@ onMounted(load)
   font-size: 12px;
   overflow-x: auto;
   margin: 8px 0 16px;
+}
+
+/* ── 接口测试 ── */
+.test-target {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+  padding: 10px 14px;
+  background: var(--pf-panel-2);
+  border-radius: 8px;
+  animation: test-in 0.3s ease;
+}
+.test-path {
+  flex: 1;
+  background: var(--pf-accent-soft);
+  color: var(--pf-accent);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 13px;
+  word-break: break-all;
+}
+.test-section {
+  margin-bottom: 16px;
+}
+.test-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.test-section-head h4 {
+  margin: 0;
+}
+.test-editor :deep(.el-textarea__inner) {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.test-actions {
+  display: flex;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.resp-block {
+  margin-top: 18px;
+}
+.resp-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.resp-head h4 {
+  margin: 0;
+}
+.resp-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.resp-code {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+}
+@keyframes test-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+/* 响应区淡入上滑动画 */
+.resp-fade-enter-active {
+  transition: opacity 0.32s ease, transform 0.32s ease;
+}
+.resp-fade-enter-from {
+  opacity: 0;
+  transform: translateY(12px);
 }
 </style>

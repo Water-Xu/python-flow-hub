@@ -36,12 +36,16 @@ def service_url(name: str, namespace: str, port: int = 8000) -> str:
 
 
 async def invoke_block_service(
-    deployment_name_: str, namespace: str, inputs: dict[str, Any]
+    deployment_name_: str, namespace: str, inputs: dict[str, Any],
+    *, entrypoint: str = "run",
 ) -> dict[str, Any]:
-    """调用 Block K8s Service /invoke（决策 10 同步编排）。"""
+    """调用 Block K8s Service /invoke（决策 10 同步编排）。
+
+    :param entrypoint: 调用脚本中的哪个入口函数（默认 ``run``，支持一脚本多函数）
+    """
     url = service_url(deployment_name_, namespace)
     async with httpx.AsyncClient(timeout=INVOKE_TIMEOUT) as cli:
-        resp = await cli.post(url, json={"inputs": inputs})
+        resp = await cli.post(url, json={"inputs": inputs, "entrypoint": entrypoint})
         resp.raise_for_status()
         data = resp.json()
     output = data.get("output")
@@ -121,7 +125,10 @@ async def drive_flow_run(
             raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, f"block missing for node {node['id']}")
         spec = BlockDeploySpec(block_id=block.id, name=block.name, type=block.type,
                                execution_mode=block.execution_mode)
-        return await invoke_block_service(deployment_name(ctx, spec), namespace, node_inputs)
+        entrypoint = (node.get("config") or {}).get("entrypoint") or "run"
+        return await invoke_block_service(
+            deployment_name(ctx, spec), namespace, node_inputs, entrypoint=entrypoint
+        )
 
     async def checkpoint(node_id: str, status: str, output: dict) -> None:
         states = dict(run.node_states or {})

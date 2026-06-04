@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deploymentApi, flowApi } from '@/api'
+import { deploymentApi, flowApi, type BlockResource } from '@/api'
 
 const deployments = ref<any[]>([])
 const flows = ref<any[]>([])
@@ -20,6 +20,26 @@ const detailTab = ref('status')
 // 部署级环境变量编辑
 const envRows = ref<{ key: string; value: string }[]>([])
 const envSaving = ref(false)
+
+// 部署级 Pod 资源配置编辑（按 block 覆盖 CPU/内存/GPU）
+interface ResourceRow extends BlockResource {
+  cpu_request: string
+  memory_request: string
+  cpu_limit: string
+  memory_limit: string
+  gpu_enabled: boolean
+  gpu_count: number
+  gpu_type: string
+}
+const resourceRows = ref<ResourceRow[]>([])
+const resourceLoading = ref(false)
+const resourceSaving = ref(false)
+const gpuTypeOptions = ['nvidia-tesla-t4', 'nvidia-tesla-l4', 'nvidia-tesla-a100', 'nvidia-l4']
+
+// 实时容量预检
+const livePrecheck = ref<any>(null)
+const livePrecheckLoading = ref(false)
+let precheckTimer: number | undefined
 
 let timer: number | undefined
 
@@ -122,12 +142,151 @@ async function saveEnv() {
   }
 }
 
+async function loadResources() {
+  if (!detail.value) return
+  resourceLoading.value = true
+  try {
+    const rows = await deploymentApi.resources(detail.value.id)
+    resourceRows.value = rows.map((r) => ({
+      ...r,
+      cpu_request: r.effective.cpu_request,
+      memory_request: r.effective.memory_request,
+      cpu_limit: r.effective.cpu_limit,
+      memory_limit: r.effective.memory_limit,
+      gpu_enabled: r.effective.gpu_enabled,
+      gpu_count: r.effective.gpu_count,
+      gpu_type: r.effective.gpu_type,
+    }))
+    runLivePrecheck()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '加载资源配置失败')
+  } finally {
+    resourceLoading.value = false
+  }
+}
+
+function resetResourceRow(r: ResourceRow) {
+  r.cpu_request = r.default.cpu_request
+  r.memory_request = r.default.memory_request
+  r.cpu_limit = r.default.cpu_limit
+  r.memory_limit = r.default.memory_limit
+  r.gpu_enabled = r.default.gpu_enabled
+  r.gpu_count = r.default.gpu_count
+  r.gpu_type = r.default.gpu_type
+}
+
+// CPU：100m / 0.5 / 2；内存：256Mi / 1Gi / 512M
+const CPU_RE = /^\d+(\.\d+)?m?$/
+const MEM_RE = /^\d+(\.\d+)?(Ki|Mi|Gi|Ti|Pi|K|M|G|T|P)?$/
+
+/** 由当前编辑行构建 overrides 载荷；allValid 标记是否全部格式合法。 */
+function buildOverridesPayload(): { overrides: Record<string, any>; allValid: boolean } {
+  const overrides: Record<string, any> = {}
+  let allValid = true
+  for (const r of resourceRows.value) {
+    const cpuOk = CPU_RE.test(String(r.cpu_request).trim()) && CPU_RE.test(String(r.cpu_limit).trim())
+    const memOk = MEM_RE.test(String(r.memory_request).trim()) && MEM_RE.test(String(r.memory_limit).trim())
+    if (!cpuOk || !memOk) {
+      allValid = false
+      continue
+    }
+    const o: Record<string, any> = {
+      cpu_request: r.cpu_request.trim(),
+      memory_request: r.memory_request.trim(),
+      cpu_limit: r.cpu_limit.trim(),
+      memory_limit: r.memory_limit.trim(),
+      gpu_enabled: r.gpu_enabled,
+    }
+    if (r.gpu_enabled) {
+      o.gpu_count = r.gpu_count
+      o.gpu_type = r.gpu_type
+    }
+    overrides[r.block_id] = o
+  }
+  return { overrides, allValid }
+}
+
+async function runLivePrecheck() {
+  if (!detail.value || resourceRows.value.length === 0) {
+    livePrecheck.value = null
+    return
+  }
+  const { overrides, allValid } = buildOverridesPayload()
+  if (!allValid) {
+    livePrecheck.value = { ok: false, format: true }
+    return
+  }
+  livePrecheckLoading.value = true
+  try {
+    livePrecheck.value = await deploymentApi.precheckResources(detail.value.id, overrides)
+  } catch {
+    livePrecheck.value = null
+  } finally {
+    livePrecheckLoading.value = false
+  }
+}
+
+// 编辑资源后防抖触发实时预检（600ms）
+watch(
+  resourceRows,
+  () => {
+    if (detailTab.value !== 'resources') return
+    window.clearTimeout(precheckTimer)
+    precheckTimer = window.setTimeout(runLivePrecheck, 600)
+  },
+  { deep: true },
+)
+
+function mib(v: number) {
+  return v >= 1024 ? `${(v / 1024).toFixed(2)} Gi` : `${v} Mi`
+}
+function cores(m: number) {
+  return `${(m / 1000).toFixed(2)} 核`
+}
+
+async function saveResources() {
+  if (!detail.value) return
+  const overrides: Record<string, any> = {}
+  for (const r of resourceRows.value) {
+    if (![r.cpu_request, r.cpu_limit].every((v) => CPU_RE.test(String(v).trim()))) {
+      return ElMessage.error(`「${r.name}」CPU 格式非法（如 100m / 0.5 / 2）`)
+    }
+    if (![r.memory_request, r.memory_limit].every((v) => MEM_RE.test(String(v).trim()))) {
+      return ElMessage.error(`「${r.name}」内存格式非法（如 256Mi / 1Gi）`)
+    }
+    const o: Record<string, any> = {
+      cpu_request: r.cpu_request.trim(),
+      memory_request: r.memory_request.trim(),
+      cpu_limit: r.cpu_limit.trim(),
+      memory_limit: r.memory_limit.trim(),
+      gpu_enabled: r.gpu_enabled,
+    }
+    if (r.gpu_enabled) {
+      o.gpu_count = r.gpu_count
+      o.gpu_type = r.gpu_type
+    }
+    overrides[r.block_id] = o
+  }
+  resourceSaving.value = true
+  try {
+    const res = await deploymentApi.updateResources(detail.value.id, overrides)
+    detail.value.resource_overrides = res.resource_overrides
+    ElMessage.success('Pod 资源配置已保存（下次部署生效）')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '保存失败')
+  } finally {
+    resourceSaving.value = false
+  }
+}
+
 async function openDetail(row: any) {
   detail.value = row
   drawer.value = true
   detailTab.value = 'status'
   precheck.value = null
   manifests.value = []
+  resourceRows.value = []
+  livePrecheck.value = null
   loadEnvRows(row)
   if (row.environment === 'k8s') {
     try {
@@ -228,7 +387,7 @@ onBeforeUnmount(() => timer && clearInterval(timer))
     </el-dialog>
 
     <el-drawer v-model="drawer" :title="detail?.name" size="58%">
-      <el-tabs v-model="detailTab">
+      <el-tabs v-model="detailTab" @tab-change="(n: any) => n === 'resources' && resourceRows.length === 0 && loadResources()">
         <el-tab-pane label="Block 状态" name="status">
           <el-table :data="detail?.block_statuses || []" size="small">
             <el-table-column prop="name" label="块" show-overflow-tooltip />
@@ -269,6 +428,110 @@ onBeforeUnmount(() => timer && clearInterval(timer))
           <div class="env-actions">
             <el-button size="small" @click="addEnvRow"><el-icon><Plus /></el-icon> 添加</el-button>
             <el-button size="small" type="primary" :loading="envSaving" @click="saveEnv">保存</el-button>
+          </div>
+        </el-tab-pane>
+        <el-tab-pane label="资源配置" name="resources">
+          <div class="res-head">
+            <p class="dim res-tip">
+              按 Block（每个 Block 对应一个 Pod/Deployment）配置 CPU / 内存请求与上限，覆盖块默认值，仅作用于本部署，下次部署生效。
+            </p>
+            <el-button size="small" :loading="resourceLoading" @click="loadResources">
+              <el-icon><Refresh /></el-icon> 刷新
+            </el-button>
+          </div>
+
+          <!-- 实时容量预检横幅 -->
+          <transition name="banner-fade">
+            <div v-if="livePrecheck" class="cap-banner" v-loading="livePrecheckLoading">
+              <el-alert
+                v-if="livePrecheck.format"
+                title="资源格式不合法，请检查 CPU（如 100m / 0.5 / 2）与内存（如 256Mi / 1Gi）后再核算容量"
+                type="warning"
+                :closable="false"
+                show-icon
+              />
+              <template v-else>
+                <el-alert
+                  :title="livePrecheck.ok ? '容量充足：常驻副本请求量未超出 pyflow-workers 节点池余量' : '容量不足：常驻副本请求量已超出节点池可分配容量'"
+                  :type="livePrecheck.ok ? 'success' : 'error'"
+                  :closable="false"
+                  show-icon
+                />
+                <div v-if="livePrecheck.capacity" class="cap-bars">
+                  <div class="cap-metric">
+                    <div class="cap-metric-head">
+                      <span>CPU 请求</span>
+                      <span class="dim">{{ cores(livePrecheck.capacity.requested_cpu_m) }} / {{ cores(livePrecheck.capacity.pool_cpu_m) }}</span>
+                    </div>
+                    <el-progress
+                      :percentage="Math.min(100, Math.round((livePrecheck.capacity.requested_cpu_m / livePrecheck.capacity.pool_cpu_m) * 100))"
+                      :status="livePrecheck.capacity.requested_cpu_m > livePrecheck.capacity.pool_cpu_m ? 'exception' : 'success'"
+                      :stroke-width="10"
+                    />
+                  </div>
+                  <div class="cap-metric">
+                    <div class="cap-metric-head">
+                      <span>内存 请求</span>
+                      <span class="dim">{{ mib(livePrecheck.capacity.requested_mem_mib) }} / {{ mib(livePrecheck.capacity.pool_mem_mib) }}</span>
+                    </div>
+                    <el-progress
+                      :percentage="Math.min(100, Math.round((livePrecheck.capacity.requested_mem_mib / livePrecheck.capacity.pool_mem_mib) * 100))"
+                      :status="livePrecheck.capacity.requested_mem_mib > livePrecheck.capacity.pool_mem_mib ? 'exception' : 'success'"
+                      :stroke-width="10"
+                    />
+                  </div>
+                </div>
+                <ul v-if="!livePrecheck.ok && livePrecheck.issues?.length" class="cap-issues">
+                  <li v-for="(i, idx) in livePrecheck.issues" :key="idx">[{{ i.kind }}] {{ i.reason }}</li>
+                </ul>
+              </template>
+            </div>
+          </transition>
+
+          <transition-group name="res-list" tag="div" v-loading="resourceLoading">
+            <div v-for="r in resourceRows" :key="r.block_id" class="res-card">
+              <div class="res-card-head">
+                <span class="res-name">{{ r.name }}</span>
+                <el-tag size="small" effect="plain">{{ r.execution_mode }}</el-tag>
+                <el-button class="res-reset" link size="small" @click="resetResourceRow(r)">
+                  <el-icon><RefreshLeft /></el-icon> 恢复默认
+                </el-button>
+              </div>
+              <div class="res-grid">
+                <div class="res-field">
+                  <label>CPU 请求</label>
+                  <el-input v-model="r.cpu_request" size="small" placeholder="100m" />
+                </div>
+                <div class="res-field">
+                  <label>CPU 上限</label>
+                  <el-input v-model="r.cpu_limit" size="small" placeholder="1000m" />
+                </div>
+                <div class="res-field">
+                  <label>内存 请求</label>
+                  <el-input v-model="r.memory_request" size="small" placeholder="256Mi" />
+                </div>
+                <div class="res-field">
+                  <label>内存 上限</label>
+                  <el-input v-model="r.memory_limit" size="small" placeholder="1Gi" />
+                </div>
+              </div>
+              <div class="res-gpu">
+                <el-switch v-model="r.gpu_enabled" size="small" />
+                <span class="res-gpu-label">GPU</span>
+                <template v-if="r.gpu_enabled">
+                  <el-input-number v-model="r.gpu_count" :min="1" :max="8" size="small" controls-position="right" style="width: 110px" />
+                  <el-select v-model="r.gpu_type" size="small" style="width: 180px" placeholder="GPU 类型">
+                    <el-option v-for="t in gpuTypeOptions" :key="t" :label="t" :value="t" />
+                  </el-select>
+                </template>
+              </div>
+            </div>
+          </transition-group>
+          <el-empty v-if="!resourceLoading && resourceRows.length === 0" description="该流程暂无可部署的 Block" :image-size="80" />
+          <div v-if="resourceRows.length" class="res-actions">
+            <el-button type="primary" :loading="resourceSaving" @click="saveResources">
+              <el-icon style="margin-right:4px"><Check /></el-icon> 保存资源配置
+            </el-button>
           </div>
         </el-tab-pane>
         <el-tab-pane label="Manifest 预览" name="manifests">
@@ -317,6 +580,86 @@ onBeforeUnmount(() => timer && clearInterval(timer))
 .env-tip { margin: 0 0 12px; line-height: 1.6; }
 .env-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .env-actions { display: flex; gap: 8px; margin-top: 6px; }
+
+/* ── Pod 资源配置 ── */
+.res-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.res-tip { margin: 0; line-height: 1.6; flex: 1; }
+.res-card {
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  background: var(--pf-panel, #fff);
+  transition: box-shadow 0.22s ease, border-color 0.22s ease, transform 0.22s ease;
+}
+.res-card:hover {
+  border-color: var(--pf-accent, #409eff);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  transform: translateY(-2px);
+}
+.res-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.res-name { font-weight: 600; font-size: 14px; }
+.res-reset { margin-left: auto; }
+.res-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+.res-field { display: flex; flex-direction: column; gap: 4px; }
+.res-field label { font-size: 12px; color: var(--pf-text-dim, #909399); }
+.res-gpu {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.res-gpu-label { font-size: 13px; color: var(--pf-text-dim, #909399); }
+.res-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+/* 实时容量预检横幅 */
+.cap-banner { margin-bottom: 14px; }
+.cap-bars {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 10px;
+}
+.cap-metric-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.cap-issues {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--el-color-danger, #f56c6c);
+}
+.cap-issues li { margin: 2px 0; }
+.banner-fade-enter-active { transition: opacity 0.3s ease, transform 0.3s ease; }
+.banner-fade-enter-from { opacity: 0; transform: translateY(-8px); }
+@media (max-width: 640px) {
+  .cap-bars { grid-template-columns: 1fr; }
+}
+/* 资源卡片入场动画 */
+.res-list-enter-active { transition: all 0.3s ease; }
+.res-list-enter-from { opacity: 0; transform: translateY(10px); }
+.res-list-move { transition: transform 0.3s ease; }
+@media (max-width: 640px) {
+  .res-grid { grid-template-columns: repeat(2, 1fr); }
+}
 .cap,
 .manifest pre {
   background: var(--pf-bg-soft, #f5f7fa);

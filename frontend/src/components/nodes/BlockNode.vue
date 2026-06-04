@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { Handle, Position, useVueFlow } from '@vue-flow/core'
 
-const props = defineProps<{ id: string; data: { label: string; mode?: string }; selected?: boolean }>()
+const props = defineProps<{
+  id: string
+  data: { label: string; mode?: string; entrypoint?: string }
+  selected?: boolean
+}>()
 const { removeNodes } = useVueFlow()
 </script>
 
@@ -11,7 +15,14 @@ const { removeNodes } = useVueFlow()
     <div class="node-icon">⬢</div>
     <div class="node-body">
       <div class="node-label">{{ data.label }}</div>
-      <div class="node-mode">{{ data.mode || 'sync_http' }}</div>
+      <div class="node-meta">
+        <span class="node-mode">{{ data.mode || 'sync_http' }}</span>
+        <transition name="fn-pop">
+          <span v-if="data.entrypoint && data.entrypoint !== 'run'" class="node-fn">
+            ƒ {{ data.entrypoint }}
+          </span>
+        </transition>
+      </div>
     </div>
     <Handle type="source" :position="Position.Right" />
     <button class="delete-btn nodrag" title="删除节点" @click.stop="removeNodes([props.id])">×</button>
@@ -50,9 +61,33 @@ const { removeNodes } = useVueFlow()
 .node-label {
   font-weight: 600;
 }
+.node-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
 .node-mode {
   font-size: 11px;
   color: var(--pf-text-dim);
+}
+.node-fn {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pf-accent);
+  background: rgba(37, 99, 235, 0.1);
+  border-radius: 6px;
+  padding: 1px 6px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.fn-pop-enter-active,
+.fn-pop-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.fn-pop-enter-from,
+.fn-pop-leave-to {
+  opacity: 0;
+  transform: scale(0.7);
 }
 
 .delete-btn {

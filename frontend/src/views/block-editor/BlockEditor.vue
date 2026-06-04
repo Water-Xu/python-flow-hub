@@ -23,6 +23,11 @@ const term = ref<InstanceType<typeof ExecutionTerminal>>()
 const activeTab = ref('code')
 const versionDrawer = ref(false)
 
+// 入口函数（一脚本多函数）：测试运行时选择调用哪个函数
+const runEntrypoint = ref('run')
+const discovering = ref(false)
+const entrypoints = computed(() => block.value?.entrypoints || [])
+
 // MQ 配置
 const mqForm = ref({
   enabled: false,
@@ -84,10 +89,23 @@ async function loadConsumerStatus() {
 async function save() {
   saving.value = true
   try {
-    await blockApi.update(blockId, { draft_code: code.value })
+    block.value = await blockApi.update(blockId, { draft_code: code.value })
     ElMessage.success('已保存草稿')
   } finally {
     saving.value = false
+  }
+}
+
+async function discoverFns() {
+  discovering.value = true
+  try {
+    // 先存代码，再静态扫描入口函数
+    await blockApi.update(blockId, { draft_code: code.value })
+    const res = await blockApi.discoverEntrypoints(blockId)
+    if (block.value) block.value.entrypoints = res.entrypoints || []
+    ElMessage.success(`识别到 ${res.entrypoints?.length || 0} 个入口函数`)
+  } finally {
+    discovering.value = false
   }
 }
 
@@ -174,7 +192,8 @@ async function run() {
   result.value = null
   term.value?.clear()
   try {
-    await blockApi.update(blockId, { draft_code: code.value })
+    const updated = await blockApi.update(blockId, { draft_code: code.value })
+    if (block.value) block.value.entrypoints = updated.entrypoints || []
     let inputs = {}
     try {
       inputs = JSON.parse(inputsText.value)
@@ -183,7 +202,7 @@ async function run() {
       running.value = false
       return
     }
-    const res: any = await blockApi.run(blockId, inputs)
+    const res: any = await blockApi.run(blockId, inputs, runEntrypoint.value || 'run')
     lastExecId.value = res.execution_id
     result.value = res
     term.value?.writeLine(res.stdout || '', '')
@@ -267,12 +286,48 @@ onMounted(load)
       <el-tab-pane label="代码编辑" name="code">
         <div class="editor-grid">
           <div class="editor-pane pf-card">
-            <div class="pane-title">代码（须定义 <code>def run(inputs)</code>）</div>
+            <div class="pane-title">
+              代码（至少定义一个 <code>def run(inputs)</code>；可定义多个入口函数）
+            </div>
             <CodeEditor v-model="code" language="python" class="editor-body" />
           </div>
           <div class="side-pane">
+            <div class="pf-card entry-card">
+              <div class="pane-head">
+                <span class="pane-title" style="margin:0">入口函数</span>
+                <el-button size="small" text :loading="discovering" :icon="'Refresh'" @click="discoverFns">
+                  重新扫描
+                </el-button>
+              </div>
+              <transition-group name="fn-list" tag="div" class="fn-list">
+                <el-tag
+                  v-for="fn in entrypoints"
+                  :key="fn.name"
+                  class="fn-tag"
+                  :type="fn.name === runEntrypoint ? 'primary' : 'info'"
+                  :effect="fn.name === runEntrypoint ? 'dark' : 'plain'"
+                  @click="runEntrypoint = fn.name"
+                >
+                  ƒ {{ fn.name }}<span v-if="fn.params?.length" class="fn-tag-params">({{ fn.params.join(', ') }})</span>
+                </el-tag>
+              </transition-group>
+              <p v-if="!entrypoints.length" class="dim" style="margin:6px 0 0">
+                保存或扫描后显示脚本暴露的入口函数；多函数时可在流程编排中为每个节点选择不同函数。
+              </p>
+            </div>
             <div class="pf-card input-card">
-              <div class="pane-title">输入 JSON</div>
+              <div class="pane-head">
+                <span class="pane-title" style="margin:0">输入 JSON</span>
+                <el-select v-model="runEntrypoint" size="small" class="run-fn-select" placeholder="run">
+                  <el-option
+                    v-for="fn in entrypoints"
+                    :key="fn.name"
+                    :value="fn.name"
+                    :label="`ƒ ${fn.name}`"
+                  />
+                  <el-option v-if="!entrypoints.length" value="run" label="ƒ run" />
+                </el-select>
+              </div>
               <el-input v-model="inputsText" type="textarea" :rows="5" class="mono" />
             </div>
             <div class="pf-card term-card" :class="{ 'pf-running': running }">
@@ -538,4 +593,24 @@ onMounted(load)
 .err-list li { line-height: 1.6; }
 .fade-enter-active, .fade-leave-active { transition: opacity 0.25s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* 入口函数 */
+.entry-card { padding: 12px; }
+.pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.fn-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.fn-tag {
+  cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.fn-tag:hover { transform: translateY(-2px); box-shadow: var(--pf-shadow-sm); }
+.fn-tag-params { opacity: 0.7; margin-left: 2px; }
+.run-fn-select { width: 130px; }
+.fn-list-enter-active, .fn-list-leave-active { transition: all 0.25s ease; }
+.fn-list-enter-from, .fn-list-leave-to { opacity: 0; transform: scale(0.8); }
 </style>

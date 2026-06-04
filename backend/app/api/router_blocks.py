@@ -16,6 +16,8 @@ from app.errors import (
     PYFLOW_EXEC_INPUT_INVALID,
     BusinessException,
 )
+from pyflow_runtime.executor import discover_entrypoints
+
 from app.models.api_portal import PublishedApi
 from app.models.block import Block
 from app.models.flow import FlowNode
@@ -27,6 +29,28 @@ from app.schemas.block import (
 )
 
 router = APIRouter(prefix="/api/blocks", tags=["blocks"])
+
+
+def _compute_entrypoints(code: str, existing: list | None = None) -> list[dict]:
+    """由脚本源码静态扫描入口函数，保留既有的人工描述。
+
+    :param code: Block 脚本源码
+    :param existing: 已存储的 entrypoints（用于沿用其 description）
+    :return: [{name, description, params}]
+    """
+    prior_desc = {
+        e.get("name"): e.get("description", "")
+        for e in (existing or [])
+        if isinstance(e, dict)
+    }
+    result: list[dict] = []
+    for ep in discover_entrypoints(code or ""):
+        result.append({
+            "name": ep["name"],
+            "description": prior_desc.get(ep["name"]) or ep.get("docstring", ""),
+            "params": ep.get("params", []),
+        })
+    return result
 
 # 疑似密钥正则（决策 15：env_vars 仅允许非敏感值）
 import re
@@ -96,6 +120,7 @@ async def save_block(
         draft_code=req.draft_code,
         input_ports=[p.model_dump() for p in req.input_ports],
         output_ports=[p.model_dump() for p in req.output_ports],
+        entrypoints=_compute_entrypoints(req.draft_code),
         env_vars=req.env_vars,
         execution_mode=req.execution_mode,
         mq_config=req.mq_config,
@@ -139,6 +164,9 @@ async def update_block(
         if key == "compute_config" and value is not None and hasattr(value, "model_dump"):
             value = value.model_dump()
         setattr(block, key, value)
+    # 代码变更时重扫入口函数，沿用既有人工描述
+    if "draft_code" in data and data["draft_code"] is not None:
+        block.entrypoints = _compute_entrypoints(data["draft_code"], block.entrypoints)
     await session.commit()
     await session.refresh(block)
     return block
@@ -175,6 +203,7 @@ async def copy_block(
         draft_notebook=src.draft_notebook,
         input_ports=list(src.input_ports),
         output_ports=list(src.output_ports),
+        entrypoints=list(src.entrypoints or []),
         env_vars=dict(src.env_vars),
         execution_mode=src.execution_mode,
         mq_config=dict(src.mq_config) if src.mq_config else {},
@@ -184,6 +213,23 @@ async def copy_block(
     await session.commit()
     await session.refresh(copy)
     return copy
+
+
+@router.post("/{block_id}/discover-entrypoints")
+async def discover_block_entrypoints(
+    block_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.EDITOR)),
+):
+    """静态扫描块脚本暴露的入口函数清单（供前端节点选择调用哪个函数）。
+
+    扫描已保存的 draft_code（不执行用户代码）；同时把结果回填到 Block.entrypoints。
+    """
+    block = await _get_block(session, block_id)
+    entrypoints = _compute_entrypoints(block.draft_code or "", block.entrypoints)
+    block.entrypoints = entrypoints
+    await session.commit()
+    return {"block_id": block_id, "entrypoints": entrypoints}
 
 
 @router.post("/{block_id}/run")
@@ -198,6 +244,7 @@ async def run_block_endpoint(
     record = await execute_block(
         session, block_id=block.id, code=block.draft_code,
         inputs=req.inputs, login_id=login_id,
+        entrypoint=req.entrypoint or "run",
     )
     return {
         "execution_id": record.id,

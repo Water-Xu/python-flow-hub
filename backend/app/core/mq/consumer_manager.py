@@ -237,13 +237,16 @@ class ConsumerManager:
 
         reply_publisher = self._make_reply_publisher(channel, block_id)
 
+        # 每条消息可指定 entrypoint（一脚本多函数），未指定默认 run
+        msg_entrypoint = body.get("entrypoint", "run") if isinstance(body, dict) else "run"
+
         if store:
             action = await consume_with_idempotency(
                 message_body=body,
                 headers=headers,
                 block=block_cfg,
                 store=store,
-                execute_fn=lambda inputs: self._exec_block(block_code, inputs),
+                execute_fn=lambda inputs: self._exec_block(block_code, inputs, msg_entrypoint),
                 message_id=message.message_id,
                 reply_publisher=reply_publisher,
             )
@@ -286,7 +289,8 @@ class ConsumerManager:
                 return "ack"
         try:
             inputs = map_inputs(body, mq_cfg.get("input_mapping"))
-            result = await self._exec_block(block_code, inputs)
+            entrypoint = body.get("entrypoint", "run") if isinstance(body, dict) else "run"
+            result = await self._exec_block(block_code, inputs, entrypoint)
             if mq_cfg.get("reply_enabled") and reply_publisher is not None:
                 bid = extract_business_id(body, message_id)
                 reply = build_reply(result, body, mq_cfg.get("carry_fields"), dedup_business_id=bid)
@@ -303,11 +307,11 @@ class ConsumerManager:
 
         return _publish
 
-    async def _exec_block(self, code: str, inputs: dict) -> dict:
+    async def _exec_block(self, code: str, inputs: dict, entrypoint: str = "run") -> dict:
         """通过 docker_executor 执行代码（dev-local Docker 沙箱，可降级 in-process）。"""
         from app.core.sandbox.docker_executor import run_block
 
-        result = await run_block(code, inputs)
+        result = await run_block(code, inputs, entrypoint=entrypoint)
         if result.error:
             raise RuntimeError(result.error)
         output = result.output

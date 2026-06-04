@@ -14,6 +14,14 @@ class Port(BaseModel):
     required: bool = False
 
 
+class EntrypointInfo(BaseModel):
+    """脚本入口函数元信息（由 AST 扫描得出，可由用户补充描述）。"""
+
+    name: str
+    description: str = ""
+    params: list[str] = []
+
+
 class BlockComputeConfig(BaseModel):
     cpu_request: str = "100m"
     memory_request: str = "256Mi"
@@ -61,6 +69,7 @@ class BlockResponse(BaseModel):
     draft_code: str
     input_ports: list[Any]
     output_ports: list[Any]
+    entrypoints: list[Any] = []
     execution_mode: str
     mq_config: dict[str, Any]
     compute_config: dict[str, Any]
@@ -72,3 +81,5 @@ class BlockResponse(BaseModel):
 
 class BlockRunRequest(BaseModel):
     inputs: dict[str, Any] = {}
+    # 调用脚本中的哪个入口函数（默认 run，支持一脚本多函数）
+    entrypoint: str | None = None

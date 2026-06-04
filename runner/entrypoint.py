@@ -47,9 +47,10 @@ async def make_execute_fn(code: str):
     """执行函数：返回用户 output dict，失败抛异常（由 pyflow_runtime 捕获写 FAILED）。
 
     与控制面 dev-local docker_executor 的契约一致，杜绝两侧结果形态分叉。
+    支持一脚本多入口函数：每条消息可携带 entrypoint，未指定时默认 run。
     """
-    async def _execute(inputs: dict) -> dict:
-        result = await asyncio.to_thread(execute_user_code, code, inputs)
+    async def _execute(inputs: dict, entrypoint: str = "run") -> dict:
+        result = await asyncio.to_thread(execute_user_code, code, inputs, entrypoint or "run")
         if result.get("error"):
             raise BlockExecutionError(result["error"])
         output = result.get("output")
@@ -142,9 +143,15 @@ async def run_consumer() -> None:
         except json.JSONDecodeError:
             body = {}
 
+        # 每条消息可指定 entrypoint（一脚本多函数），绑定到本次执行
+        msg_entrypoint = body.get("entrypoint", "run") if isinstance(body, dict) else "run"
+
+        async def _bound_execute(inputs: dict) -> dict:
+            return await execute_fn(inputs, msg_entrypoint)
+
         try:
             action = await consume_with_idempotency(
-                body, headers, block_meta, store, execute_fn,
+                body, headers, block_meta, store, _bound_execute,
                 message_id=message.message_id, reply_publisher=reply_publisher,
             )
         except Exception as exc:  # noqa: BLE001 - 兜底重投，绝不让 Pod 因单条消息崩
@@ -196,7 +203,10 @@ def run_invoke_server() -> None:
 
     @app.post("/invoke")
     async def invoke(payload: dict):
-        result = await asyncio.to_thread(execute_user_code, code, payload.get("inputs", {}))
+        result = await asyncio.to_thread(
+            execute_user_code, code, payload.get("inputs", {}),
+            payload.get("entrypoint", "run"),
+        )
         return result
 
     uvicorn.run(app, host="0.0.0.0", port=8000)

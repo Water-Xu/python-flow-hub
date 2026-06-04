@@ -42,6 +42,12 @@ function ensureArray<T>(value: any): T[] {
   return Array.isArray(value) ? value : []
 }
 
+export interface Entrypoint {
+  name: string
+  description?: string
+  params?: string[]
+}
+
 export interface Block {
   id: string
   name: string
@@ -51,6 +57,7 @@ export interface Block {
   execution_mode: string
   input_ports: any[]
   output_ports: any[]
+  entrypoints: Entrypoint[]
   compute_config: Record<string, any>
   mq_config: Record<string, any>
 }
@@ -61,8 +68,13 @@ export const blockApi = {
   create: (data: Partial<Block>) => client.post<any, Block>('/api/blocks', data),
   update: (id: string, data: Partial<Block>) => client.put<any, Block>(`/api/blocks/${id}`, data),
   remove: (id: string) => client.delete(`/api/blocks/${id}`),
-  run: (id: string, inputs: Record<string, any>) =>
-    client.post(`/api/blocks/${id}/run`, { inputs }),
+  run: (id: string, inputs: Record<string, any>, entrypoint?: string) =>
+    client.post(`/api/blocks/${id}/run`, { inputs, entrypoint }),
+  /** 静态扫描脚本暴露的入口函数清单（供节点选择调用哪个函数） */
+  discoverEntrypoints: (id: string) =>
+    client.post<any, { block_id: string; entrypoints: Entrypoint[] }>(
+      `/api/blocks/${id}/discover-entrypoints`,
+    ),
 }
 
 export const flowApi = {
@@ -112,6 +124,33 @@ export const deploymentApi = {
   /** 配置部署级环境变量（注入该部署全部块，下次部署生效，DEPLOYER） */
   updateEnv: (id: string, data: { env_vars: Record<string, string>; secret_refs?: Record<string, string> }) =>
     client.put<any, any>(`/api/deployments/${id}/env`, data),
+  /** 列出该部署各 Block 的 Pod 资源（块默认值 / 部署级覆盖 / 生效值） */
+  resources: (id: string) => client.get<any, BlockResource[]>(`/api/deployments/${id}/resources`).then(ensureArray<BlockResource>),
+  /** 配置部署级 Pod 资源覆盖（按 block_id 覆盖 CPU/内存/GPU，下次部署生效，DEPLOYER） */
+  updateResources: (id: string, resource_overrides: Record<string, BlockResourceSpec>) =>
+    client.put<any, any>(`/api/deployments/${id}/resources`, { resource_overrides }),
+  /** 对未保存的资源覆盖做实时容量/GPU 预检（编辑时即时反馈，不落库） */
+  precheckResources: (id: string, resource_overrides: Record<string, BlockResourceSpec>) =>
+    client.post<any, any>(`/api/deployments/${id}/resources/precheck`, { resource_overrides }),
+}
+
+export interface BlockResourceSpec {
+  cpu_request?: string
+  memory_request?: string
+  cpu_limit?: string
+  memory_limit?: string
+  gpu_enabled?: boolean
+  gpu_count?: number
+  gpu_type?: string
+}
+
+export interface BlockResource {
+  block_id: string
+  name: string
+  execution_mode: string
+  default: Required<BlockResourceSpec>
+  override: BlockResourceSpec
+  effective: Required<BlockResourceSpec>
 }
 
 /** 平台级全局环境变量 + 中间件接入信息 */
@@ -204,6 +243,15 @@ export const apiPortalApi = {
   activate: (id: string) => client.post(`/api/portal/apis/${id}/activate`),
   getDocs: (id: string) => client.get<any, any>(`/api/portal/apis/${id}/docs`),
   copyFlow: (flowId: string) => client.post<any, any>(`/api/flows/${flowId}/copy`),
+  /**
+   * 在线测试：直接调用公开入口 POST /api/public/{path}，返回完整 AxiosResponse，
+   * 供测试面板读取 HTTP 状态码与原始响应（不走全局错误拦截，错误由调用方捕获）。
+   */
+  invoke: (path: string, payload: any) =>
+    rawClient.post(`/api/public/${path}`, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      validateStatus: () => true,
+    }),
 }
 
 export const mqApi = {

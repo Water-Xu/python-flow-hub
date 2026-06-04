@@ -70,6 +70,40 @@ def merge_env_into_specs(
         spec.secret_refs = {**(deployment_secret_refs or {}), **(spec.secret_refs or {})}
 
 
+# 允许部署级覆盖的 compute_config 资源键（其余键不受部署级覆盖影响）
+RESOURCE_OVERRIDE_KEYS = (
+    "cpu_request",
+    "memory_request",
+    "cpu_limit",
+    "memory_limit",
+    "gpu_enabled",
+    "gpu_count",
+    "gpu_type",
+    "cuda_version",
+)
+
+
+def merge_resource_overrides_into_specs(
+    specs: list[BlockDeploySpec], resource_overrides: dict[str, dict] | None
+) -> None:
+    """将部署级 Pod 资源覆盖合并进各 Block 的 compute_config（仅作用于该部署）。
+
+    覆盖优先级：块默认 compute_config < 部署级 resource_overrides[block_id]；
+    仅合并 RESOURCE_OVERRIDE_KEYS 中的非空键，避免误清空块自带配置。
+    """
+    if not resource_overrides:
+        return
+    for spec in specs:
+        override = resource_overrides.get(spec.block_id)
+        if not override:
+            continue
+        merged = dict(spec.compute_config or {})
+        for key in RESOURCE_OVERRIDE_KEYS:
+            if key in override and override[key] not in (None, ""):
+                merged[key] = override[key]
+        spec.compute_config = merged
+
+
 async def build_specs(session: AsyncSession, flow_id: str) -> list[BlockDeploySpec]:
     """从 Flow 节点 + Block + 稳定版本派生部署描述。"""
     nodes = (await session.execute(
@@ -111,7 +145,7 @@ async def build_specs(session: AsyncSession, flow_id: str) -> list[BlockDeploySp
 async def build_deployment_specs(
     session: AsyncSession, deployment: FlowDeployment
 ) -> list[BlockDeploySpec]:
-    """构建部署描述并合并 全局/部署级 环境变量（统一入口）。"""
+    """构建部署描述并合并 全局/部署级 环境变量 + Pod 资源覆盖（统一入口）。"""
     specs = await build_specs(session, deployment.flow_id)
     global_env = await load_global_env(session)
     merge_env_into_specs(
@@ -120,7 +154,45 @@ async def build_deployment_specs(
         deployment_env=deployment.env_vars or {},
         deployment_secret_refs=deployment.secret_refs or {},
     )
+    merge_resource_overrides_into_specs(specs, deployment.resource_overrides or {})
     return specs
+
+
+def effective_resources(compute_config: dict[str, Any]) -> dict[str, Any]:
+    """返回 compute_config 生效后的资源规格（含默认值），供前端展示当前 Pod 配置。"""
+    return {
+        "cpu_request": compute_config.get("cpu_request", "100m"),
+        "memory_request": compute_config.get("memory_request", "256Mi"),
+        "cpu_limit": compute_config.get("cpu_limit", "1000m"),
+        "memory_limit": compute_config.get("memory_limit", "1Gi"),
+        "gpu_enabled": bool(compute_config.get("gpu_enabled", False)),
+        "gpu_count": int(compute_config.get("gpu_count", 1)),
+        "gpu_type": compute_config.get("gpu_type", "nvidia-tesla-t4"),
+    }
+
+
+async def list_block_resources(
+    session: AsyncSession, deployment: FlowDeployment
+) -> list[dict[str, Any]]:
+    """列出该部署各 Block 的 Pod 资源信息：块默认值 + 部署级覆盖 + 生效值。"""
+    specs = await build_specs(session, deployment.flow_id)
+    overrides = deployment.resource_overrides or {}
+    rows: list[dict[str, Any]] = []
+    for spec in specs:
+        override = overrides.get(spec.block_id) or {}
+        merged = dict(spec.compute_config or {})
+        for key in RESOURCE_OVERRIDE_KEYS:
+            if key in override and override[key] not in (None, ""):
+                merged[key] = override[key]
+        rows.append({
+            "block_id": spec.block_id,
+            "name": spec.name,
+            "execution_mode": spec.execution_mode,
+            "default": effective_resources(spec.compute_config or {}),
+            "override": override,
+            "effective": effective_resources(merged),
+        })
+    return rows
 
 
 async def _resolve_images(specs: list[BlockDeploySpec]) -> None:

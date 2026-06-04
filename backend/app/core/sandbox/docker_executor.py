@@ -23,12 +23,12 @@ logger = get_logger()
 
 _RESULT_MARKER = "__PYFLOW_RESULT__"
 
-# 容器内运行的引导脚本：读 stdin {code, inputs} → 执行 → stdout 末行输出结果
+# 容器内运行的引导脚本：读 stdin {code, inputs, entrypoint} → 执行 → stdout 末行输出结果
 _BOOTSTRAP = (
     "import sys,json\n"
     "from pyflow_runtime.executor import execute_user_code\n"
     "p=json.loads(sys.stdin.read())\n"
-    "r=execute_user_code(p['code'],p.get('inputs',{}))\n"
+    "r=execute_user_code(p['code'],p.get('inputs',{}),p.get('entrypoint','run'))\n"
     "sys.stdout.write('\\n" + _RESULT_MARKER + "'+json.dumps(r,default=str))\n"
 )
 
@@ -54,6 +54,7 @@ async def execute_in_docker(
     code: str,
     inputs: dict[str, Any],
     *,
+    entrypoint: str = "run",
     on_log: Callable[[str], Any] | None = None,
     timeout: int | None = None,
 ) -> ExecutionOutput:
@@ -68,7 +69,9 @@ async def execute_in_docker(
 
     timeout = timeout or settings.execution_timeout
     cfg = build_docker_sandbox_config(prefer_gvisor=settings.sandbox_gvisor)
-    payload = json.dumps({"code": code, "inputs": inputs}, default=str)
+    payload = json.dumps(
+        {"code": code, "inputs": inputs, "entrypoint": entrypoint}, default=str
+    )
 
     def _run() -> ExecutionOutput:
         client = docker.from_env()
@@ -113,9 +116,11 @@ def _parse_logs(logs: str, status_code: int) -> ExecutionOutput:
     )
 
 
-async def execute_in_process(code: str, inputs: dict[str, Any]) -> ExecutionOutput:
+async def execute_in_process(
+    code: str, inputs: dict[str, Any], entrypoint: str = "run"
+) -> ExecutionOutput:
     """⚠️ 仅 dev 无 Docker 时的降级（无隔离，绝不用于生产）。"""
-    result = await asyncio.to_thread(execute_user_code, code, inputs)
+    result = await asyncio.to_thread(execute_user_code, code, inputs, entrypoint)
     return ExecutionOutput(
         output=result.get("output"),
         stdout=result.get("stdout") or "",
@@ -128,6 +133,7 @@ async def run_block(
     code: str,
     inputs: dict[str, Any],
     *,
+    entrypoint: str = "run",
     allow_in_process_fallback: bool = True,
     timeout: int | None = None,
 ) -> ExecutionOutput:
@@ -135,12 +141,12 @@ async def run_block(
     if settings.deployment_mode == "k8s":
         from app.core.sandbox.k8s_executor import execute_in_k8s_job
 
-        return await execute_in_k8s_job(code, inputs, timeout=timeout)
+        return await execute_in_k8s_job(code, inputs, entrypoint=entrypoint, timeout=timeout)
 
     docker = _try_import_docker()
     if docker is not None:
         try:
-            return await execute_in_docker(code, inputs, timeout=timeout)
+            return await execute_in_docker(code, inputs, entrypoint=entrypoint, timeout=timeout)
         except BusinessException:
             if not allow_in_process_fallback:
                 raise
@@ -154,5 +160,5 @@ async def run_block(
             logger.warning("docker_sandbox_unavailable", error=str(exc)[:200])
     if allow_in_process_fallback and settings.deployment_mode == "local":
         logger.info("sandbox_fallback_in_process", mode=settings.deployment_mode)
-        return await execute_in_process(code, inputs)
+        return await execute_in_process(code, inputs, entrypoint)
     raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, "no sandbox runtime available")

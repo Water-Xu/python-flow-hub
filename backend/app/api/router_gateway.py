@@ -32,6 +32,8 @@ settings = get_settings()
 
 class InvokeRequest(BaseModel):
     inputs: dict = {}
+    # 调用脚本中的哪个入口函数（默认 run，支持一脚本多函数）
+    entrypoint: str | None = None
 
 
 @router.post("/flow/{deployment_id}/invoke")
@@ -83,18 +85,21 @@ async def invoke_block(
     if block is None:
         raise BusinessException(PYFLOW_BLOCK_NOT_FOUND, block_id)
 
+    entrypoint = req.entrypoint or "run"
     if settings.deployment_mode == "k8s":
         ctx = DeployContext(namespace=settings.k8s_namespace)
         spec = BlockDeploySpec(block_id=block.id, name=block.name, type=block.type,
                                execution_mode=block.execution_mode)
         output = await k8s_orchestration.invoke_block_service(
-            deployment_name(ctx, spec), settings.k8s_namespace, req.inputs
+            deployment_name(ctx, spec), settings.k8s_namespace, req.inputs,
+            entrypoint=entrypoint,
         )
         return {"output": output}
 
     record = await execute_block(
         session, block_id=block.id, code=block.draft_code or "",
         inputs=req.inputs, login_id=login_id,
+        entrypoint=entrypoint,
     )
     if record.status != "success":
         raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, (record.stderr or "")[:500])

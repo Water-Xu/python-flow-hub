@@ -147,6 +147,8 @@ async def restart_consumer(
 class PublishTestRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     snowflake_id: str | None = None
+    # 调用脚本中的哪个入口函数（默认 run，支持一脚本多函数）
+    entrypoint: str | None = None
 
 
 @router.post("/blocks/{block_id}/test-run")
@@ -181,6 +183,7 @@ async def test_run_block(
         code=block.draft_code or "",
         inputs=inputs,
         login_id=login_id,
+        entrypoint=req.entrypoint or "run",
     )
 
     return {

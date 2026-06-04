@@ -28,3 +28,7 @@ class FlowDeployment(Base, UUIDMixin, TimestampMixin):
     env_vars: Mapped[dict] = mapped_column(JSON, default=dict)
     # 部署级 secret 引用（env_name -> secret_key，敏感值走 K8s Secret）
     secret_refs: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 部署级 Pod 资源覆盖（按 block_id 维度覆盖 compute_config，
+    # 形如 {block_id: {cpu_request, memory_request, cpu_limit, memory_limit, gpu_enabled, gpu_count, gpu_type}}；
+    # 部署时合并到对应 block 的 compute_config，仅作用于该部署）
+    resource_overrides: Mapped[dict] = mapped_column(JSON, default=dict)

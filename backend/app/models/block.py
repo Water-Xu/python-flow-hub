@@ -27,6 +27,8 @@ class Block(Base, UUIDMixin, TimestampMixin):
 
     input_ports: Mapped[list] = mapped_column(JSON, default=list)
     output_ports: Mapped[list] = mapped_column(JSON, default=list)
+    # 脚本暴露的入口函数清单：[{name, description, params}]，由 AST 扫描自动回填
+    entrypoints: Mapped[list] = mapped_column(JSON, default=list)
     requirements_hash: Mapped[str] = mapped_column(String(64), default="")
 
     # 仅非敏感 env；敏感值走 secret_refs（决策 14/15）

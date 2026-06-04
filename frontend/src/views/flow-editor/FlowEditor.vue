@@ -10,7 +10,7 @@ import BlockNode from '@/components/nodes/BlockNode.vue'
 import ConditionBranchNode from '@/components/nodes/ConditionBranchNode.vue'
 import InputNode from '@/components/nodes/InputNode.vue'
 import CodeEditor from '@/components/CodeEditor.vue'
-import { blockApi, flowApi, type Block } from '@/api'
+import { blockApi, flowApi, type Block, type Entrypoint } from '@/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -34,6 +34,8 @@ const {
   getSelectedEdges,
   onEdgeContextMenu,
   onPaneClick,
+  onNodeDoubleClick,
+  findNode,
 } = useVueFlow()
 
 const flowName = ref('')
@@ -89,11 +91,61 @@ const codeBlock = ref<Block | null>(null)
 const codeDraft = ref('')
 const codeSaving = ref(false)
 
+// 节点配置抽屉（选择该节点调用脚本里的哪个入口函数）
+const nodeCfgDrawer = ref(false)
+const cfgNodeId = ref<string | null>(null)
+const cfgNodeLabel = ref('')
+const cfgEntrypoint = ref('run')
+const cfgEntrypoints = ref<Entrypoint[]>([])
+const cfgLoadingFns = ref(false)
+
 const treeProps = { children: 'children', label: 'name' }
 const treeData = computed(() => (tree.value?.children ?? []))
 const hasTree = computed(() => treeData.value.length > 0)
 
 onConnect((conn) => addEdges([{ ...conn, animated: true }]))
+
+// 双击块节点 → 打开节点配置（选择入口函数）
+onNodeDoubleClick(({ node }) => {
+  if (node.type !== 'block') return
+  openNodeConfig(node)
+})
+
+async function openNodeConfig(node: any) {
+  cfgNodeId.value = node.id
+  cfgNodeLabel.value = node.data?.label || '节点'
+  cfgEntrypoint.value = node.data?.entrypoint || 'run'
+  cfgEntrypoints.value = []
+  nodeCfgDrawer.value = true
+
+  const blockId = node.data?.block_id
+  if (!blockId) return
+  const block = blocks.value.find((b) => b.id === blockId)
+  if (block?.entrypoints?.length) {
+    cfgEntrypoints.value = block.entrypoints
+    return
+  }
+  // 列表里没有入口信息时，按需静态扫描脚本
+  cfgLoadingFns.value = true
+  try {
+    const res = await blockApi.discoverEntrypoints(blockId)
+    cfgEntrypoints.value = res.entrypoints || []
+  } catch {
+    cfgEntrypoints.value = []
+  } finally {
+    cfgLoadingFns.value = false
+  }
+}
+
+function applyNodeConfig() {
+  if (!cfgNodeId.value) return
+  const node = findNode(cfgNodeId.value)
+  if (node) {
+    node.data = { ...node.data, entrypoint: cfgEntrypoint.value || 'run' }
+  }
+  nodeCfgDrawer.value = false
+  ElMessage.success(`已设置入口函数：${cfgEntrypoint.value || 'run'}`)
+}
 
 async function load() {
   const [flow, blockList]: any = await Promise.all([flowApi.get(flowId), blockApi.list()])
@@ -115,7 +167,12 @@ async function load() {
       id: n.id,
       type: n.node_type,
       position: n.position?.x != null ? n.position : { x: 100, y: 100 },
-      data: { label: n.config?.label || n.block_id || '节点', mode: n.config?.mode, block_id: n.block_id },
+      data: {
+        label: n.config?.label || n.block_id || '节点',
+        mode: n.config?.mode,
+        block_id: n.block_id,
+        entrypoint: n.config?.entrypoint || 'run',
+      },
     }
   })
   const edges = (flow.edges || []).map((e: any) => ({
@@ -150,7 +207,7 @@ function addBlockNode(block: Block) {
       id: `n-${Date.now()}`,
       type: 'block',
       position: { x: 120 + Math.random() * 200, y: 120 + Math.random() * 160 },
-      data: { label: block.name, mode: block.execution_mode, block_id: block.id },
+      data: { label: block.name, mode: block.execution_mode, block_id: block.id, entrypoint: 'run' },
     },
   ])
 }
@@ -219,7 +276,12 @@ async function save() {
       id: n.id,
       node_type: n.type,
       block_id: n.data?.block_id || null,
-      config: { label: n.data?.label, mode: n.data?.mode, ...(n.data?.config || {}) },
+      config: {
+        label: n.data?.label,
+        mode: n.data?.mode,
+        entrypoint: n.data?.entrypoint || 'run',
+        ...(n.data?.config || {}),
+      },
       position: n.position,
     }
   })
@@ -350,6 +412,52 @@ onMounted(load)
         </div>
       </div>
     </el-drawer>
+
+    <el-drawer v-model="nodeCfgDrawer" :title="`节点配置 · ${cfgNodeLabel}`" size="34%" direction="rtl">
+      <div class="node-cfg">
+        <el-form label-position="top">
+          <el-form-item label="入口函数（entrypoint）">
+            <el-select
+              v-model="cfgEntrypoint"
+              :loading="cfgLoadingFns"
+              filterable
+              allow-create
+              default-first-option
+              placeholder="选择该节点调用脚本里的哪个函数"
+              class="fn-select"
+            >
+              <el-option
+                v-for="fn in cfgEntrypoints"
+                :key="fn.name"
+                :value="fn.name"
+                :label="fn.name"
+              >
+                <div class="fn-option">
+                  <span class="fn-option-name">ƒ {{ fn.name }}</span>
+                  <span v-if="fn.params?.length" class="fn-option-params">
+                    ({{ fn.params.join(', ') }})
+                  </span>
+                </div>
+                <div v-if="fn.description" class="fn-option-desc">{{ fn.description }}</div>
+              </el-option>
+            </el-select>
+          </el-form-item>
+          <transition name="fade-in">
+            <p v-if="!cfgEntrypoints.length && !cfgLoadingFns" class="cfg-hint">
+              该脚本未识别到入口函数，将默认调用 <code>run(inputs)</code>。
+              一个脚本可定义多个 <code>def 函数名(inputs): ...</code>，把同一块拖成多个节点、各选不同函数即可映射多个接口。
+            </p>
+          </transition>
+          <p v-if="cfgEntrypoints.length" class="cfg-hint">
+            共识别到 {{ cfgEntrypoints.length }} 个入口函数。同一块可在不同节点选用不同函数。
+          </p>
+        </el-form>
+        <div class="node-cfg-foot">
+          <el-button @click="nodeCfgDrawer = false">取消</el-button>
+          <el-button type="primary" :icon="'Check'" @click="applyNodeConfig">应用</el-button>
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -448,6 +556,60 @@ onMounted(load)
   justify-content: flex-end;
   gap: 8px;
   padding-top: 12px;
+}
+.node-cfg {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.fn-select {
+  width: 100%;
+}
+.fn-option {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.fn-option-name {
+  font-weight: 600;
+  color: var(--pf-accent);
+  font-family: 'JetBrains Mono', monospace;
+}
+.fn-option-params {
+  font-size: 12px;
+  color: var(--pf-text-dim);
+  font-family: 'JetBrains Mono', monospace;
+}
+.fn-option-desc {
+  font-size: 12px;
+  color: var(--pf-text-dim);
+  line-height: 1.4;
+  white-space: normal;
+}
+.cfg-hint {
+  font-size: 12px;
+  color: var(--pf-text-dim);
+  line-height: 1.6;
+  margin: 4px 0 0;
+}
+.cfg-hint code {
+  background: var(--pf-panel-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.node-cfg-foot {
+  margin-top: auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 12px;
+}
+.fade-in-enter-active {
+  transition: opacity 0.25s ease;
+}
+.fade-in-enter-from {
+  opacity: 0;
 }
 .slide-panel-enter-active,
 .slide-panel-leave-active {

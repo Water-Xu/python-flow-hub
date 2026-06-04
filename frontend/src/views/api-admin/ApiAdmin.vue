@@ -449,11 +449,12 @@ onMounted(load)
           <el-collapse accordion v-if="docsData.blocks?.length">
             <el-collapse-item
               v-for="block in docsData.blocks"
-              :key="block.block_id"
+              :key="block.node_id || block.block_id"
               :title="block.block_name"
             >
               <p class="dim">{{ block.description || '暂无描述' }}</p>
               <p><strong>执行模式：</strong>{{ block.execution_mode }}</p>
+              <p><strong>入口函数：</strong><code>{{ block.entrypoint || 'run' }}</code></p>
               <div class="port-grid">
                 <div>
                   <strong>输入端口</strong>

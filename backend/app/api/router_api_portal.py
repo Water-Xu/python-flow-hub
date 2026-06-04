@@ -202,6 +202,9 @@ async def get_api_docs(
                     "description": block.description,
                     "input_ports": block.input_ports,
                     "output_ports": block.output_ports,
+                    "entrypoints": block.entrypoints,
+                    # 该节点实际调用的入口函数（默认 run）
+                    "entrypoint": (node.config or {}).get("entrypoint") or "run",
                     "execution_mode": block.execution_mode,
                 })
 
@@ -288,9 +291,11 @@ async def invoke_api(
             if not block_id:
                 return {}
             block = block_cache[block_id]
+            entrypoint = (node.get("config") or {}).get("entrypoint") or "run"
             record = await execute_block(
                 session, block_id=block.id, code=block.draft_code or "",
                 inputs=node_inputs, login_id=api.owner_login_id,
+                entrypoint=entrypoint,
             )
             if record.status != "success":
                 detail = (record.stderr or "block execution failed").strip()[:500]
