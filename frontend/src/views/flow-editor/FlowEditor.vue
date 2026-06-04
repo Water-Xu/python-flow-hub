@@ -23,11 +23,55 @@ const nodeTypes: any = {
   input: markRaw(InputNode),
 }
 
-const { addNodes, addEdges, toObject, onConnect } = useVueFlow()
+const {
+  addNodes,
+  addEdges,
+  toObject,
+  onConnect,
+  removeNodes,
+  removeEdges,
+  getSelectedNodes,
+  getSelectedEdges,
+  onEdgeContextMenu,
+  onPaneClick,
+} = useVueFlow()
+
 const flowName = ref('')
 const blocks = ref<Block[]>([])
 const running = ref(false)
 const elements = ref<any[]>([])
+
+// 右键菜单
+const ctxMenu = ref<{ visible: boolean; x: number; y: number; edgeId: string | null }>({
+  visible: false,
+  x: 0,
+  y: 0,
+  edgeId: null,
+})
+
+function hideCtxMenu() {
+  ctxMenu.value.visible = false
+}
+
+onEdgeContextMenu(({ event, edge }) => {
+  event.preventDefault()
+  const e = event as MouseEvent
+  ctxMenu.value = { visible: true, x: e.clientX, y: e.clientY, edgeId: edge.id }
+})
+
+onPaneClick(() => hideCtxMenu())
+
+function deleteCtxEdge() {
+  if (ctxMenu.value.edgeId) removeEdges([ctxMenu.value.edgeId])
+  hideCtxMenu()
+}
+
+function deleteSelected() {
+  const nodes = getSelectedNodes.value
+  const edges = getSelectedEdges.value
+  if (nodes.length) removeNodes(nodes.map((n: any) => n.id))
+  if (edges.length) removeEdges(edges.map((e: any) => e.id))
+}
 
 // 文件夹树 / 资源
 const tree = ref<any | null>(null)
@@ -234,6 +278,7 @@ onMounted(load)
         <el-button :icon="'Switch'" @click="addConditionNode">条件分支</el-button>
         <el-button type="success" :icon="'EditPen'" @click="addInputNode">添加输入</el-button>
         <el-button @click="save">保存</el-button>
+        <el-button type="danger" plain :icon="'Delete'" @click="deleteSelected">删除选中</el-button>
         <el-button type="primary" :loading="running" :icon="'VideoPlay'" @click="run">运行整流</el-button>
       </div>
     </header>
@@ -264,11 +309,31 @@ onMounted(load)
       </transition>
 
       <div class="canvas">
-        <VueFlow v-model="elements" :node-types="nodeTypes" fit-view-on-init :default-edge-options="{ animated: true }">
+        <VueFlow
+          v-model="elements"
+          :node-types="nodeTypes"
+          fit-view-on-init
+          :default-edge-options="{ animated: true }"
+          delete-key-code="Delete"
+          @click="hideCtxMenu"
+        >
           <Background :gap="18" pattern-color="#d8dce3" />
           <Controls />
           <MiniMap pannable zoomable />
         </VueFlow>
+        <!-- 连线右键菜单 -->
+        <transition name="ctx-fade">
+          <div
+            v-if="ctxMenu.visible"
+            class="ctx-menu"
+            :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }"
+            @click.stop
+          >
+            <div class="ctx-item ctx-delete" @click="deleteCtxEdge">
+              <span class="ctx-icon">🗑</span> 删除连线
+            </div>
+          </div>
+        </transition>
       </div>
     </div>
 
@@ -349,6 +414,7 @@ onMounted(load)
   color: var(--pf-accent);
 }
 .canvas {
+  position: relative;
   flex: 1;
   min-width: 0;
   border: 1px solid var(--pf-border);
@@ -391,5 +457,49 @@ onMounted(load)
 .slide-panel-leave-to {
   transform: translateX(-14px);
   opacity: 0;
+}
+
+/* 右键菜单 */
+.ctx-menu {
+  position: fixed;
+  z-index: 9999;
+  background: var(--pf-panel);
+  border: 1px solid var(--pf-border-strong);
+  border-radius: 8px;
+  box-shadow: var(--pf-shadow-md);
+  padding: 4px 0;
+  min-width: 130px;
+  user-select: none;
+}
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.ctx-item:hover {
+  background: var(--pf-panel-2);
+}
+.ctx-delete {
+  color: #ef4444;
+}
+.ctx-delete:hover {
+  background: #fef2f2;
+  color: #dc2626;
+}
+.ctx-icon {
+  font-size: 14px;
+}
+.ctx-fade-enter-active,
+.ctx-fade-leave-active {
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.ctx-fade-enter-from,
+.ctx-fade-leave-to {
+  opacity: 0;
+  transform: scale(0.92);
 }
 </style>

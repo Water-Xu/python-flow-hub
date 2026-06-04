@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { Handle, Position } from '@vue-flow/core'
+import { Handle, Position, useVueFlow } from '@vue-flow/core'
 
-defineProps<{ data: { key: string; value: string } }>()
+const props = defineProps<{ id: string; data: { key: string; value: string }; selected?: boolean }>()
+const { removeNodes } = useVueFlow()
 </script>
 
 <template>
-  <div class="input-node">
+  <div class="input-node" :class="{ 'is-selected': selected }">
     <div class="in-head">
       <span class="in-dot" />
       <span>测试输入</span>
@@ -24,11 +25,13 @@ defineProps<{ data: { key: string; value: string } }>()
       @mousedown.stop
     />
     <Handle type="source" :position="Position.Right" />
+    <button class="delete-btn nodrag" title="删除节点" @click.stop="removeNodes([props.id])">×</button>
   </div>
 </template>
 
 <style scoped>
 .input-node {
+  position: relative;
   min-width: 180px;
   padding: 12px;
   background: var(--pf-panel);
@@ -43,6 +46,10 @@ defineProps<{ data: { key: string; value: string } }>()
   transform: scale(1.02);
   border-color: #10b981;
   box-shadow: var(--pf-shadow-md);
+}
+.input-node.is-selected {
+  border-color: #10b981;
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.25), var(--pf-shadow-md);
 }
 .in-head {
   display: flex;
@@ -82,5 +89,36 @@ defineProps<{ data: { key: string; value: string } }>()
 .in-val {
   resize: vertical;
   font-family: 'JetBrains Mono', monospace;
+}
+
+.delete-btn {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ef4444;
+  color: #fff;
+  border: 2px solid var(--pf-panel);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  padding: 0;
+}
+.input-node:hover .delete-btn,
+.input-node.is-selected .delete-btn {
+  opacity: 1;
+  transform: scale(1);
+}
+.delete-btn:hover {
+  background: #dc2626;
+  transform: scale(1.15) !important;
 }
 </style>
