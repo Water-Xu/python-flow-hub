@@ -19,6 +19,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # alembic 默认 alembic_version.version_num 为 VARCHAR(32)，本 revision id 长 34 字符，
+    # 直接 stamp 会触发 StringDataRightTruncationError。先扩宽列宽再继续（幂等）。
+    op.execute("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(255)")
     op.add_column(
         "pyflow_flow_deployment",
         sa.Column("resource_overrides", sa.JSON, nullable=False, server_default="{}"),
