@@ -12,6 +12,9 @@ class Settings(BaseSettings):
 
     deployment_mode: str = "local"          # local | k8s
 
+    # 对外网关前缀（nginx 反代 /lhy-styon-pyflow → 控制面）。门户展示可调 URL 时拼上此前缀。
+    public_api_prefix: str = "/lhy-styon-pyflow"
+
     k8s_namespace: str = "pyflow-blocks"
     k8s_job_service_account: str = "pyflow-hub-sa"
     runner_image: str = (

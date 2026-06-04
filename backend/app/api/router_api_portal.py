@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.rbac import Role, require_role
+from app.config import get_settings
 from app.core.execution_service import execute_block
 from app.core.flow.flow_runner import run_flow
 from app.db import get_session
@@ -32,6 +33,7 @@ from app.models.flow import Flow, FlowEdge, FlowNode
 from app.schemas.api_portal import ApiResponse, PublishApiRequest
 
 router = APIRouter(tags=["api-portal"])
+settings = get_settings()
 
 # 内存限流计数器：{api_id: [(timestamp, count)]}（dev local；生产用 Redis）
 _rate_counters: dict[str, list[float]] = defaultdict(list)
@@ -207,7 +209,7 @@ async def get_api_docs(
         "api_id": api_id,
         "name": api.name,
         "description": api.description,
-        "path": f"/api/public/{api.path}",
+        "path": f"{settings.public_api_prefix}/api/public/{api.path}",
         "method": "POST",
         "status": api.status,
         "flow_id": flow_id,

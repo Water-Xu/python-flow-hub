@@ -16,6 +16,14 @@ spec:
       labels:
         app: pyflow-web
     spec:
+      # 资源隔离：钉在 pyflow-system 专用池（与 Java 微服务物理隔离）
+      nodeSelector:
+        cloud.google.com/gke-nodepool: pyflow-system
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: pyflow
+          effect: NoSchedule
       containers:
         - name: pyflow-web
           image: us-central1-docker.pkg.dev/lhy-styon-dev-4832/lhy-styon/pyflow-web:latest

@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
+
+from app.config import get_settings
 
 
 class PublishApiRequest(BaseModel):
@@ -65,6 +67,12 @@ class ApiResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def invoke_path(self) -> str:
+        """对外完整可调路径（含网关前缀），供门户卡片/复制直接使用。"""
+        return f"{get_settings().public_api_prefix}/api/public/{self.path}"
 
 
 class ApiInstanceInfo(BaseModel):

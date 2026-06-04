@@ -11,6 +11,14 @@ spec:
     spec:
       restartPolicy: Never
       serviceAccountName: pyflow-hub-sa
+      # 与控制面同池，避免迁移 Job 落到 Java 微服务的 default-pool
+      nodeSelector:
+        cloud.google.com/gke-nodepool: pyflow-system
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: pyflow
+          effect: NoSchedule
       containers:
         - name: migration
           image: us-central1-docker.pkg.dev/lhy-styon-dev-4832/lhy-styon/pyflow-hub:latest

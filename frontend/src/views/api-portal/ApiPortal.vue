@@ -92,6 +92,16 @@ async function viewDocs(api: PublishedApi) {
   }
 }
 
+async function copyUrl(api: PublishedApi) {
+  const url = `${window.location.origin}${api.invoke_path}`
+  try {
+    await navigator.clipboard.writeText(url)
+    ElMessage.success(`已复制调用地址：${url}`)
+  } catch {
+    ElMessage.warning(`复制失败，请手动复制：${url}`)
+  }
+}
+
 function resetForm() {
   form.value = { name: '', description: '', path: '', tags: '', flow_id: '' }
 }
@@ -144,7 +154,10 @@ onMounted(load)
 
         <p class="api-path">
           <el-icon><Link /></el-icon>
-          <code>POST /api/public/{{ api.path }}</code>
+          <code>POST {{ api.invoke_path }}</code>
+          <el-tooltip content="复制完整调用地址" placement="top">
+            <el-icon class="copy-icon" @click="copyUrl(api)"><CopyDocument /></el-icon>
+          </el-tooltip>
         </p>
         <p class="api-desc">{{ api.description || '—' }}</p>
 
@@ -374,6 +387,15 @@ onMounted(load)
   padding: 2px 6px;
   border-radius: 4px;
   font-size: 12px;
+}
+.copy-icon {
+  cursor: pointer;
+  color: var(--pf-text-dim);
+  transition: color 0.18s ease, transform 0.18s ease;
+}
+.copy-icon:hover {
+  color: var(--pf-accent);
+  transform: scale(1.15);
 }
 .api-desc {
   font-size: 13px;

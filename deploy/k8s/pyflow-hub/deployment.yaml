@@ -18,6 +18,14 @@ spec:
         pyflow.runtime/protocol: "1"
     spec:
       serviceAccountName: pyflow-hub-sa
+      # 资源隔离：钉在 pyflow-system 专用池，绝不与 Java 微服务争抢 default-pool（决策 12）
+      nodeSelector:
+        cloud.google.com/gke-nodepool: pyflow-system
+      tolerations:
+        - key: dedicated
+          operator: Equal
+          value: pyflow
+          effect: NoSchedule
       containers:
         - name: pyflow-hub
           image: us-central1-docker.pkg.dev/lhy-styon-dev-4832/lhy-styon/pyflow-hub:latest

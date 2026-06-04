@@ -166,6 +166,7 @@ export interface PublishedApi {
   name: string
   description: string
   path: string
+  invoke_path: string
   tags: string
   flow_id: string
   active_flow_id: string | null
