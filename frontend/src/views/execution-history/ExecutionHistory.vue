@@ -80,15 +80,16 @@ onMounted(load)
   cursor: pointer;
 }
 .detail pre {
-  background: #0f1117;
+  background: var(--pf-panel-2);
   border: 1px solid var(--pf-border);
   border-radius: 8px;
   padding: 10px;
   font-size: 12px;
   white-space: pre-wrap;
+  color: var(--pf-text);
 }
 .detail .err {
-  color: #f87171;
+  color: #dc2626;
 }
 .detail .log {
   color: var(--pf-accent-2);

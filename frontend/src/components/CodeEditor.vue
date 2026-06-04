@@ -13,7 +13,7 @@ onMounted(() => {
   editor = monaco.editor.create(el.value, {
     value: props.modelValue,
     language: props.language || 'python',
-    theme: 'vs-dark',
+    theme: 'vs',
     automaticLayout: true,
     minimap: { enabled: false },
     fontSize: 14,

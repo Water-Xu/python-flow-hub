@@ -59,6 +59,7 @@ const menus = [
   width: 220px;
   background: var(--pf-panel);
   border-right: 1px solid var(--pf-border);
+  box-shadow: var(--pf-shadow-sm);
   display: flex;
   flex-direction: column;
   transition: width 0.28s cubic-bezier(0.4, 0, 0.2, 1);
@@ -78,10 +79,8 @@ const menus = [
   font-size: 24px;
 }
 .brand-name {
-  background: linear-gradient(90deg, var(--pf-accent), var(--pf-accent-2));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  color: var(--pf-text);
+  letter-spacing: 0.2px;
 }
 .nav {
   flex: 1;
@@ -101,13 +100,13 @@ const menus = [
   transition: background 0.2s ease, color 0.2s ease, transform 0.15s ease;
 }
 .nav-item:hover {
-  background: rgba(99, 102, 241, 0.1);
+  background: var(--pf-panel-2);
   color: var(--pf-text);
   transform: translateX(3px);
 }
 .nav-item.active {
-  background: linear-gradient(90deg, rgba(99, 102, 241, 0.25), transparent);
-  color: #fff;
+  background: var(--pf-accent-soft);
+  color: var(--pf-accent);
   box-shadow: inset 3px 0 0 var(--pf-accent);
 }
 .collapse-btn {

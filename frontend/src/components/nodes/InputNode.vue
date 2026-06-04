@@ -31,16 +31,18 @@ defineProps<{ data: { key: string; value: string } }>()
 .input-node {
   min-width: 180px;
   padding: 12px;
-  background: linear-gradient(135deg, #11332b, #16433a);
-  border: 1px solid #10b981;
+  background: var(--pf-panel);
+  border: 1px solid var(--pf-border-strong);
+  border-left: 3px solid #10b981;
   border-radius: 12px;
   color: var(--pf-text);
-  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.22);
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: var(--pf-shadow-sm);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
 }
 .input-node:hover {
   transform: scale(1.02);
-  box-shadow: 0 8px 22px rgba(16, 185, 129, 0.4);
+  border-color: #10b981;
+  box-shadow: var(--pf-shadow-md);
 }
 .in-head {
   display: flex;
@@ -48,22 +50,21 @@ defineProps<{ data: { key: string; value: string } }>()
   gap: 8px;
   font-size: 12px;
   font-weight: 600;
-  color: #34d399;
+  color: #047857;
   margin-bottom: 8px;
 }
 .in-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #34d399;
-  box-shadow: 0 0 8px #34d399;
+  background: #10b981;
 }
 .in-key,
 .in-val {
   width: 100%;
   box-sizing: border-box;
-  background: rgba(0, 0, 0, 0.28);
-  border: 1px solid rgba(16, 185, 129, 0.4);
+  background: var(--pf-panel-2);
+  border: 1px solid var(--pf-border);
   border-radius: 8px;
   color: var(--pf-text);
   padding: 6px 8px;
@@ -73,7 +74,7 @@ defineProps<{ data: { key: string; value: string } }>()
 }
 .in-key:focus,
 .in-val:focus {
-  border-color: #34d399;
+  border-color: #10b981;
 }
 .in-key {
   margin-bottom: 6px;

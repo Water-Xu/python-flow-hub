@@ -26,23 +26,23 @@ defineProps<{ data: { label: string; expression?: string } }>()
   height: 86px;
   margin: 17px;
   transform: rotate(45deg);
-  background: linear-gradient(135deg, #3a2a1e, #4a3526);
+  background: #fff7ed;
   border: 1px solid #f59e0b;
   border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
-  box-shadow: 0 4px 14px rgba(245, 158, 11, 0.25);
+  box-shadow: var(--pf-shadow-sm);
 }
 .diamond:hover {
   transform: rotate(45deg) scale(1.05);
-  box-shadow: 0 8px 22px rgba(245, 158, 11, 0.45);
+  box-shadow: var(--pf-shadow-md);
 }
 .diamond-text {
   transform: rotate(-45deg);
   font-size: 12px;
   font-weight: 600;
-  color: #fbbf24;
+  color: #b45309;
 }
 </style>

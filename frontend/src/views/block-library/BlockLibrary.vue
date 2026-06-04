@@ -38,10 +38,10 @@ async function removeBlock(id: string) {
 }
 
 const typeColor: Record<string, string> = {
-  script: '#6366f1',
-  notebook: '#06b6d4',
-  gcp_bigquery: '#f59e0b',
-  gcp_storage: '#10b981',
+  script: '#2563eb',
+  notebook: '#0891b2',
+  gcp_bigquery: '#d97706',
+  gcp_storage: '#059669',
 }
 
 onMounted(load)

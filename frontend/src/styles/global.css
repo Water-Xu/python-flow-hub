@@ -1,11 +1,24 @@
 :root {
-  --pf-bg: #0f1117;
-  --pf-panel: #1a1d27;
-  --pf-border: #2a2e3a;
-  --pf-accent: #6366f1;
-  --pf-accent-2: #06b6d4;
-  --pf-text: #e5e7eb;
-  --pf-text-dim: #9ca3af;
+  /* 浅色专业主题：浅灰白底 + 白色面板 + 中性蓝主色 */
+  --pf-bg: #f6f7f9;
+  --pf-panel: #ffffff;
+  --pf-panel-2: #f0f2f5;
+  --pf-border: #e5e7eb;
+  --pf-border-strong: #d8dce3;
+  --pf-accent: #2563eb;
+  --pf-accent-soft: rgba(37, 99, 235, 0.1);
+  --pf-accent-2: #0891b2;
+  --pf-text: #1f2329;
+  --pf-text-dim: #6b7280;
+  /* 柔和中性阴影，替代霓虹发光 */
+  --pf-shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --pf-shadow-md: 0 2px 6px rgba(16, 24, 40, 0.06), 0 8px 24px rgba(16, 24, 40, 0.08);
+  /* 深色代码/终端区（浅色主题下作为协调的深色控制台） */
+  --pf-code-bg: #1e293b;
+  --pf-code-text: #e5e7eb;
+
+  /* 对齐 Element Plus 主色到中性蓝 */
+  --el-color-primary: #2563eb;
 }
 
 * {
@@ -48,12 +61,13 @@ body,
   background: var(--pf-panel);
   border: 1px solid var(--pf-border);
   border-radius: 12px;
+  box-shadow: var(--pf-shadow-sm);
   transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
 }
 .pf-card:hover {
   transform: translateY(-2px);
   border-color: var(--pf-accent);
-  box-shadow: 0 8px 24px rgba(99, 102, 241, 0.18);
+  box-shadow: var(--pf-shadow-md);
 }
 
 @keyframes pf-pulse {

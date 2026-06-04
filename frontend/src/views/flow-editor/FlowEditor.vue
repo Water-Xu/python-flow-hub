@@ -16,7 +16,8 @@ const route = useRoute()
 const router = useRouter()
 const flowId = route.params.id as string
 
-const nodeTypes = {
+// 自定义节点类型；input 与 VueFlow 内置保留键同名，需放宽类型
+const nodeTypes: any = {
   block: markRaw(BlockNode),
   condition_branch: markRaw(ConditionBranchNode),
   input: markRaw(InputNode),
@@ -264,7 +265,7 @@ onMounted(load)
 
       <div class="canvas">
         <VueFlow v-model="elements" :node-types="nodeTypes" fit-view-on-init :default-edge-options="{ animated: true }">
-          <Background :gap="18" pattern-color="#2a2e3a" />
+          <Background :gap="18" pattern-color="#d8dce3" />
           <Controls />
           <MiniMap pannable zoomable />
         </VueFlow>
@@ -356,6 +357,10 @@ onMounted(load)
 }
 .resource-view {
   margin: 0;
+  padding: 12px;
+  background: var(--pf-panel-2);
+  border: 1px solid var(--pf-border);
+  border-radius: 8px;
   white-space: pre-wrap;
   word-break: break-all;
   font-family: 'JetBrains Mono', monospace;

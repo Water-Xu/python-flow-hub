@@ -43,7 +43,7 @@ defineExpose({ writeLine, clear: () => term?.clear() })
 onMounted(() => {
   if (!el.value) return
   term = new Terminal({
-    theme: { background: '#0f1117', foreground: '#e5e7eb' },
+    theme: { background: '#1e293b', foreground: '#e5e7eb' },
     fontSize: 13,
     cursorBlink: false,
     convertEol: true,
@@ -78,8 +78,8 @@ onBeforeUnmount(() => {
 .terminal {
   width: 100%;
   height: 100%;
-  background: #0f1117;
-  border: 1px solid var(--pf-border);
+  background: var(--pf-code-bg);
+  border: 1px solid var(--pf-border-strong);
   border-radius: 10px;
   padding: 8px;
 }
