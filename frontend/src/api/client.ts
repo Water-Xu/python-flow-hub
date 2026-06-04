@@ -19,8 +19,17 @@ client.interceptors.request.use((config) => {
 client.interceptors.response.use(
   (resp) => resp.data,
   (error) => {
+    const status = error.response?.status
+    if (status === 401 || status === 11801) {
+      // token 失效，跳转登录
+      localStorage.removeItem('pyflow_token')
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+      return Promise.reject(error)
+    }
     const data = error.response?.data
-    const msg = data?.detail || data?.msgKey || error.message
+    const msg = data?.detail || data?.message || data?.msgKey || error.message
     ElMessage.error(`请求失败：${msg}`)
     return Promise.reject(error)
   },

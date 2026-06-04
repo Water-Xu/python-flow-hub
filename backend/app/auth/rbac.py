@@ -66,3 +66,40 @@ def require_role(min_role: Role):
         return login_id
 
     return _dep
+
+
+def require_resource_access(resource_type: str, access: str):
+    """生成资源级 ACL 校验依赖（决策 15）。
+
+    放行条件：平台级 ADMIN OR owner 本人 OR resource_grant 表命中。
+    用法：router 参数 owner_login_id 需从路径/DB 查到，由调用方在依赖外自行校验。
+    本函数提供"检查 resource_grant 表"的工具函数，供 router 复合使用。
+    """
+    from app.errors import PYFLOW_FORBIDDEN_RESOURCE, BusinessException as BE
+    from app.models.rbac import PyFlowResourceGrant
+
+    async def _check(
+        resource_id: str,
+        login_id: str,
+        session: AsyncSession,
+        owner_login_id: str | None = None,
+    ) -> bool:
+        """返回是否有权限；无权则抛 BusinessException。"""
+        roles = await get_user_roles(login_id, session)
+        if max(roles) >= Role.ADMIN:
+            return True
+        if owner_login_id and login_id == owner_login_id:
+            return True
+        grant = (await session.execute(
+            select(PyFlowResourceGrant).where(
+                PyFlowResourceGrant.resource_type == resource_type,
+                PyFlowResourceGrant.resource_id == resource_id,
+                PyFlowResourceGrant.login_id == login_id,
+                PyFlowResourceGrant.access == access,
+            )
+        )).scalars().first()
+        if grant:
+            return True
+        raise BE(PYFLOW_FORBIDDEN_RESOURCE, f"{resource_type}/{resource_id} access={access} denied")
+
+    return _check

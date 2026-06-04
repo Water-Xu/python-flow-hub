@@ -17,6 +17,9 @@ settings = get_settings()
 async def resolve_login_id(token: str | None) -> str:
     """从 token 解析平台统一用户 ID。"""
     if not settings.auth_enabled:
+        # dev bypass：支持 dev-login 返回的虚假 token，如 "dev-devtoken-username"
+        if token and token.startswith("dev-devtoken-"):
+            return token.removeprefix("dev-devtoken-")
         return settings.dev_default_login_id
 
     if not token:

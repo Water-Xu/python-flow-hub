@@ -20,7 +20,7 @@ from app.api import (
     router_rbac,
     router_ws,
 )
-from app.api import router_api_portal, router_api_admin, router_mq
+from app.api import router_api_portal, router_api_admin, router_mq, router_auth
 from app.config import get_settings
 from app.core.mq.consumer_manager import get_consumer_manager
 from app.db import init_models
@@ -81,6 +81,7 @@ app.include_router(router_ws.router)
 app.include_router(router_api_portal.router)
 app.include_router(router_api_admin.router)
 app.include_router(router_mq.router)
+app.include_router(router_auth.router)
 
 configure_tracing(app)
 

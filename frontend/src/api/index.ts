@@ -1,4 +1,41 @@
+import axios from 'axios'
 import client from './client'
+
+const baseURL = import.meta.env.VITE_BASE_SERVER_URL || ''
+
+// 不走封装 client（避免 401 循环重定向），用于登录接口
+const rawClient = axios.create({ baseURL, timeout: 15000 })
+
+export const authApi = {
+  /**
+   * 调用现有 Sa-Token admin 登录接口（clientId=admin-app）。
+   * 直连：开发态前端直接访问 gateway/admin，因 Vite proxy 会转发到 backend；
+   * prod 走 gateway 前缀 /lhy-styon-admin。
+   */
+  login: (username: string, password: string): Promise<any> => {
+    const params = new URLSearchParams({ clientId: 'admin-app', username, password })
+    return rawClient
+      .post('/auth/login', params, { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } })
+      .then((r) => r.data)
+      .catch(() => {
+        // auth_enabled=false 时后端 dev-bypass：直接获取 dev token
+        return client.post('/api/auth/dev-login', { username }).then((r: any) => r)
+      })
+  },
+  /** 获取当前用户在 PyFlowHub 中的信息和角色 */
+  me: (): Promise<any> => client.get('/api/auth/me'),
+}
+
+export const rbacApi = {
+  listUsers: () => client.get<any, any[]>('/api/rbac/users'),
+  listRoles: (loginId: string) => client.get<any, any[]>(`/api/rbac/roles/${loginId}`),
+  grant: (loginId: string, role: string) => client.post('/api/rbac/grant', { login_id: loginId, role }),
+  revoke: (loginId: string, role: string) => client.post('/api/rbac/revoke', { login_id: loginId, role }),
+  listResourceGrants: (resourceType: string, resourceId: string) =>
+    client.get<any, any[]>(`/api/rbac/resource/${resourceType}/${resourceId}/grants`),
+  grantResource: (data: object) => client.post('/api/rbac/resource/grant', data),
+  revokeResource: (data: object) => client.post('/api/rbac/resource/revoke', data),
+}
 
 /** 防御：列表接口必须返回数组；任何异常响应（如 SPA 回退的 HTML 字符串）都归一化为空数组。 */
 function ensureArray<T>(value: any): T[] {
