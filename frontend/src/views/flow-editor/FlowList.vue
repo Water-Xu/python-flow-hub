@@ -8,7 +8,9 @@ const router = useRouter()
 const flows = ref<any[]>([])
 const loading = ref(false)
 const dialogVisible = ref(false)
+const importing = ref(false)
 const form = ref({ name: '', description: '' })
+const fileInput = ref<HTMLInputElement>()
 
 async function load() {
   loading.value = true
@@ -26,6 +28,25 @@ async function createFlow() {
   router.push(`/flows/${flow.id}`)
 }
 
+function pickZip() {
+  fileInput.value?.click()
+}
+
+async function onZipPicked(e: Event) {
+  const target = e.target as HTMLInputElement
+  const file = target.files?.[0]
+  target.value = ''
+  if (!file) return
+  importing.value = true
+  try {
+    const res: any = await flowApi.importZip(file)
+    ElMessage.success(`已导入 ${res.block_count} 个调用块、${res.resource_count} 个资源`)
+    router.push(`/flows/${res.flow_id}`)
+  } finally {
+    importing.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -36,14 +57,27 @@ onMounted(load)
         <h2>流程编排</h2>
         <p class="dim">VueFlow 可视化画布，串联多个调用块与条件分支</p>
       </div>
-      <el-button type="primary" :icon="'Plus'" @click="dialogVisible = true">新建流程</el-button>
+      <div class="head-actions">
+        <input
+          ref="fileInput"
+          type="file"
+          accept=".zip"
+          style="display: none"
+          @change="onZipPicked"
+        />
+        <el-button :icon="'Upload'" :loading="importing" @click="pickZip">导入压缩包</el-button>
+        <el-button type="primary" :icon="'Plus'" @click="dialogVisible = true">新建流程</el-button>
+      </div>
     </header>
 
     <div v-loading="loading">
       <transition-group name="list" tag="div" class="grid-inner">
         <div v-for="f in flows" :key="f.id" class="pf-card flow-card" @click="router.push(`/flows/${f.id}`)">
-          <div class="flow-icon">🔗</div>
-          <div class="flow-name">{{ f.name }}</div>
+          <div class="flow-icon">{{ f.source === 'zip_import' ? '📁' : '🔗' }}</div>
+          <div class="flow-name">
+            {{ f.name }}
+            <el-tag v-if="f.source === 'zip_import'" size="small" effect="dark" type="success">导入</el-tag>
+          </div>
           <p class="dim">{{ f.description || '暂无描述' }}</p>
         </div>
       </transition-group>
@@ -73,6 +107,10 @@ onMounted(load)
 .page-head h2 {
   margin: 0;
 }
+.head-actions {
+  display: flex;
+  gap: 8px;
+}
 .dim {
   color: var(--pf-text-dim);
   font-size: 13px;
@@ -93,5 +131,8 @@ onMounted(load)
 .flow-name {
   font-weight: 600;
   margin: 10px 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 </style>

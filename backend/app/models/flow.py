@@ -16,6 +16,12 @@ class Flow(Base, UUIDMixin, TimestampMixin):
     description: Mapped[str] = mapped_column(Text, default="")
     owner_login_id: Mapped[str] = mapped_column(String(64), index=True)
     stable_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # 来源：blank（手工编排）| zip_import（压缩包导入）
+    source: Mapped[str] = mapped_column(String(16), default="blank")
+    # 压缩包导入后的文件夹树：{name, kind: folder|block|resource, path, children?, block_id?, node_id?}
+    tree: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 非 py 文件（资源）的文本内容：{相对路径: 文本}
+    resources: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class FlowNode(Base, UUIDMixin, TimestampMixin):

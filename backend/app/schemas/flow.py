@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 class FlowNodeSchema(BaseModel):
     id: str | None = None
-    node_type: Literal["block", "condition_branch"] = "block"
+    node_type: Literal["block", "condition_branch", "input"] = "block"
     block_id: str | None = None
     config: dict[str, Any] = {}
     position: dict[str, float] = {}
@@ -41,6 +41,7 @@ class FlowResponse(BaseModel):
     name: str
     description: str
     owner_login_id: str
+    source: str = "blank"
     created_at: datetime
     updated_at: datetime
 
@@ -50,7 +51,18 @@ class FlowResponse(BaseModel):
 class FlowDetailResponse(FlowResponse):
     nodes: list[Any] = []
     edges: list[Any] = []
+    tree: dict[str, Any] = {}
+    resources: dict[str, Any] = {}
 
 
 class FlowRunRequest(BaseModel):
     inputs: dict[str, Any] = {}
+
+
+class FlowImportResponse(BaseModel):
+    """zip 导入结果摘要。"""
+
+    flow_id: str
+    name: str
+    block_count: int
+    resource_count: int

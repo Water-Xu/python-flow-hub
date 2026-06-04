@@ -21,6 +21,9 @@ frontend/.vite/
 .env
 .env.*
 !.env.example
+# 前端构建期注入的非敏感公共前缀，必须随仓库提交，否则线上 baseURL 为空
+!.env.production
+!.env.development
 *-key.json
 *.pem
 gha-creds-*.json

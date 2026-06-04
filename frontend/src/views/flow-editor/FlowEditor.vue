@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { markRaw, onMounted, ref } from 'vue'
+import { computed, markRaw, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { VueFlow, useVueFlow } from '@vue-flow/core'
 import { Background } from '@vue-flow/background'
@@ -8,6 +8,8 @@ import { MiniMap } from '@vue-flow/minimap'
 import { ElMessage } from 'element-plus'
 import BlockNode from '@/components/nodes/BlockNode.vue'
 import ConditionBranchNode from '@/components/nodes/ConditionBranchNode.vue'
+import InputNode from '@/components/nodes/InputNode.vue'
+import CodeEditor from '@/components/CodeEditor.vue'
 import { blockApi, flowApi, type Block } from '@/api'
 
 const route = useRoute()
@@ -17,6 +19,7 @@ const flowId = route.params.id as string
 const nodeTypes = {
   block: markRaw(BlockNode),
   condition_branch: markRaw(ConditionBranchNode),
+  input: markRaw(InputNode),
 }
 
 const { addNodes, addEdges, toObject, onConnect } = useVueFlow()
@@ -25,18 +28,51 @@ const blocks = ref<Block[]>([])
 const running = ref(false)
 const elements = ref<any[]>([])
 
+// 文件夹树 / 资源
+const tree = ref<any | null>(null)
+const resources = ref<Record<string, string>>({})
+const treePanelOpen = ref(true)
+
+// 资源抽屉
+const resourceDrawer = ref(false)
+const resourceName = ref('')
+const resourceContent = ref('')
+
+// 块代码抽屉
+const codeDrawer = ref(false)
+const codeBlock = ref<Block | null>(null)
+const codeDraft = ref('')
+const codeSaving = ref(false)
+
+const treeProps = { children: 'children', label: 'name' }
+const treeData = computed(() => (tree.value?.children ?? []))
+const hasTree = computed(() => treeData.value.length > 0)
+
 onConnect((conn) => addEdges([{ ...conn, animated: true }]))
 
 async function load() {
   const [flow, blockList]: any = await Promise.all([flowApi.get(flowId), blockApi.list()])
   flowName.value = flow.name
   blocks.value = blockList
-  const nodes = (flow.nodes || []).map((n: any) => ({
-    id: n.id,
-    type: n.node_type,
-    position: n.position?.x != null ? n.position : { x: 100, y: 100 },
-    data: { label: n.config?.label || n.block_id || '节点', mode: n.config?.mode, block_id: n.block_id },
-  }))
+  tree.value = flow.tree && Object.keys(flow.tree).length ? flow.tree : null
+  resources.value = flow.resources || {}
+
+  const nodes = (flow.nodes || []).map((n: any) => {
+    if (n.node_type === 'input') {
+      return {
+        id: n.id,
+        type: 'input',
+        position: n.position?.x != null ? n.position : { x: 80, y: 80 },
+        data: { key: n.config?.key || 'value', value: stringifyValue(n.config?.value) },
+      }
+    }
+    return {
+      id: n.id,
+      type: n.node_type,
+      position: n.position?.x != null ? n.position : { x: 100, y: 100 },
+      data: { label: n.config?.label || n.block_id || '节点', mode: n.config?.mode, block_id: n.block_id },
+    }
+  })
   const edges = (flow.edges || []).map((e: any) => ({
     id: e.id,
     source: e.source_node_id,
@@ -46,6 +82,21 @@ async function load() {
     animated: true,
   }))
   elements.value = [...nodes, ...edges]
+}
+
+function stringifyValue(v: any): string {
+  if (v == null) return ''
+  return typeof v === 'string' ? v : JSON.stringify(v, null, 2)
+}
+
+function parseValue(text: string): any {
+  const t = (text ?? '').trim()
+  if (t === '') return ''
+  try {
+    return JSON.parse(t)
+  } catch {
+    return text
+  }
 }
 
 function addBlockNode(block: Block) {
@@ -70,15 +121,63 @@ function addConditionNode() {
   ])
 }
 
+function addInputNode() {
+  addNodes([
+    {
+      id: `in-${Date.now()}`,
+      type: 'input',
+      position: { x: 40, y: 120 + Math.random() * 160 },
+      data: { key: 'value', value: '1' },
+    },
+  ])
+  ElMessage.success('已添加测试输入，拖动右侧端点连到任意调用块')
+}
+
+async function onTreeClick(node: any) {
+  if (node.kind === 'resource') {
+    resourceName.value = node.path
+    resourceContent.value = resources.value[node.path] ?? '（资源内容为空）'
+    resourceDrawer.value = true
+  } else if (node.kind === 'block' && node.block_id) {
+    const block: any = await blockApi.get(node.block_id)
+    codeBlock.value = block
+    codeDraft.value = block.draft_code || ''
+    codeDrawer.value = true
+  }
+}
+
+async function saveBlockCode() {
+  if (!codeBlock.value) return
+  codeSaving.value = true
+  try {
+    await blockApi.update(codeBlock.value.id, { draft_code: codeDraft.value })
+    ElMessage.success('已保存调用块代码')
+    codeDrawer.value = false
+  } finally {
+    codeSaving.value = false
+  }
+}
+
 async function save() {
   const obj = toObject()
-  const nodes = obj.nodes.map((n: any) => ({
-    id: n.id,
-    node_type: n.type,
-    block_id: n.data?.block_id || null,
-    config: { label: n.data?.label, mode: n.data?.mode, ...(n.data?.config || {}) },
-    position: n.position,
-  }))
+  const nodes = obj.nodes.map((n: any) => {
+    if (n.type === 'input') {
+      return {
+        id: n.id,
+        node_type: 'input',
+        block_id: null,
+        config: { key: n.data?.key || 'value', value: parseValue(n.data?.value) },
+        position: n.position,
+      }
+    }
+    return {
+      id: n.id,
+      node_type: n.type,
+      block_id: n.data?.block_id || null,
+      config: { label: n.data?.label, mode: n.data?.mode, ...(n.data?.config || {}) },
+      position: n.position,
+    }
+  })
   const edges = obj.edges.map((e: any) => ({
     source_node_id: e.source,
     target_node_id: e.target,
@@ -100,6 +199,10 @@ async function run() {
   }
 }
 
+function treeIcon(kind: string): string {
+  return kind === 'folder' ? '📁' : kind === 'block' ? '🧩' : '📄'
+}
+
 onMounted(load)
 </script>
 
@@ -109,6 +212,14 @@ onMounted(load)
       <div class="head-left">
         <el-button text :icon="'ArrowLeft'" @click="router.push('/flows')">返回</el-button>
         <h3>{{ flowName }}</h3>
+        <el-button
+          v-if="hasTree"
+          text
+          :icon="treePanelOpen ? 'Fold' : 'Expand'"
+          @click="treePanelOpen = !treePanelOpen"
+        >
+          {{ treePanelOpen ? '收起目录' : '展开目录' }}
+        </el-button>
       </div>
       <div class="actions">
         <el-dropdown @command="addBlockNode">
@@ -120,18 +231,59 @@ onMounted(load)
           </template>
         </el-dropdown>
         <el-button :icon="'Switch'" @click="addConditionNode">条件分支</el-button>
+        <el-button type="success" :icon="'EditPen'" @click="addInputNode">添加输入</el-button>
         <el-button @click="save">保存</el-button>
         <el-button type="primary" :loading="running" :icon="'VideoPlay'" @click="run">运行整流</el-button>
       </div>
     </header>
 
-    <div class="canvas">
-      <VueFlow v-model="elements" :node-types="nodeTypes" fit-view-on-init :default-edge-options="{ animated: true }">
-        <Background :gap="18" pattern-color="#2a2e3a" />
-        <Controls />
-        <MiniMap pannable zoomable />
-      </VueFlow>
+    <div class="body">
+      <transition name="slide-panel">
+        <aside v-if="hasTree && treePanelOpen" class="tree-panel pf-card">
+          <div class="tree-title">📦 项目结构</div>
+          <p class="tree-hint">脚本为调用块，其余文件为资源</p>
+          <el-tree
+            :data="treeData"
+            :props="treeProps"
+            node-key="path"
+            default-expand-all
+            :expand-on-click-node="false"
+            @node-click="onTreeClick"
+          >
+            <template #default="{ data }">
+              <span class="tree-node" :class="`kind-${data.kind}`">
+                <span class="tree-emoji">{{ treeIcon(data.kind) }}</span>
+                <span class="tree-name">{{ data.name }}</span>
+                <el-tag v-if="data.kind === 'block'" size="small" effect="plain" type="primary">块</el-tag>
+                <el-tag v-else-if="data.kind === 'resource'" size="small" effect="plain" type="info">资源</el-tag>
+              </span>
+            </template>
+          </el-tree>
+        </aside>
+      </transition>
+
+      <div class="canvas">
+        <VueFlow v-model="elements" :node-types="nodeTypes" fit-view-on-init :default-edge-options="{ animated: true }">
+          <Background :gap="18" pattern-color="#2a2e3a" />
+          <Controls />
+          <MiniMap pannable zoomable />
+        </VueFlow>
+      </div>
     </div>
+
+    <el-drawer v-model="resourceDrawer" :title="resourceName" size="46%" direction="rtl">
+      <pre class="resource-view">{{ resourceContent }}</pre>
+    </el-drawer>
+
+    <el-drawer v-model="codeDrawer" :title="codeBlock?.name" size="58%" direction="rtl">
+      <div class="code-drawer">
+        <CodeEditor v-model="codeDraft" language="python" class="code-drawer-body" />
+        <div class="code-drawer-foot">
+          <el-button @click="codeDrawer = false">关闭</el-button>
+          <el-button type="primary" :loading="codeSaving" @click="saveBlockCode">保存代码</el-button>
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -159,10 +311,80 @@ onMounted(load)
   display: flex;
   gap: 8px;
 }
+.body {
+  flex: 1;
+  display: flex;
+  gap: 12px;
+  min-height: 0;
+}
+.tree-panel {
+  width: 280px;
+  flex-shrink: 0;
+  padding: 14px;
+  overflow: auto;
+}
+.tree-title {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.tree-hint {
+  font-size: 12px;
+  color: var(--pf-text-dim);
+  margin: 0 0 12px;
+}
+.tree-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.tree-emoji {
+  font-size: 14px;
+}
+.tree-name {
+  flex: 1;
+}
+.kind-block .tree-name {
+  color: var(--pf-accent);
+}
 .canvas {
   flex: 1;
+  min-width: 0;
   border: 1px solid var(--pf-border);
   border-radius: 12px;
   overflow: hidden;
+}
+.resource-view {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--pf-text);
+  line-height: 1.6;
+}
+.code-drawer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.code-drawer-body {
+  flex: 1;
+  min-height: 0;
+}
+.code-drawer-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 12px;
+}
+.slide-panel-enter-active,
+.slide-panel-leave-active {
+  transition: transform 0.28s ease, opacity 0.28s ease;
+}
+.slide-panel-enter-from,
+.slide-panel-leave-to {
+  transform: translateX(-14px);
+  opacity: 0;
 }
 </style>

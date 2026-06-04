@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import posixpath
+import zipfile
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,18 +14,31 @@ from app.auth.rbac import Role, require_role
 from app.core.execution_service import execute_block
 from app.core.flow.dag import validate_dag
 from app.core.flow.flow_runner import run_flow
+from app.core.flow.zip_import import build_tree, parse_zip
 from app.db import get_session
-from app.errors import PYFLOW_BLOCK_NOT_FOUND, PYFLOW_FLOW_NOT_FOUND, BusinessException
+from app.errors import (
+    PYFLOW_BLOCK_NOT_FOUND,
+    PYFLOW_EXEC_INPUT_INVALID,
+    PYFLOW_FLOW_NOT_FOUND,
+    BusinessException,
+)
 from app.models.block import Block
+from app.models.base_mixin import gen_uuid
 from app.models.execution import FlowRun
 from app.models.flow import Flow, FlowEdge, FlowNode
 from app.schemas.flow import (
     FlowCreateRequest,
     FlowDetailResponse,
     FlowGraphRequest,
+    FlowImportResponse,
     FlowResponse,
     FlowRunRequest,
 )
+
+# 导入压缩包最大体积（10MB）
+_MAX_ZIP_BYTES = 10 * 1024 * 1024
+# 单流程最多导入的脚本块数量（防滥用）
+_MAX_SCRIPT_BLOCKS = 200
 
 router = APIRouter(prefix="/api/flows", tags=["flows"])
 
@@ -56,6 +71,91 @@ async def save_flow(
     return flow
 
 
+@router.post("/import-zip", response_model=FlowImportResponse)
+async def import_flow_zip(
+    file: UploadFile = File(...),
+    name: str | None = Form(default=None),
+    session: AsyncSession = Depends(get_session),
+    login_id: str = Depends(require_role(Role.EDITOR)),
+):
+    """导入 Python 脚本压缩包：`.py` 解析为调用块，其余文件作为资源，整体生成 1 个流程。"""
+    data = await file.read()
+    if not data:
+        raise BusinessException(PYFLOW_EXEC_INPUT_INVALID, "empty file")
+    if len(data) > _MAX_ZIP_BYTES:
+        raise BusinessException(PYFLOW_EXEC_INPUT_INVALID, "zip exceeds 10MB limit")
+    try:
+        parsed = parse_zip(data)
+    except zipfile.BadZipFile:
+        raise BusinessException(PYFLOW_EXEC_INPUT_INVALID, "invalid zip file")
+
+    if not parsed.scripts and not parsed.resources:
+        raise BusinessException(PYFLOW_EXEC_INPUT_INVALID, "zip has no importable files")
+    if len(parsed.scripts) > _MAX_SCRIPT_BLOCKS:
+        raise BusinessException(PYFLOW_EXEC_INPUT_INVALID, f"too many scripts (>{_MAX_SCRIPT_BLOCKS})")
+
+    flow_name = (name or _strip_zip_ext(file.filename) or "导入流程").strip()[:128]
+    flow = Flow(
+        id=gen_uuid(),
+        name=flow_name,
+        description=f"由压缩包导入，{len(parsed.scripts)} 个脚本块 / {len(parsed.resources)} 个资源",
+        owner_login_id=login_id,
+        source="zip_import",
+    )
+    session.add(flow)
+
+    leaves: list[dict[str, Any]] = []
+    cols = 4
+    for idx, (path, code) in enumerate(sorted(parsed.scripts.items())):
+        block_id = gen_uuid()
+        node_id = gen_uuid()
+        filename = posixpath.basename(path)
+        session.add(Block(
+            id=block_id,
+            name=path,
+            description=f"导入自 {flow_name}",
+            owner_login_id=login_id,
+            type="script",
+            draft_code=code,
+            input_ports=[{"name": "inputs", "type": "any", "required": False}],
+            output_ports=[{"name": "output", "type": "any", "required": False}],
+            execution_mode="sync_http",
+        ))
+        session.add(FlowNode(
+            id=node_id,
+            flow_id=flow.id,
+            node_type="block",
+            block_id=block_id,
+            config={"label": filename, "mode": "sync_http", "path": path},
+            position={"x": 120 + (idx % cols) * 240, "y": 120 + (idx // cols) * 150},
+        ))
+        leaves.append({"path": path, "kind": "block", "block_id": block_id, "node_id": node_id})
+
+    for path in parsed.resources:
+        leaves.append({"path": path, "kind": "resource"})
+
+    flow.tree = build_tree(leaves)
+    flow.resources = parsed.resources
+    await session.commit()
+
+    return FlowImportResponse(
+        flow_id=flow.id,
+        name=flow.name,
+        block_count=len(parsed.scripts),
+        resource_count=len(parsed.resources),
+    )
+
+
+def _strip_zip_ext(filename: str | None) -> str:
+    if not filename:
+        return ""
+    base = posixpath.basename(filename)
+    for ext in (".zip", ".tar", ".gz"):
+        if base.lower().endswith(ext):
+            return base[: -len(ext)]
+    return base
+
+
 @router.get("/{flow_id}", response_model=FlowDetailResponse)
 async def get_flow(
     flow_id: str,
@@ -72,6 +172,8 @@ async def get_flow(
     resp = FlowDetailResponse.model_validate(flow)
     resp.nodes = [_node_dict(n) for n in nodes]
     resp.edges = [_edge_dict(e) for e in edges]
+    resp.tree = flow.tree or {}
+    resp.resources = flow.resources or {}
     return resp
 
 

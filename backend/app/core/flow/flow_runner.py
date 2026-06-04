@@ -52,6 +52,13 @@ async def run_flow(
 
         node_inputs = _gather_inputs(incoming, outputs, initial_inputs)
 
+        # 测试输入节点：不执行代码，仅把配置的键值作为输出向下游注入（决策：可连接任意块的 input）
+        if node.get("node_type") == "input":
+            outputs[node_id] = _input_payload(node.get("config", {}))
+            if checkpoint:
+                await checkpoint(node_id, "done", outputs[node_id])
+            continue
+
         if node.get("node_type") == "condition_branch":
             hit_port = resolve_branch(node.get("config", {}), node_inputs)
             active_ports[node_id] = hit_port
@@ -68,6 +75,21 @@ async def run_flow(
             await checkpoint(node_id, "done", output)
 
     return outputs
+
+
+def _input_payload(config: dict[str, Any]) -> dict[str, Any]:
+    """测试输入节点 → 输出字典。
+
+    config 形如 {"key": "value", "value": <任意 JSON>}，输出 {key: value}；
+    若未配置 key 则把 value（须为 dict）整体作为输出。
+    """
+    key = config.get("key")
+    value = config.get("value")
+    if key:
+        return {key: value}
+    if isinstance(value, dict):
+        return dict(value)
+    return {"value": value}
 
 
 def _gather_inputs(
