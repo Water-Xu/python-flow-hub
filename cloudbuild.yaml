@@ -94,9 +94,8 @@ steps:
         gcloud container clusters get-credentials $_CLUSTER --zone=$_ZONE --project=$_PROJECT
         kubectl apply -f deploy/k8s/pyflow-hub/deployment.yaml
         kubectl apply -f deploy/k8s/pyflow-hub/frontend.yaml
-        RUNNER_IMG=$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-runner:$_SHORT_SHA
         kubectl patch configmap pyflow-hub-config -n $_NAMESPACE --type merge \
-          -p "{\"data\":{\"PYFLOW_RUNNER_IMAGE\":\"$RUNNER_IMG\"}}"
+          -p "{\"data\":{\"PYFLOW_RUNNER_IMAGE\":\"$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-runner:$_SHORT_SHA\"}}"
         kubectl set image deployment/pyflow-hub pyflow-hub=$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-hub:$_SHORT_SHA -n $_NAMESPACE
         kubectl set image deployment/pyflow-web pyflow-web=$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-web:$_SHORT_SHA -n $_NAMESPACE
         kubectl rollout restart deployment/pyflow-hub -n $_NAMESPACE
