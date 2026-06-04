@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pyflow-hub-config
+  namespace: pyflow-blocks
+data:
+  PYFLOW_DEPLOYMENT_MODE: "k8s"
+  PYFLOW_REDIS_CLUSTER: "true"
+  PYFLOW_MINIO_BUCKET: "pyflow-versions"
+  PYFLOW_AUTH_ENABLED: "true"
+  PYFLOW_GCP_PROJECT: "lhy-styon-dev-4832"
+  PYFLOW_OTLP_ENDPOINT: "http://otel-collector:4318"
+  PYFLOW_SATOKEN_VERIFY_URL: "http://lhy-styon-gateway:8201/lhy-styon-auth/token/verify"
+---
+# 敏感连接串占位（实际由 CICD / kubectl create secret 注入，决策 8/14：不落明文到仓库）
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pyflow-hub-secret
+  namespace: pyflow-blocks
+type: Opaque
+stringData:
+  PYFLOW_DB_DSN: "postgresql+asyncpg://pyflow:CHANGE_ME@10.196.0.3:5432/pyflow"
+  PYFLOW_REDIS_URL: "redis://10.0.1.11:6379/0"
+  PYFLOW_RABBITMQ_URL: "amqp://lhy-styon:CHANGE_ME@rabbitmq:5672//lhy-styon"
+  PYFLOW_MINIO_ENDPOINT: "minio:9000"
+  PYFLOW_MINIO_ACCESS_KEY: "minioadmin"
+  PYFLOW_MINIO_SECRET_KEY: "CHANGE_ME"
+  PYFLOW_BOOTSTRAP_ADMIN: "admin"

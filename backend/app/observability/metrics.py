@@ -1,0 +1,18 @@
+"""Prometheus 自定义指标（决策 13，抓取走 GMP PodMonitoring / label 发现）。"""
+
+from __future__ import annotations
+
+from prometheus_client import Counter, Gauge, Histogram
+
+EXEC_COUNT = Counter(
+    "pyflow_execution_total", "块执行次数", ["block_id", "status"]
+)
+EXEC_DURATION = Histogram(
+    "pyflow_execution_duration_seconds", "块执行耗时", ["block_id"]
+)
+FLOW_RUN_COUNT = Counter(
+    "pyflow_flow_run_total", "整流执行次数", ["flow_id", "status"]
+)
+DEP_UP = Gauge(
+    "pyflow_dependency_up", "依赖连通性（1=up,0=down）", ["dependency"]
+)

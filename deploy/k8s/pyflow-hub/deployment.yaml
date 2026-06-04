@@ -1,0 +1,62 @@
+# 控制面 FastAPI（MVP 单副本；多副本需 pyflow-control 节点池，决策 12）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pyflow-hub
+  namespace: pyflow-blocks
+  labels:
+    app: pyflow-hub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pyflow-hub
+  template:
+    metadata:
+      labels:
+        app: pyflow-hub
+        pyflow.runtime/protocol: "1"
+    spec:
+      serviceAccountName: pyflow-hub-sa
+      containers:
+        - name: pyflow-hub
+          image: us-central1-docker.pkg.dev/lhy-styon-dev-4832/lhy-styon/pyflow-hub:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: pyflow-hub-config
+            - secretRef:
+                name: pyflow-hub-secret
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+            initialDelaySeconds: 20
+            timeoutSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8000
+            initialDelaySeconds: 15
+            timeoutSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyflow-hub
+  namespace: pyflow-blocks
+spec:
+  selector:
+    app: pyflow-hub
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

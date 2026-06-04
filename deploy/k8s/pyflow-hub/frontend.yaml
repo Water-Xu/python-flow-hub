@@ -1,0 +1,42 @@
+# PyFlowHub 前端（nginx：静态文件 + /lhy-styon-pyflow 反代到控制面）
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pyflow-web
+  namespace: pyflow-blocks
+  labels:
+    app: pyflow-web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pyflow-web
+  template:
+    metadata:
+      labels:
+        app: pyflow-web
+    spec:
+      containers:
+        - name: pyflow-web
+          image: us-central1-docker.pkg.dev/lhy-styon-dev-4832/lhy-styon/pyflow-web:latest
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pyflow-web
+  namespace: pyflow-blocks
+spec:
+  selector:
+    app: pyflow-web
+  ports:
+    - port: 80
+      targetPort: 80

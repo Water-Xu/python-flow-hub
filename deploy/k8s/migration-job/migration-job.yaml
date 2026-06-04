@@ -1,0 +1,22 @@
+# Alembic 迁移 Job（决策：不放控制面 InitContainer，多副本会并发竞态）
+# Job 内 advisory lock 兜底防并发；Job 成功后控制面才滚动，失败则中止发布。
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pyflow-migration
+  namespace: pyflow-blocks
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: pyflow-hub-sa
+      containers:
+        - name: migration
+          image: us-central1-docker.pkg.dev/lhy-styon-dev-4832/lhy-styon/pyflow-hub:latest
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: pyflow-hub-config
+            - secretRef:
+                name: pyflow-hub-secret

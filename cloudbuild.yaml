@@ -1,0 +1,107 @@
+# PyFlowHub Cloud Build：构建三镜像 + 迁移 Job + 滚动更新 GKE
+# 由 GitHub Actions 在 push master 时 gcloud builds submit --async 触发
+substitutions:
+  _REGION: us-central1
+  _PROJECT: lhy-styon-dev-4832
+  _REPO: lhy-styon
+  _CLUSTER: lhy-styon-dev
+  _ZONE: us-central1-a
+  _NAMESPACE: pyflow-blocks
+  _SHORT_SHA: latest
+
+steps:
+  # 1) 控制面镜像（context=根，Dockerfile 同时拷贝 pyflow_runtime + backend）
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build-hub
+    args:
+      - build
+      - '-f'
+      - backend/Dockerfile
+      - '-t'
+      - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-hub:$_SHORT_SHA'
+      - '-t'
+      - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-hub:latest'
+      - '.'
+
+  # 2) runner 镜像（context=根）
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build-runner
+    args:
+      - build
+      - '-f'
+      - runner/Dockerfile
+      - '-t'
+      - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-runner:$_SHORT_SHA'
+      - '-t'
+      - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-runner:latest'
+      - '.'
+
+  # 3) 前端镜像（context=frontend）
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build-web
+    args:
+      - build
+      - '-f'
+      - frontend/Dockerfile
+      - '-t'
+      - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-web:$_SHORT_SHA'
+      - '-t'
+      - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-web:latest'
+      - 'frontend'
+
+  # 4) 推送全部镜像
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push
+    waitFor: [build-hub, build-runner, build-web]
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        docker push --all-tags $_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-hub
+        docker push --all-tags $_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-runner
+        docker push --all-tags $_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-web
+
+  # 5) Alembic 迁移 Job（成功后才滚动控制面；失败中止发布）
+  - name: 'gcr.io/cloud-builders/kubectl'
+    id: migrate
+    waitFor: [push]
+    entrypoint: bash
+    env:
+      - 'CLOUDSDK_COMPUTE_ZONE=$_ZONE'
+      - 'CLOUDSDK_CONTAINER_CLUSTER=$_CLUSTER'
+    args:
+      - '-c'
+      - |
+        kubectl apply -f deploy/k8s/namespace.yaml
+        kubectl apply -f deploy/k8s/pyflow-hub/rbac.yaml
+        kubectl apply -f deploy/k8s/pyflow-hub/config.yaml
+        kubectl delete job pyflow-migration -n $_NAMESPACE --ignore-not-found
+        sed "s|pyflow-hub:latest|pyflow-hub:$_SHORT_SHA|g" deploy/k8s/migration-job/migration-job.yaml | kubectl apply -f -
+        kubectl wait --for=condition=complete --timeout=300s job/pyflow-migration -n $_NAMESPACE
+
+  # 6) 滚动更新控制面 + 前端
+  - name: 'gcr.io/cloud-builders/kubectl'
+    id: rollout
+    waitFor: [migrate]
+    entrypoint: bash
+    env:
+      - 'CLOUDSDK_COMPUTE_ZONE=$_ZONE'
+      - 'CLOUDSDK_CONTAINER_CLUSTER=$_CLUSTER'
+    args:
+      - '-c'
+      - |
+        kubectl apply -f deploy/k8s/pyflow-hub/deployment.yaml
+        kubectl apply -f deploy/k8s/pyflow-hub/frontend.yaml
+        kubectl set image deployment/pyflow-hub pyflow-hub=$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-hub:$_SHORT_SHA -n $_NAMESPACE
+        kubectl set image deployment/pyflow-web pyflow-web=$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-web:$_SHORT_SHA -n $_NAMESPACE
+        kubectl rollout status deployment/pyflow-hub -n $_NAMESPACE --timeout=180s
+
+images:
+  - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-hub:$_SHORT_SHA'
+  - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-runner:$_SHORT_SHA'
+  - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-web:$_SHORT_SHA'
+
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+timeout: 2400s

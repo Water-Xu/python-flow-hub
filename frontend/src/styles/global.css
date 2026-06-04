@@ -1,0 +1,70 @@
+:root {
+  --pf-bg: #0f1117;
+  --pf-panel: #1a1d27;
+  --pf-border: #2a2e3a;
+  --pf-accent: #6366f1;
+  --pf-accent-2: #06b6d4;
+  --pf-text: #e5e7eb;
+  --pf-text-dim: #9ca3af;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--pf-bg);
+  color: var(--pf-text);
+}
+
+/* 全局过渡动画 */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.list-move,
+.list-enter-active,
+.list-leave-active {
+  transition: all 0.3s ease;
+}
+.list-enter-from,
+.list-leave-to {
+  opacity: 0;
+  transform: translateX(-16px);
+}
+
+.pf-card {
+  background: var(--pf-panel);
+  border: 1px solid var(--pf-border);
+  border-radius: 12px;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.pf-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--pf-accent);
+  box-shadow: 0 8px 24px rgba(99, 102, 241, 0.18);
+}
+
+@keyframes pf-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+.pf-running {
+  animation: pf-pulse 1.2s ease-in-out infinite;
+}

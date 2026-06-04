@@ -1,0 +1,7 @@
+# 所有 Flow 部署统一落固定 namespace=pyflow-blocks（不动态建 namespace，决策 12 / K8s RBAC）
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pyflow-blocks
+  labels:
+    app.kubernetes.io/part-of: pyflow-hub

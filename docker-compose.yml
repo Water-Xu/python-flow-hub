@@ -1,0 +1,59 @@
+# 本地开发依赖编排（对齐现有平台中间件：RabbitMQ vhost=/lhy-styon + PostgreSQL + Redis + MinIO）
+# 启动：docker compose up -d
+services:
+  postgres:
+    image: postgres:15
+    container_name: pyflow-postgres
+    environment:
+      POSTGRES_USER: pyflow
+      POSTGRES_PASSWORD: pyflow
+      POSTGRES_DB: pyflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - pyflow_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pyflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    container_name: pyflow-redis
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: pyflow-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: pyflow
+      RABBITMQ_DEFAULT_PASS: pyflow
+      RABBITMQ_DEFAULT_VHOST: /lhy-styon
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: pyflow-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - pyflow_minio:/data
+
+volumes:
+  pyflow_pg:
+  pyflow_minio:

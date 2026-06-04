@@ -1,0 +1,26 @@
+# PyFlowHub 接入现有网关/Ingress（决策 5，归入 Phase 1b）
+# ⚠️ 改动共享 gateway-ingress.yaml 与网关 SaTokenConfig 时必须保留旧版本以便快速回滚。
+# WS backend 单独配 timeoutSec=3600；REST backend 用默认/较短 timeout。
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: pyflow-ws-backendconfig
+  namespace: pyflow-blocks
+spec:
+  timeoutSec: 3600
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: pyflow-rest-backendconfig
+  namespace: pyflow-blocks
+spec:
+  timeoutSec: 60
+---
+# 在共享 gateway-ingress.yaml 的 rules.http.paths 中追加（示意）：
+# - path: /lhy-styon-pyflow
+#   pathType: Prefix
+#   backend: { service: { name: pyflow-web, port: { number: 80 } } }
+#
+# 网关 SaTokenConfig 追加（只做登录态校验，细粒度 RBAC 由 FastAPI 自管）：
+#   SaRouter.match("/lhy-styon-pyflow/**", r -> StpUtil.checkLogin()).stop();

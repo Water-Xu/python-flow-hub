@@ -1,0 +1,57 @@
+# 控制面 ServiceAccount + 最小权限 namespaced Role（决策 K8s RBAC）
+# 全部 namespaced（非 ClusterRole），禁止跨 namespace / cluster 级权限。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pyflow-hub-sa
+  namespace: pyflow-blocks
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pyflow-hub-role
+  namespace: pyflow-blocks
+rules:
+  # 编排与部署
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create", "get", "list", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "get", "list", "update", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "update", "delete"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects", "triggerauthentications"]
+    verbs: ["create", "get", "list", "update", "delete"]
+  # Secret：仅限 pyflow-* 前缀（决策 14 / 数据模型 secret_refs + KEDA auth）
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "get", "update", "delete"]
+  # 按块类型隔离的 KSA（决策 14 Workload Identity）
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list"]
+  # egress deny-all + 白名单（决策 1/14）
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "get", "update", "delete"]
+  # Pod 状态轮询 → WS 推送
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pyflow-hub-rolebinding
+  namespace: pyflow-blocks
+subjects:
+  - kind: ServiceAccount
+    name: pyflow-hub-sa
+    namespace: pyflow-blocks
+roleRef:
+  kind: Role
+  name: pyflow-hub-role
+  apiGroup: rbac.authorization.k8s.io

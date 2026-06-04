@@ -1,0 +1,25 @@
+# PyFlowHub 控制面依赖（pin 死版本，对齐 pyflow_runtime）
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pydantic-settings==2.5.2
+sqlalchemy[asyncio]==2.0.35
+asyncpg==0.29.0
+alembic==1.13.2
+redis==5.0.8
+aio-pika==9.4.3
+minio==7.2.8
+httpx==0.27.2
+structlog==24.4.0
+prometheus-client==0.20.0
+jmespath==1.0.1
+jsonpath-ng==1.6.1
+docker==7.1.0
+python-multipart==0.0.9
+websockets==13.0.1
+opentelemetry-api==1.27.0
+opentelemetry-sdk==1.27.0
+opentelemetry-exporter-otlp-proto-http==1.27.0
+opentelemetry-instrumentation-fastapi==0.48b0
+# 执行侧共享库（本地以 -e 安装：pip install -e ../pyflow_runtime）
+# pyflow-runtime==0.1.0

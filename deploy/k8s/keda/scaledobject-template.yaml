@@ -1,0 +1,42 @@
+# KEDA ScaledObject 模板（决策 12：参数按 pyflow-workers 节点池容量推导，不硬编码）
+# {占位符} 由 manifest_generator.py / keda_manager.py 渲染。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pyflow-rabbitmq-auth
+  namespace: pyflow-blocks
+type: Opaque
+stringData:
+  # http 协议（KEDA 通过 management API 读队列深度）；vhost URL 编码 /lhy-styon → %2Flhy-styon
+  host: "http://USER:PASSWORD@rabbitmq.lhy-styon.svc.cluster.local:15672/%2Flhy-styon"
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: pyflow-rabbitmq-trigger-auth
+  namespace: pyflow-blocks
+spec:
+  secretTargetRef:
+    - parameter: host
+      name: pyflow-rabbitmq-auth
+      key: host
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: "{resource_prefix}-{block_short}-scaler"
+  namespace: pyflow-blocks
+spec:
+  scaleTargetRef:
+    name: "{resource_prefix}-{block_short}"
+  minReplicaCount: 0 # 仅 async_mq 块允许 0；sync_http/both 块强制 ≥1（决策 4）
+  maxReplicaCount: "{max_replica}" # 按节点池容量推导（决策 12）
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: http
+        queueName: "block.{block_id}.queue"
+        mode: QueueLength
+        value: "{msgs_per_replica}" # 按单条消息处理耗时标定（决策 12）
+      authenticationRef:
+        name: pyflow-rabbitmq-trigger-auth
