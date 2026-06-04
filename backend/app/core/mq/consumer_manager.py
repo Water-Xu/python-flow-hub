@@ -3,25 +3,30 @@
 生产环境：消费者 = Block Pod 内 pyflow_runtime.consumer，由 KEDA 扩缩。
 dev-local：控制面启动轻量 aio-pika 消费者，通过 docker_executor 在本机 Docker 执行代码。
            lifespan 启动/停止，逐块管理，不常驻消费生产队列（只 dev 调试用）。
+
+与 runner 镜像（prod）共用同一套 pyflow_runtime 幂等/条件/回复/退避语义，杜绝逻辑分叉。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import time
-from dataclasses import dataclass, field
+from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
 
 import aio_pika
 
 from app.config import get_settings
-from app.core.mq.topology_builder import declare_block_topology
+from app.core.mq.topology_builder import declare_block_topology, publish_reply
+from app.observability.logging import get_logger
+from app.observability.metrics import MQ_CONSUMED, MQ_REPLY_PUBLISHED
 
-logger = logging.getLogger("pyflow.mq")
+logger = get_logger("pyflow.mq")
 POD_NAME = os.getenv("HOSTNAME", "local-runner")
+_PERSISTENT = aio_pika.DeliveryMode.PERSISTENT
 
 
 @dataclass
@@ -44,6 +49,7 @@ class ConsumerManager:
     def __init__(self) -> None:
         self._consumers: dict[str, ConsumerStatus] = {}
         self._tasks: dict[str, asyncio.Task] = {}
+        self._block_cfgs: dict[str, dict[str, Any]] = {}
         self._connection: aio_pika.abc.AbstractRobustConnection | None = None
         self._channel: aio_pika.abc.AbstractChannel | None = None
         self._redis: Any = None
@@ -59,8 +65,8 @@ class ConsumerManager:
             self._channel = await self._connection.channel()
             await self._channel.set_qos(prefetch_count=1)
             logger.info("mq_connected", url=self._settings.rabbitmq_url[:40])
-        except Exception as exc:
-            logger.warning("mq_connect_failed", exc=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("mq_connect_failed", error=str(exc)[:200])
             return False
 
         try:
@@ -71,8 +77,8 @@ class ConsumerManager:
             )
             await self._redis.ping()
             logger.info("redis_connected")
-        except Exception as exc:
-            logger.warning("redis_connect_failed_idempotency_disabled", exc=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("redis_connect_failed_idempotency_disabled", error=str(exc)[:200])
             self._redis = None
 
         self._running = True
@@ -88,7 +94,8 @@ class ConsumerManager:
         if self._connection and not self._connection.is_closed:
             await self._connection.close()
         if self._redis:
-            await self._redis.aclose()
+            with suppress(Exception):
+                await self._redis.aclose()
         logger.info("mq_disconnected")
 
     # ── 消费者生命周期 ────────────────────────────────────────────────────────
@@ -118,6 +125,7 @@ class ConsumerManager:
         block_name: str,
         block_code: str,
         mq_config: dict[str, Any],
+        compute_config: dict[str, Any] | None = None,
     ) -> bool:
         """启动指定 Block 的消费者（已运行则重启）。"""
         await self.stop_consumer(block_id)
@@ -129,9 +137,11 @@ class ConsumerManager:
 
         status = ConsumerStatus(block_id=block_id, block_name=block_name, status="connecting")
         self._consumers[block_id] = status
+        block_cfg = {"mq_config": mq_config or {}, "compute_config": compute_config or {}}
+        self._block_cfgs[block_id] = block_cfg
 
         task = asyncio.create_task(
-            self._consume_loop(block_id, block_code, mq_config, status),
+            self._consume_loop(block_id, block_code, block_cfg, status),
             name=f"consumer-{block_id}",
         )
         self._tasks[block_id] = task
@@ -141,10 +151,8 @@ class ConsumerManager:
         task = self._tasks.pop(block_id, None)
         if task and not task.done():
             task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await task
-            except asyncio.CancelledError:
-                pass
         if block_id in self._consumers:
             self._consumers[block_id].status = "stopped"
 
@@ -154,14 +162,12 @@ class ConsumerManager:
         self,
         block_id: str,
         block_code: str,
-        mq_config: dict[str, Any],
+        block_cfg: dict[str, Any],
         status: ConsumerStatus,
     ) -> None:
-        from pyflow_runtime.consumer import consume_with_idempotency
         from pyflow_runtime.idempotency import IdempotencyStore
 
-        retry_delay_ms = int(mq_config.get("retry_delay_ms", 5000))
-        block_cfg = {"mq_config": mq_config, "compute_config": {}}
+        retry_delay_ms = int((block_cfg.get("mq_config") or {}).get("retry_delay_ms", 5000))
 
         try:
             channel = await self._connection.channel()
@@ -176,45 +182,60 @@ class ConsumerManager:
 
             status.status = "running"
             status.started_at = time.time()
-            logger.info("consumer_started", block_id=block_id)
+            logger.info("consumer_started", block_id=block_id, idempotency=bool(store))
 
             async with queue.iterator() as iter_:
                 async for message in iter_:
-                    async with message.process(requeue=False, ignore_processed=True):
+                    try:
                         await self._handle_message(
                             message, block_id, block_code, block_cfg, store, status, channel
                         )
+                    except Exception as exc:  # noqa: BLE001 - 处理器兜底，绝不让循环崩
+                        status.errors += 1
+                        status.last_error = str(exc)[:200]
+                        logger.error("message_handle_error", block_id=block_id,
+                                     error=str(exc)[:200])
+                        await self._safety_retry(channel, block_id, message, block_cfg)
 
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             status.status = "error"
-            status.error_detail = str(exc)
-            logger.error("consumer_error", block_id=block_id, exc=str(exc))
+            status.error_detail = str(exc)[:300]
+            logger.error("consumer_error", block_id=block_id, error=str(exc)[:200])
 
     async def _handle_message(
         self,
         message: aio_pika.abc.AbstractIncomingMessage,
         block_id: str,
         block_code: str,
-        block_cfg: dict,
+        block_cfg: dict[str, Any],
         store: Any,
         status: ConsumerStatus,
         channel: aio_pika.abc.AbstractChannel,
     ) -> None:
-        from pyflow_runtime.consumer import consume_with_idempotency
-        from pyflow_runtime.idempotency import IdempotencyStore
-        from pyflow_runtime.backoff_queue import backoff_queue as backoff_q
-        from app.core.mq.topology_builder import publish_message
+        from pyflow_runtime.consumer import consume_with_idempotency, protocol_compatible
 
         try:
             body = json.loads(message.body.decode("utf-8"))
-        except Exception:
+        except Exception:  # noqa: BLE001
             body = {}
 
         headers = dict(message.headers or {})
-        retry_count = int(headers.get("x-retry-count", 0))
-        max_retry = int((block_cfg.get("mq_config") or {}).get("max_retry", 3))
+        mq_cfg = block_cfg.get("mq_config") or {}
+        retry_count = int(headers.get("x-retry-count", 0) or 0)
+        max_retry = int(mq_cfg.get("max_retry", 3))
+
+        # 协议版本校验（决策 3.1 点 5）：不兼容直接转死信归档，绝不按旧契约执行
+        if not protocol_compatible(headers):
+            await self._publish_dead(channel, block_id, message, headers)
+            await message.ack()
+            status.errors += 1
+            status.last_error = "protocol mismatch"
+            MQ_CONSUMED.labels(block_id=block_id, action="protocol_reject").inc()
+            return
+
+        reply_publisher = self._make_reply_publisher(channel, block_id)
 
         if store:
             action = await consume_with_idempotency(
@@ -224,70 +245,149 @@ class ConsumerManager:
                 store=store,
                 execute_fn=lambda inputs: self._exec_block(block_code, inputs),
                 message_id=message.message_id,
+                reply_publisher=reply_publisher,
             )
         else:
-            # Redis 不可用：直接执行，不做幂等
-            try:
-                mq_cfg = block_cfg.get("mq_config") or {}
-                action = await self._exec_block_with_result(body, block_code, mq_cfg)
-            except Exception as exc:
-                action = "nack"
-                status.last_error = str(exc)[:200]
+            action = await self._exec_without_idempotency(
+                body, block_code, mq_cfg, message.message_id, reply_publisher, status
+            )
 
         if action == "ack":
             await message.ack()
             status.processed += 1
         elif action == "backoff":
-            await message.nack(requeue=False)
             await self._publish_backoff(channel, block_id, message, headers)
-        else:  # nack → DLQ → TTL+DLX 重试
+            await message.ack()
+        else:  # nack → 递增 x-retry-count 重投 DLQ（TTL 延迟回主队列），超限转死信归档
             if retry_count >= max_retry:
-                # 超过最大重试，路由到死信归档
-                await message.nack(requeue=False)
+                await self._publish_dead(channel, block_id, message, headers)
             else:
-                headers["x-retry-count"] = str(retry_count + 1)
-                await message.nack(requeue=False)
+                await self._publish_retry(channel, block_id, message, headers, retry_count + 1)
+            await message.ack()
             status.errors += 1
+        MQ_CONSUMED.labels(block_id=block_id, action=action).inc()
+
+    async def _exec_without_idempotency(
+        self, body: dict, block_code: str, mq_cfg: dict,
+        message_id: str | None, reply_publisher: Any, status: ConsumerStatus,
+    ) -> str:
+        """Redis 不可用时的降级路径：直接执行 + 手动回复（无幂等去重，靠下游兜底）。"""
+        from pyflow_runtime.condition_engine import ConditionError, evaluate_condition
+        from pyflow_runtime.idempotency import extract_business_id
+        from pyflow_runtime.input_mapper import map_inputs
+        from pyflow_runtime.reply_builder import build_reply
+
+        expression = mq_cfg.get("condition_expression")
+        if expression:
+            try:
+                if not evaluate_condition(expression, mq_cfg.get("condition_language", "jmespath"), body):
+                    return "ack"
+            except ConditionError:
+                return "ack"
+        try:
+            inputs = map_inputs(body, mq_cfg.get("input_mapping"))
+            result = await self._exec_block(block_code, inputs)
+            if mq_cfg.get("reply_enabled") and reply_publisher is not None:
+                bid = extract_business_id(body, message_id)
+                reply = build_reply(result, body, mq_cfg.get("carry_fields"), dedup_business_id=bid)
+                await reply_publisher(reply, mq_cfg)
+            return "ack"
+        except Exception as exc:  # noqa: BLE001
+            status.last_error = str(exc)[:200]
+            return "nack"
+
+    def _make_reply_publisher(self, channel: aio_pika.abc.AbstractChannel, block_id: str):
+        async def _publish(reply: dict[str, Any], mq_config: dict[str, Any]) -> None:
+            await publish_reply(channel, mq_config, reply, block_id=block_id)
+            MQ_REPLY_PUBLISHED.labels(block_id=block_id).inc()
+
+        return _publish
 
     async def _exec_block(self, code: str, inputs: dict) -> dict:
-        """通过 docker_executor 执行代码（dev-local Docker 沙箱）。"""
-        from app.core.sandbox.docker_executor import run_in_docker
-        result = await run_in_docker(code=code, inputs=inputs, timeout=300)
-        if result.get("error"):
-            raise RuntimeError(result["error"])
-        return result.get("output") or {}
+        """通过 docker_executor 执行代码（dev-local Docker 沙箱，可降级 in-process）。"""
+        from app.core.sandbox.docker_executor import run_block
 
-    async def _exec_block_with_result(self, body: dict, code: str, mq_cfg: dict) -> str:
-        from pyflow_runtime.input_mapper import map_inputs
-        inputs = map_inputs(body, mq_cfg.get("input_mapping"))
-        await self._exec_block(code, inputs)
-        return "ack"
+        result = await run_block(code, inputs)
+        if result.error:
+            raise RuntimeError(result.error)
+        output = result.output
+        if isinstance(output, dict):
+            return output
+        return {"value": output} if output is not None else {}
 
-    async def _publish_backoff(
-        self,
-        channel: aio_pika.abc.AbstractChannel,
-        block_id: str,
-        message: aio_pika.abc.AbstractIncomingMessage,
-        headers: dict,
-    ) -> None:
-        from pyflow_runtime.backoff_queue import backoff_queue as backoff_q
-        backoff_msg = aio_pika.Message(
-            body=message.body,
+    # ── 重投 / 退避 / 死信发布 ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _copy_message(body: bytes, headers: dict) -> aio_pika.Message:
+        return aio_pika.Message(
+            body=body,
             headers=headers,
             content_type="application/json",
-            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+            delivery_mode=_PERSISTENT,
         )
-        await channel.default_exchange.publish(backoff_msg, routing_key=backoff_q(block_id))
+
+    async def _publish_retry(
+        self, channel: aio_pika.abc.AbstractChannel, block_id: str,
+        message: aio_pika.abc.AbstractIncomingMessage, headers: dict, new_retry_count: int,
+    ) -> None:
+        """重投到 DLQ（带 TTL，到期 DLX 回主队列）并递增 x-retry-count。
+
+        手动 republish 而非依赖 nack→DLX：死信路由不会修改自定义 header，
+        裸 nack 会导致 x-retry-count 永远为 0、max_retry 永不触发、死信归档永不命中（决策 6）。
+        """
+        from pyflow_runtime.backoff_queue import dlq_queue
+
+        new_headers = dict(headers)
+        new_headers["x-retry-count"] = str(new_retry_count)
+        await channel.default_exchange.publish(
+            self._copy_message(message.body, new_headers), routing_key=dlq_queue(block_id)
+        )
+
+    async def _publish_dead(
+        self, channel: aio_pika.abc.AbstractChannel, block_id: str,
+        message: aio_pika.abc.AbstractIncomingMessage, headers: dict,
+    ) -> None:
+        """超过 max_retry / 协议不兼容 → 路由到死信归档队列，永久保留供排查（决策 6）。"""
+        from pyflow_runtime.backoff_queue import dead_queue
+
+        await channel.default_exchange.publish(
+            self._copy_message(message.body, dict(headers)), routing_key=dead_queue(block_id)
+        )
+
+    async def _publish_backoff(
+        self, channel: aio_pika.abc.AbstractChannel, block_id: str,
+        message: aio_pika.abc.AbstractIncomingMessage, headers: dict,
+    ) -> None:
+        """owner 存活 / 接管竞争失败 → 退避重入（短 TTL，不计入主队列 ready 深度，防 KEDA 抖动）。"""
+        from pyflow_runtime.backoff_queue import backoff_queue as backoff_q
+
+        await channel.default_exchange.publish(
+            self._copy_message(message.body, dict(headers)), routing_key=backoff_q(block_id)
+        )
+
+    async def _safety_retry(
+        self, channel: aio_pika.abc.AbstractChannel, block_id: str,
+        message: aio_pika.abc.AbstractIncomingMessage, block_cfg: dict,
+    ) -> None:
+        """处理器自身异常时的兜底重投，保证消息不丢、不无限堆积。"""
+        with suppress(Exception):
+            headers = dict(message.headers or {})
+            retry_count = int(headers.get("x-retry-count", 0) or 0)
+            max_retry = int((block_cfg.get("mq_config") or {}).get("max_retry", 3))
+            if retry_count >= max_retry:
+                await self._publish_dead(channel, block_id, message, headers)
+            else:
+                await self._publish_retry(channel, block_id, message, headers, retry_count + 1)
+            await message.ack()
 
     # ── 队列深度查询 ──────────────────────────────────────────────────────────
 
     async def fetch_queue_depth(self, block_id: str) -> dict[str, int]:
         """通过 RabbitMQ Management HTTP API 查询队列深度。"""
         import httpx
-        from pyflow_runtime.backoff_queue import main_queue, dlq_queue
+        from pyflow_runtime.backoff_queue import dlq_queue, main_queue
 
         settings = self._settings
-        # 从 AMQP URL 解析 Management API base
         mgmt_base = _amqp_to_mgmt(settings.rabbitmq_url)
         if not mgmt_base:
             return {"main": 0, "dlq": 0}
@@ -303,13 +403,85 @@ class ConsumerManager:
                     url = f"{mgmt_base}/api/queues/{vhost}/{qname}"
                     resp = await client.get(url, auth=auth)
                     if resp.status_code == 200:
-                        data = resp.json()
-                        depths[qname_key] = data.get("messages_ready", 0)
+                        depth = resp.json().get("messages_ready", 0)
+                        depths[qname_key] = depth
+                        # 同步 Prometheus gauge（决策 13，供 Grafana/KEDA 观测）
+                        MQ_QUEUE_DEPTH.labels(block_id=block_id, queue=qname_key).set(depth)
                     else:
                         depths[qname_key] = -1
-                except Exception:
+                except Exception:  # noqa: BLE001
                     depths[qname_key] = -1
             return depths
+
+    # ── DLQ 运维（生产级 MQ 运维：查看 / 重投 / 清空死信）─────────────────────────
+
+    async def peek_dlq(self, block_id: str, limit: int = 10) -> list[dict]:
+        """通过 Management API 预览 DLQ 死信样本（requeue=true，不消费）。"""
+        import httpx
+        from pyflow_runtime.backoff_queue import dlq_queue
+
+        mgmt_base = _amqp_to_mgmt(self._settings.rabbitmq_url)
+        if not mgmt_base:
+            return []
+        vhost = _extract_vhost(self._settings.rabbitmq_url)
+        auth = _extract_auth(self._settings.rabbitmq_url)
+        url = f"{mgmt_base}/api/queues/{vhost}/{dlq_queue(block_id)}/get"
+        payload = {"count": limit, "ackmode": "ack_requeue_true",
+                   "encoding": "auto", "truncate": 50000}
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.post(url, json=payload, auth=auth)
+            if resp.status_code != 200:
+                return []
+            out = []
+            for m in resp.json():
+                out.append({
+                    "payload": m.get("payload", "")[:2000],
+                    "x_retry_count": (m.get("properties", {}).get("headers", {}) or {}).get("x-retry-count"),
+                    "redelivered": m.get("redelivered"),
+                })
+            return out
+
+    async def requeue_dlq(self, block_id: str) -> int:
+        """把 DLQ 死信全部重投回主队列并重置 x-retry-count（人工干预后重试）。"""
+        from pyflow_runtime.backoff_queue import dlq_queue, main_queue
+
+        if not self._connection or self._connection.is_closed:
+            if not await self.connect():
+                return 0
+        channel = await self._connection.channel()
+        moved = 0
+        try:
+            dlq = await channel.get_queue(dlq_queue(block_id))
+            while True:
+                message = await dlq.get(no_ack=False, fail=False)
+                if message is None:
+                    break
+                headers = dict(message.headers or {})
+                headers["x-retry-count"] = "0"  # 人工重投：重置重试计数
+                await channel.default_exchange.publish(
+                    self._copy_message(message.body, headers),
+                    routing_key=main_queue(block_id),
+                )
+                await message.ack()
+                moved += 1
+        finally:
+            await channel.close()
+        return moved
+
+    async def purge_dlq(self, block_id: str) -> int:
+        """清空 DLQ（确认死信无需保留时）。"""
+        from pyflow_runtime.backoff_queue import dlq_queue
+
+        if not self._connection or self._connection.is_closed:
+            if not await self.connect():
+                return 0
+        channel = await self._connection.channel()
+        try:
+            dlq = await channel.get_queue(dlq_queue(block_id))
+            result = await dlq.purge()
+            return int(getattr(result, "message_count", 0) or 0)
+        finally:
+            await channel.close()
 
 
 def _amqp_to_mgmt(amqp_url: str) -> str | None:
@@ -319,7 +491,7 @@ def _amqp_to_mgmt(amqp_url: str) -> str | None:
         parsed = urllib.parse.urlparse(amqp_url)
         host = parsed.hostname or "localhost"
         return f"http://{host}:15672"
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -330,7 +502,7 @@ def _extract_vhost(amqp_url: str) -> str:
         parsed = urllib.parse.urlparse(amqp_url)
         raw = parsed.path.lstrip("/") or "%2F"
         return urllib.parse.quote(urllib.parse.unquote(raw), safe="")
-    except Exception:
+    except Exception:  # noqa: BLE001
         return "%2F"
 
 
@@ -340,7 +512,7 @@ def _extract_auth(amqp_url: str) -> tuple[str, str]:
     try:
         parsed = urllib.parse.urlparse(amqp_url)
         return (parsed.username or "guest", parsed.password or "guest")
-    except Exception:
+    except Exception:  # noqa: BLE001
         return ("guest", "guest")
 
 

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.rbac import Role, require_role
 from app.core.execution_service import execute_block
+from app.core.mq.validation import validate_mq_config
 from app.db import get_session
 from app.errors import (
     PYFLOW_API_LOCKED,
@@ -86,6 +87,7 @@ async def save_block(
     login_id: str = Depends(require_role(Role.EDITOR)),
 ):
     _check_env_vars(req.env_vars)
+    validate_mq_config(req.mq_config, req.execution_mode)
     block = Block(
         name=req.name,
         description=req.description,
@@ -126,6 +128,11 @@ async def update_block(
     data = req.model_dump(exclude_unset=True)
     if "env_vars" in data and data["env_vars"]:
         _check_env_vars(data["env_vars"])
+    # 校验 MQ 配置（决策 1/6/10）：以更新后的 execution_mode + mq_config 为准
+    if "mq_config" in data or "execution_mode" in data:
+        exec_mode = data.get("execution_mode", block.execution_mode)
+        mq_cfg = data.get("mq_config", block.mq_config)
+        validate_mq_config(mq_cfg, exec_mode)
     for key, value in data.items():
         if key in {"input_ports", "output_ports"} and value is not None:
             value = [p.model_dump() if hasattr(p, "model_dump") else p for p in value]

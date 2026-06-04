@@ -92,3 +92,39 @@ async def publish_message(
         headers=headers,
     )
     await channel.default_exchange.publish(message, routing_key=main_queue(block_id))
+
+
+async def publish_reply(
+    channel: aio_pika.abc.AbstractChannel,
+    mq_config: dict[str, Any],
+    reply: dict[str, Any],
+    block_id: str = "",
+) -> None:
+    """按 mq_config 把回复消息发布到 reply_exchange/routing_key（决策 6/7）。
+
+    - reply_exchange 为空 → 走 default exchange，routing_key 即队列名；
+    - 渲染 reply_routing_key_template（支持 {snowflakeId}/{block_id} 占位符）；
+    - 回复携带协议版本头，body 含透传的去重键 snowflakeId（下游据此去重）。
+    """
+    import json
+
+    from pyflow_runtime import RUNTIME_PROTOCOL_VERSION
+    from pyflow_runtime.reply_builder import render_reply_routing_key
+
+    exchange_name = (mq_config.get("reply_exchange") or "").strip()
+    routing_key = render_reply_routing_key(
+        mq_config.get("reply_routing_key_template"), reply, block_id
+    )
+    message = aio_pika.Message(
+        body=json.dumps(reply, ensure_ascii=False).encode("utf-8"),
+        content_type="application/json",
+        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+        headers={"pyflow-protocol": RUNTIME_PROTOCOL_VERSION},
+    )
+    if exchange_name:
+        exchange = await channel.declare_exchange(
+            exchange_name, aio_pika.ExchangeType.TOPIC, durable=True
+        )
+        await exchange.publish(message, routing_key=routing_key or "#")
+    else:
+        await channel.default_exchange.publish(message, routing_key=routing_key)

@@ -13,7 +13,7 @@ RUNTIME_PROTOCOL_VERSION = "1"
 
 from pyflow_runtime.condition_engine import evaluate_condition  # noqa: E402
 from pyflow_runtime.input_mapper import map_inputs  # noqa: E402
-from pyflow_runtime.reply_builder import build_reply  # noqa: E402
+from pyflow_runtime.reply_builder import build_reply, render_reply_routing_key  # noqa: E402
 
 __all__ = [
     "__version__",
@@ -21,4 +21,5 @@ __all__ = [
     "evaluate_condition",
     "map_inputs",
     "build_reply",
+    "render_reply_routing_key",
 ]

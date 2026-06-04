@@ -39,3 +39,29 @@ def build_reply(
     if dedup_business_id is not None:
         reply.setdefault("snowflakeId", dedup_business_id)
     return reply
+
+
+class _SafeDict(dict):
+    """format_map 缺失键时返回空串，避免回复路由键渲染抛 KeyError。"""
+
+    def __missing__(self, key: str) -> str:  # noqa: D401
+        return ""
+
+
+def render_reply_routing_key(
+    template: str | None,
+    reply: dict[str, Any],
+    block_id: str = "",
+) -> str:
+    """渲染 reply_routing_key_template（如 "reply.{block_id}" / "order.{snowflakeId}"）。
+
+    模板占位符从 reply 内容 + block_id 取值，缺失键渲染为空串。
+    """
+    if not template:
+        return ""
+    ctx = _SafeDict(reply)
+    ctx.setdefault("block_id", block_id)
+    try:
+        return template.format_map(ctx)
+    except (ValueError, IndexError):
+        return template

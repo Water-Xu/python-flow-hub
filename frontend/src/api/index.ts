@@ -159,6 +159,17 @@ export const mqApi = {
     client.post<any, any>(`/api/mq/blocks/${blockId}/publish`, data),
   startAll: () => client.post<any, any>('/api/mq/start-all'),
   stopAll: () => client.post<any, any>('/api/mq/stop-all'),
+  /** DLQ 运维：预览死信样本 */
+  peekDlq: (blockId: string, limit = 10) =>
+    client.get<any, any>(`/api/mq/blocks/${blockId}/dlq`, { params: { limit } }),
+  /** DLQ 运维：全部重投回主队列（重置 x-retry-count，DEPLOYER） */
+  requeueDlq: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/dlq/requeue`),
+  /** DLQ 运维：清空死信（DEPLOYER） */
+  purgeDlq: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/dlq/purge`),
+}
+
+export const healthApi = {
+  deps: () => client.get<any, Record<string, string>>('/health/deps'),
 }
 
 export const apiAdminApi = {

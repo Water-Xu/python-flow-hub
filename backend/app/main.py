@@ -26,6 +26,7 @@ from app.core.mq.consumer_manager import get_consumer_manager
 from app.db import init_models
 from app.errors import BusinessException, business_exception_handler
 from app.observability.logging import configure_logging, get_logger
+from app.observability.middleware import RequestContextMiddleware
 from app.observability.tracing import configure_tracing
 
 settings = get_settings()
@@ -61,6 +62,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(RequestContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

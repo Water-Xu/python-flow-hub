@@ -55,6 +55,19 @@ redis.call('SET', KEYS[1], cjson.encode(st), 'EX', ARGV[5])
 return 1
 """
 
+# 标记回复已发出（CAS 校验 fence_token+owner），用于"至少一次回复"降重（决策 6）
+_LUA_MARK_REPLY = """
+local cur = redis.call('GET', KEYS[1])
+if not cur then return 0 end
+local st = cjson.decode(cur)
+if st.fence_token ~= tonumber(ARGV[1]) or st.owner_pod ~= ARGV[2] then
+  return 0
+end
+st.reply_sent = true
+redis.call('SET', KEYS[1], cjson.encode(st), 'EX', ARGV[3])
+return 1
+"""
+
 
 def extract_business_id(message_body: dict[str, Any], message_id: str | None = None) -> str:
     """优先取 $.header.snowflakeId，缺失回退 message_id，再缺失用 body sha256。"""
@@ -93,9 +106,11 @@ class ClaimResult:
 class IdempotencyStore:
     """基于 Redis 的幂等状态机。redis 为 redis.asyncio 客户端（单机或 Cluster）。"""
 
-    def __init__(self, redis: Any, pod_name: str):
+    def __init__(self, redis: Any, pod_name: str, *, time_fn: Any = time.time):
         self.redis = redis
         self.pod_name = pod_name
+        # 注入时钟便于单测确定性地推进 lease 过期（AIR：可重复）
+        self._now = time_fn
 
     async def claim(self, idem_id: str, lease_ttl: int, state_ttl: int) -> ClaimResult:
         """抢占执行权。返回是否抢到及 fence_token。"""
@@ -106,7 +121,7 @@ class IdempotencyStore:
         # R 修正：fence 键 TTL 必须 ≥ state_ttl，防过期重置破坏单调性
         await self.redis.expire(fk, state_ttl + 60)
 
-        now = int(time.time())
+        now = int(self._now())
         value = json.dumps({
             "status": "PROCESSING",
             "owner_pod": self.pod_name,
@@ -133,7 +148,7 @@ class IdempotencyStore:
         return ClaimResult(True, new_token, None, None)
 
     async def try_take_over(self, idem_id: str, lease_ttl: int, state_ttl: int) -> int | None:
-        now = int(time.time())
+        now = int(self._now())
         result = await self.redis.eval(
             _LUA_TAKE_OVER, 2, state_key(idem_id), fence_key(idem_id),
             now, self.pod_name, lease_ttl, state_ttl, state_ttl + 60,
@@ -141,7 +156,7 @@ class IdempotencyStore:
         return int(result) if result is not None else None
 
     async def heartbeat(self, idem_id: str, fence_token: int, lease_ttl: int, state_ttl: int) -> bool:
-        now = int(time.time())
+        now = int(self._now())
         ok = await self.redis.eval(
             _LUA_HEARTBEAT, 1, state_key(idem_id),
             fence_token, self.pod_name, now, lease_ttl, state_ttl,
@@ -154,5 +169,23 @@ class IdempotencyStore:
             _LUA_SET_TERMINAL, 1, state_key(idem_id),
             fence_token, self.pod_name, status,
             json.dumps(result), state_ttl,
+        )
+        return bool(ok)
+
+    async def get_state(self, idem_id: str) -> dict[str, Any] | None:
+        """读取当前幂等状态（用于重复投递时判断 reply_sent / 复用 result）。"""
+        raw = await self.redis.get(state_key(idem_id))
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+
+    async def mark_reply_sent(self, idem_id: str, fence_token: int, state_ttl: int) -> bool:
+        """CAS 标记回复已发出（决策 6：至少一次回复 + reply_sent 降重）。"""
+        ok = await self.redis.eval(
+            _LUA_MARK_REPLY, 1, state_key(idem_id),
+            fence_token, self.pod_name, state_ttl,
         )
         return bool(ok)

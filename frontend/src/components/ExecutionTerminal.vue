@@ -11,6 +11,14 @@ let term: Terminal | null = null
 let fit: FitAddon | null = null
 let ws: WebSocket | null = null
 
+// WS 断线指数退避重连状态（决策 5：中间层静默断开防护）
+let currentExecId: string | undefined
+let reconnectAttempt = 0
+let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+let manualClose = false
+let finished = false
+const MAX_RECONNECT_DELAY = 15000
+
 function writeLine(text: string, color = '') {
   if (!term) return
   const prefix = color ? `\x1b[${color}m` : ''
@@ -18,16 +26,31 @@ function writeLine(text: string, color = '') {
   text.split('\n').forEach((l) => term!.writeln(prefix + l + suffix))
 }
 
-function connect(executionId: string) {
-  ws?.close()
+function scheduleReconnect() {
+  if (manualClose || finished || !currentExecId) return
+  reconnectAttempt += 1
+  // 指数退避 + 抖动：1s, 2s, 4s ... 上限 15s
+  const delay = Math.min(MAX_RECONNECT_DELAY, 2 ** (reconnectAttempt - 1) * 1000)
+    + Math.floor(Math.random() * 400)
+  writeLine(`\x1b[90m连接断开，${Math.round(delay / 1000)}s 后重连（第 ${reconnectAttempt} 次）...\x1b[0m`)
+  reconnectTimer = setTimeout(() => currentExecId && openSocket(currentExecId), delay)
+}
+
+function openSocket(executionId: string) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const base = import.meta.env.VITE_BASE_SERVER_URL || ''
   ws = new WebSocket(`${proto}://${location.host}${base}/ws/exec/${executionId}`)
+
+  ws.onopen = () => {
+    if (reconnectAttempt > 0) writeLine('\x1b[32m— 已重连，恢复订阅 —\x1b[0m')
+    reconnectAttempt = 0
+  }
   ws.onmessage = (ev) => {
     try {
       const msg = JSON.parse(ev.data)
       if (msg.stream === 'ping') return
       if (msg.stream === 'control' && msg.line === '__PYFLOW_DONE__') {
+        finished = true
         writeLine('— 执行结束 —', '36')
         return
       }
@@ -36,6 +59,26 @@ function connect(executionId: string) {
       writeLine(ev.data)
     }
   }
+  ws.onclose = () => scheduleReconnect()
+  ws.onerror = () => ws?.close()
+}
+
+function connect(executionId: string) {
+  manualClose = true
+  ws?.close()
+  if (reconnectTimer) clearTimeout(reconnectTimer)
+  // 新一次执行：重置重连/完成状态，凭新 execution_id 重新订阅
+  manualClose = false
+  finished = false
+  reconnectAttempt = 0
+  currentExecId = executionId
+  openSocket(executionId)
+}
+
+function disconnect() {
+  manualClose = true
+  if (reconnectTimer) clearTimeout(reconnectTimer)
+  ws?.close()
 }
 
 defineExpose({ writeLine, clear: () => term?.clear() })
@@ -65,7 +108,7 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  ws?.close()
+  disconnect()
   term?.dispose()
 })
 </script>

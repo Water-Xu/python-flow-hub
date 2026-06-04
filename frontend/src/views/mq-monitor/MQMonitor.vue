@@ -8,6 +8,17 @@ const mode = ref('local')
 const blocks = ref<Block[]>([])
 const loading = ref(false)
 const polling = ref<ReturnType<typeof setInterval>>()
+const clockTimer = ref<ReturnType<typeof setInterval>>()
+const autoRefresh = ref(true)
+const lastUpdated = ref(Date.now())
+const nowTs = ref(Date.now())
+
+// DLQ 运维抽屉
+const dlqDrawer = ref(false)
+const dlqTarget = ref<{ block_id: string; block_name: string } | null>(null)
+const dlqMessages = ref<any[]>([])
+const dlqLoading = ref(false)
+const dlqActing = ref(false)
 
 // 测试执行弹窗
 const publishDialogVisible = ref(false)
@@ -45,6 +56,7 @@ async function load() {
       })
     )
     consumers.value = enriched
+    lastUpdated.value = Date.now()
   } finally {
     loading.value = false
   }
@@ -140,6 +152,76 @@ async function doPublish() {
   }
 }
 
+// ── DLQ 运维（查看死信 / 重投 / 清空）─────────────────────────────────────────
+async function openDlq(item: any) {
+  dlqTarget.value = { block_id: item.block.id, block_name: item.block.name }
+  dlqMessages.value = []
+  dlqDrawer.value = true
+  await loadDlq()
+}
+
+async function loadDlq() {
+  if (!dlqTarget.value) return
+  dlqLoading.value = true
+  try {
+    const res = await mqApi.peekDlq(dlqTarget.value.block_id, 20)
+    dlqMessages.value = res.messages || []
+  } catch {
+    dlqMessages.value = []
+  } finally {
+    dlqLoading.value = false
+  }
+}
+
+async function requeueDlq() {
+  if (!dlqTarget.value) return
+  try {
+    await ElMessageBox.confirm(
+      '确认将该块所有死信重投回主队列？将重置 x-retry-count 重新计数。',
+      '重投死信', { type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  dlqActing.value = true
+  try {
+    const res = await mqApi.requeueDlq(dlqTarget.value.block_id)
+    ElMessage.success(`已重投 ${res.requeued} 条死信`)
+    await loadDlq()
+    setTimeout(load, 600)
+  } finally {
+    dlqActing.value = false
+  }
+}
+
+async function purgeDlq() {
+  if (!dlqTarget.value) return
+  try {
+    await ElMessageBox.confirm(
+      '确认清空该块 DLQ？死信将被永久删除，不可恢复。',
+      '清空死信', { type: 'warning', confirmButtonText: '清空', confirmButtonClass: 'el-button--danger' },
+    )
+  } catch {
+    return
+  }
+  dlqActing.value = true
+  try {
+    const res = await mqApi.purgeDlq(dlqTarget.value.block_id)
+    ElMessage.success(`已清空 ${res.purged} 条死信`)
+    await loadDlq()
+    setTimeout(load, 600)
+  } finally {
+    dlqActing.value = false
+  }
+}
+
+const updatedAgo = computed(() => {
+  const sec = Math.max(0, Math.floor((nowTs.value - lastUpdated.value) / 1000))
+  if (sec < 5) return '刚刚更新'
+  if (sec < 60) return `${sec}s 前更新`
+  return `${Math.floor(sec / 60)}m 前更新`
+})
+
 const statusType: Record<string, string> = {
   running: 'success',
   connecting: 'warning',
@@ -172,11 +254,25 @@ function formatDuration(startedAt: number): string {
   return `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60)}m`
 }
 
+function tick() {
+  // 自动刷新开关 + 后台标签暂停轮询（省资源，降低无谓请求）
+  if (autoRefresh.value && !document.hidden) load()
+}
+function onVisibility() {
+  if (!document.hidden && autoRefresh.value) load()
+}
+
 onMounted(() => {
   load()
-  polling.value = setInterval(load, 8000)
+  polling.value = setInterval(tick, 8000)
+  clockTimer.value = setInterval(() => (nowTs.value = Date.now()), 1000)
+  document.addEventListener('visibilitychange', onVisibility)
 })
-onUnmounted(() => clearInterval(polling.value))
+onUnmounted(() => {
+  clearInterval(polling.value)
+  clearInterval(clockTimer.value)
+  document.removeEventListener('visibilitychange', onVisibility)
+})
 </script>
 
 <template>
@@ -192,6 +288,11 @@ onUnmounted(() => clearInterval(polling.value))
         </p>
       </div>
       <div class="head-actions">
+        <div class="auto-refresh">
+          <el-switch v-model="autoRefresh" size="small" />
+          <span class="dim ar-label">自动刷新</span>
+          <span class="dim ar-time">{{ updatedAgo }}</span>
+        </div>
         <el-button :loading="loading" @click="load">
           <el-icon><Refresh /></el-icon> 刷新
         </el-button>
@@ -323,6 +424,15 @@ onUnmounted(() => clearInterval(polling.value))
           <el-button size="small" type="primary" @click="openPublish(item)">
             <el-icon><Promotion /></el-icon> 发布测试消息
           </el-button>
+          <el-button
+            size="small"
+            :type="item.depth.dlq > 0 ? 'danger' : 'default'"
+            plain
+            @click="openDlq(item)"
+          >
+            <el-icon><Warning /></el-icon>
+            DLQ 运维<span v-if="item.depth.dlq > 0"> ({{ item.depth.dlq }})</span>
+          </el-button>
         </div>
       </div>
     </transition-group>
@@ -394,6 +504,45 @@ onUnmounted(() => clearInterval(polling.value))
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- DLQ 运维抽屉 -->
+    <el-drawer v-model="dlqDrawer" size="520px" :with-header="true">
+      <template #header>
+        <div class="dlq-head">
+          <el-icon color="#ef4444"><Warning /></el-icon>
+          <span>DLQ 运维 · {{ dlqTarget?.block_name }}</span>
+        </div>
+      </template>
+      <div class="dlq-body">
+        <div class="dlq-actions">
+          <el-button size="small" :loading="dlqLoading" @click="loadDlq">
+            <el-icon><Refresh /></el-icon> 刷新
+          </el-button>
+          <el-button size="small" type="primary" :loading="dlqActing" @click="requeueDlq">
+            <el-icon><RefreshRight /></el-icon> 全部重投回主队列
+          </el-button>
+          <el-button size="small" type="danger" plain :loading="dlqActing" @click="purgeDlq">
+            <el-icon><Delete /></el-icon> 清空死信
+          </el-button>
+        </div>
+        <p class="dim dlq-tip">
+          下方为死信样本预览（最多 20 条，预览不消费）。重投会重置 x-retry-count 并回到主队列重新处理。
+        </p>
+
+        <el-empty v-if="!dlqLoading && dlqMessages.length === 0" description="DLQ 为空 🎉" :image-size="80" />
+
+        <transition-group name="list" tag="div" class="dlq-list">
+          <div v-for="(m, i) in dlqMessages" :key="i" class="pf-card dlq-item">
+            <div class="dlq-item-head">
+              <el-tag size="small" type="danger" effect="plain">死信 #{{ i + 1 }}</el-tag>
+              <span class="dim">retry: {{ m.x_retry_count ?? 'N/A' }}</span>
+              <el-tag v-if="m.redelivered" size="small" type="warning" effect="plain">redelivered</el-tag>
+            </div>
+            <pre class="dlq-payload">{{ m.payload }}</pre>
+          </div>
+        </transition-group>
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -545,4 +694,44 @@ onUnmounted(() => clearInterval(polling.value))
 /* 淡入动画 */
 .fade-enter-active { transition: opacity 0.3s, transform 0.3s; }
 .fade-enter-from   { opacity: 0; transform: translateY(6px); }
+
+/* 自动刷新控件 */
+.auto-refresh {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 10px;
+  margin-right: 4px;
+  border-right: 1px solid var(--pf-border);
+}
+.ar-label { margin: 0; }
+.ar-time { margin: 0; min-width: 76px; transition: color 0.3s; }
+
+/* DLQ 抽屉 */
+.dlq-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.dlq-body { display: flex; flex-direction: column; gap: 12px; }
+.dlq-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.dlq-tip { margin: 0; line-height: 1.6; }
+.dlq-list { display: flex; flex-direction: column; gap: 10px; }
+.dlq-item { padding: 10px 12px; animation: slide-up 0.25s ease both; }
+.dlq-item-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.dlq-payload {
+  margin: 0;
+  background: var(--pf-panel-2);
+  border: 1px solid var(--pf-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+/* 列表过渡 */
+.list-enter-active, .list-leave-active { transition: all 0.3s ease; }
+.list-enter-from { opacity: 0; transform: translateX(-10px); }
+.list-leave-to { opacity: 0; transform: translateX(10px); }
 </style>

@@ -16,3 +16,15 @@ FLOW_RUN_COUNT = Counter(
 DEP_UP = Gauge(
     "pyflow_dependency_up", "依赖连通性（1=up,0=down）", ["dependency"]
 )
+
+# ── MQ 异步触发指标（决策 6/13）──────────────────────────────────────────────
+MQ_CONSUMED = Counter(
+    "pyflow_mq_consumed_total", "MQ 消息消费处置计数",
+    ["block_id", "action"],   # action: ack | backoff | nack | protocol_reject
+)
+MQ_REPLY_PUBLISHED = Counter(
+    "pyflow_mq_reply_published_total", "MQ 回复发布计数", ["block_id"]
+)
+MQ_QUEUE_DEPTH = Gauge(
+    "pyflow_mq_queue_depth", "MQ 队列就绪深度（main/dlq）", ["block_id", "queue"]
+)

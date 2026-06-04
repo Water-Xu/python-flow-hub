@@ -88,13 +88,52 @@ async function save() {
   }
 }
 
+const inputMappingValid = computed(() => {
+  try {
+    const v = JSON.parse(mqForm.value.input_mapping || '{}')
+    return v && typeof v === 'object' && !Array.isArray(v)
+  } catch {
+    return false
+  }
+})
+
+// 客户端 MQ 配置校验（与后端 validate_mq_config 对齐，决策 1/6/10）
+const mqConfigErrors = computed<string[]>(() => {
+  const e: string[] = []
+  if (!mqForm.value.enabled) return e
+  if (!mqForm.value.queue?.trim()) e.push('主队列名不能为空')
+  if (!inputMappingValid.value) e.push('input_mapping 必须是合法 JSON 对象 {目标字段: 源路径}')
+  if ((mqForm.value.condition_expression || '').length > 4096) e.push('条件表达式过长（上限 4096）')
+  if (mqForm.value.reply_enabled
+      && !mqForm.value.reply_routing_key_template?.trim()
+      && !mqForm.value.reply_exchange?.trim()) {
+    e.push('启用回复时需填写 Reply Routing Key 或 Reply Exchange')
+  }
+  if (mqForm.value.reply_enabled) {
+    for (const f of mqForm.value.carry_fields) {
+      if (!f.source_path?.trim() || !f.target_field?.trim()) {
+        e.push('透传字段的 source_path 与 target_field 不能为空')
+        break
+      }
+    }
+  }
+  if (![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(mqForm.value.max_retry)) {
+    e.push('最大重试次数必须是 0~10')
+  }
+  return e
+})
+
 async function saveMqConfig() {
+  if (mqConfigErrors.value.length) {
+    return ElMessage.error(mqConfigErrors.value[0])
+  }
   mqSaving.value = true
   try {
     let input_mapping: object = {}
     try {
       input_mapping = JSON.parse(mqForm.value.input_mapping || '{}')
     } catch {
+      mqSaving.value = false
       return ElMessage.error('输入映射必须是合法 JSON')
     }
 
@@ -321,7 +360,7 @@ onMounted(load)
 
               <el-divider content-position="left">输入映射</el-divider>
 
-              <el-form-item label="input_mapping">
+              <el-form-item label="input_mapping" :class="{ 'has-err': !inputMappingValid }">
                 <el-input
                   v-model="mqForm.input_mapping"
                   type="textarea"
@@ -329,7 +368,11 @@ onMounted(load)
                   placeholder='{"target_field": "$.source.path"}'
                   style="font-family:monospace;font-size:12px"
                 />
-                <p class="dim">JSON 格式：{目标字段名: JSONPath 来源路径}；留空 = 直接透传整条消息体</p>
+                <p class="dim" :class="{ 'err-text': !inputMappingValid }">
+                  {{ inputMappingValid
+                    ? 'JSON 格式：{目标字段名: JSONPath 来源路径}；留空 = 直接透传整条消息体'
+                    : '⚠ 当前不是合法 JSON 对象' }}
+                </p>
               </el-form-item>
 
               <el-divider content-position="left">回复配置（至少一次，下游去重）</el-divider>
@@ -371,8 +414,28 @@ onMounted(load)
               </el-form-item>
             </template>
 
+            <transition name="fade">
+              <el-alert
+                v-if="mqConfigErrors.length"
+                type="error"
+                :closable="false"
+                show-icon
+                title="配置存在问题，请修正后再保存"
+                style="margin-bottom:12px"
+              >
+                <ul class="err-list">
+                  <li v-for="(msg, i) in mqConfigErrors" :key="i">{{ msg }}</li>
+                </ul>
+              </el-alert>
+            </transition>
+
             <el-form-item>
-              <el-button type="primary" :loading="mqSaving" @click="saveMqConfig">
+              <el-button
+                type="primary"
+                :loading="mqSaving"
+                :disabled="mqConfigErrors.length > 0"
+                @click="saveMqConfig"
+              >
                 保存 MQ 配置
               </el-button>
               <span class="dim" style="margin-left:12px" v-if="!mqForm.enabled">
@@ -450,4 +513,10 @@ onMounted(load)
   align-items: center;
   gap: 8px;
 }
+.err-text { color: var(--el-color-error, #ef4444); }
+.has-err :deep(.el-textarea__inner) { border-color: var(--el-color-error, #ef4444); }
+.err-list { margin: 4px 0 0; padding-left: 18px; font-size: 12px; }
+.err-list li { line-height: 1.6; }
+.fade-enter-active, .fade-leave-active { transition: opacity 0.25s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
 </style>

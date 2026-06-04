@@ -107,6 +107,7 @@ async def start_consumer(
         block_name=block.name,
         block_code=block.draft_code or "",
         mq_config=mq_config,
+        compute_config=block.compute_config or {},
     )
     return {"started": ok, "block_id": block_id, "block_name": block.name}
 
@@ -136,6 +137,7 @@ async def restart_consumer(
         block_name=block.name,
         block_code=block.draft_code or "",
         mq_config=block.mq_config or {},
+        compute_config=block.compute_config or {},
     )
     return {"restarted": ok, "block_id": block_id}
 
@@ -226,6 +228,45 @@ async def publish_test_message(
         return {"error": str(exc)}
 
 
+# ── DLQ 运维（查看 / 重投 / 清空死信，生产级 MQ 运维）─────────────────────────
+
+@router.get("/blocks/{block_id}/dlq")
+async def peek_dlq(
+    block_id: str,
+    limit: int = 10,
+    _: str = Depends(require_role(Role.VIEWER)),
+):
+    """预览 DLQ 死信样本（不消费，requeue=true）。"""
+    mgr = get_consumer_manager()
+    try:
+        messages = await mgr.peek_dlq(block_id, min(max(limit, 1), 50))
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc), "messages": []}
+    return {"block_id": block_id, "count": len(messages), "messages": messages}
+
+
+@router.post("/blocks/{block_id}/dlq/requeue")
+async def requeue_dlq(
+    block_id: str,
+    _: str = Depends(require_role(Role.DEPLOYER)),
+):
+    """把 DLQ 死信全部重投回主队列并重置 x-retry-count（DEPLOYER 人工干预）。"""
+    mgr = get_consumer_manager()
+    moved = await mgr.requeue_dlq(block_id)
+    return {"requeued": moved, "block_id": block_id}
+
+
+@router.post("/blocks/{block_id}/dlq/purge")
+async def purge_dlq(
+    block_id: str,
+    _: str = Depends(require_role(Role.DEPLOYER)),
+):
+    """清空 DLQ（确认死信无需保留时，DEPLOYER）。"""
+    mgr = get_consumer_manager()
+    purged = await mgr.purge_dlq(block_id)
+    return {"purged": purged, "block_id": block_id}
+
+
 # ── 批量操作（按 async_mq blocks 自动启停） ──────────────────────────────────
 
 @router.post("/start-all")
@@ -249,6 +290,7 @@ async def start_all_consumers(
             block_name=block.name,
             block_code=block.draft_code or "",
             mq_config=block.mq_config or {},
+            compute_config=block.compute_config or {},
         )
         results.append({"block_id": block.id, "block_name": block.name, "started": ok})
 
