@@ -56,9 +56,16 @@ async function doDeploy(row: any) {
   try {
     const res = await deploymentApi.deploy(row.id)
     ElMessage.success(`部署完成：${res.status}`)
+    const warnings: string[] = res.warnings || []
+    if (warnings.length) {
+      ElMessage({ type: 'warning', message: warnings.join('；'), duration: 8000, showClose: true })
+    }
     await load()
   } catch (e: any) {
-    if (e?.message !== 'cancelled') ElMessage.error('部署失败，请查看详情')
+    if (e?.message !== 'cancelled') {
+      const detail = e?.response?.data?.detail
+      ElMessage.error(detail ? `部署失败：${detail}` : '部署失败，请查看详情')
+    }
   } finally {
     acting.value[row.id] = false
   }

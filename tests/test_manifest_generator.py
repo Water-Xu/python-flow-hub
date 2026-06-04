@@ -16,6 +16,7 @@ from app.core.k8s.manifest_generator import (
     min_replicas_for,
     parse_cpu_millicores,
     parse_mem_mib,
+    render_block_manifests,
     runtime_class,
 )
 
@@ -188,3 +189,24 @@ def test_build_deployment_no_middleware_when_disabled():
     dep = build_deployment(spec, ctx, min_replicas=1)
     container = dep["spec"]["template"]["spec"]["containers"][0]
     assert container["envFrom"] == []
+
+
+def test_render_block_manifests_with_keda():
+    spec = BlockDeploySpec("abcdef12-0000", "n", execution_mode="async_mq")
+    ctx = DeployContext(runner_image="runner:1")
+    ms = render_block_manifests(spec, ctx, max_replica=5, msgs_per_replica=10, keda_enabled=True)
+    kinds = [m["kind"] for m in ms]
+    assert "ScaledObject" in kinds
+    dep = next(m for m in ms if m["kind"] == "Deployment")
+    assert dep["spec"]["replicas"] == 0  # 有 KEDA：异步块 0 起步，由队列深度拉起
+
+
+def test_render_block_manifests_keda_degraded():
+    """集群未装 KEDA：跳过 ScaledObject，异步块退化为固定副本 min=1（否则无人消费）。"""
+    spec = BlockDeploySpec("abcdef12-0000", "n", execution_mode="async_mq")
+    ctx = DeployContext(runner_image="runner:1")
+    ms = render_block_manifests(spec, ctx, max_replica=5, msgs_per_replica=10, keda_enabled=False)
+    kinds = [m["kind"] for m in ms]
+    assert "ScaledObject" not in kinds
+    dep = next(m for m in ms if m["kind"] == "Deployment")
+    assert dep["spec"]["replicas"] == 1

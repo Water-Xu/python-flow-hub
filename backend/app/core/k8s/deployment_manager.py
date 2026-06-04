@@ -34,6 +34,34 @@ def _load_clients():
     return client
 
 
+def _describe_api_error(exc: Exception) -> str:
+    """把 K8s ApiException 提炼成可读详情（状态/原因/截断 body），对外友好不暴露堆栈。"""
+    try:
+        from kubernetes.client.rest import ApiException  # type: ignore
+    except ImportError:
+        return str(exc)[:300]
+    if isinstance(exc, ApiException):
+        body = exc.body if isinstance(exc.body, str) else str(exc.body or "")
+        return f"HTTP {exc.status} {exc.reason}: {body[:300]}"
+    return str(exc)[:300]
+
+
+async def keda_available() -> bool:
+    """探测集群是否安装 KEDA（keda.sh API 组存在）。未装则部署优雅降级跳过 ScaledObject。"""
+    def _do() -> bool:
+        try:
+            client = _load_clients()
+            groups = client.ApisApi().get_api_versions().groups
+            return any(getattr(g, "name", "") == _KEDA_GROUP for g in groups)
+        except BusinessException:
+            raise
+        except Exception as exc:  # noqa: BLE001 探测失败按未安装处理（保守降级）
+            logger.warning("keda_probe_failed", error=str(exc))
+            return False
+
+    return await asyncio.to_thread(_do)
+
+
 def _apply_one(client, manifest: dict[str, Any], namespace: str) -> None:
     """create-or-replace 单个 manifest。"""
     from kubernetes.client.rest import ApiException  # type: ignore
@@ -128,12 +156,25 @@ def _delete_one(client, kind: str, name: str, namespace: str) -> None:
 
 
 async def apply_manifests(manifests: list[dict[str, Any]], namespace: str) -> None:
-    """顺序 apply 一批 manifest（幂等）。"""
+    """顺序 apply 一批 manifest（幂等）。
+
+    任何 K8s 错误（含 CRD 缺失/RBAC 拒绝）都包成带详情的 BusinessException，
+    避免裸 ApiException 外泄为前端 500 "Internal Server Error"。
+    """
     def _do() -> None:
         client = _load_clients()
         for m in manifests:
-            _apply_one(client, m, namespace)
-            logger.info("k8s_applied", kind=m["kind"], name=m["metadata"]["name"])
+            kind = m["kind"]
+            name = m["metadata"]["name"]
+            try:
+                _apply_one(client, m, namespace)
+            except BusinessException:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                detail = f"apply {kind}/{name} 失败：{_describe_api_error(exc)}"
+                logger.warning("k8s_apply_failed", kind=kind, name=name, error=detail)
+                raise BusinessException(PYFLOW_K8S_DEPLOY_FAILED, detail) from exc
+            logger.info("k8s_applied", kind=kind, name=name)
 
     await asyncio.to_thread(_do)
 

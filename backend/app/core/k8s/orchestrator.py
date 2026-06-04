@@ -185,20 +185,26 @@ def run_prechecks(specs: list[BlockDeploySpec]) -> dict[str, Any]:
     return {"ok": not issues, "issues": issues, "capacity": cap.detail}
 
 
-def render_all_manifests(specs: list[BlockDeploySpec], ctx: DeployContext) -> list[dict[str, Any]]:
-    """渲染全部 manifest：中间件连接 Secret + KEDA 鉴权（各一次）+ 各 Block 资源。"""
+def render_all_manifests(
+    specs: list[BlockDeploySpec], ctx: DeployContext, *, keda_enabled: bool = True
+) -> list[dict[str, Any]]:
+    """渲染全部 manifest：中间件连接 Secret + KEDA 鉴权（各一次）+ 各 Block 资源。
+
+    keda_enabled=False（集群未装 KEDA）时跳过 KEDA 鉴权 + ScaledObject，异步块退化为固定副本。
+    """
     manifests: list[dict[str, Any]] = []
     # 共享中间件连接 Secret（让块连 redis/mq/db/minio）
     if ctx.inject_middleware and ctx.middleware_secret:
         manifests.append(middleware.build_middleware_secret(settings, ctx.namespace))
-    if any(s.consumes_mq for s in specs):
+    if keda_enabled and any(s.consumes_mq for s in specs):
         manifests.extend(keda_manager.build_rabbitmq_auth_manifests(ctx.namespace))
     for spec in specs:
         max_replica = derive_max_replica(
             spec, pool_cpu_cores=settings.workers_pool_cpu_cores, cap=settings.keda_max_replica_cap
         )
         manifests.extend(render_block_manifests(
-            spec, ctx, max_replica=max_replica, msgs_per_replica=settings.keda_msgs_per_replica
+            spec, ctx, max_replica=max_replica,
+            msgs_per_replica=settings.keda_msgs_per_replica, keda_enabled=keda_enabled,
         ))
     return manifests
 
@@ -223,7 +229,16 @@ async def deploy(session: AsyncSession, deployment: FlowDeployment) -> dict[str,
     # 镜像分层：按 requirements_hash 复用/构建依赖层（决策 11，4b）
     await _resolve_images(specs)
 
-    manifests = render_all_manifests(specs, ctx)
+    # 集群未装 KEDA 时优雅降级：跳过 ScaledObject，异步块退化为固定副本
+    keda_ok = await deployment_manager.keda_available()
+    warnings: list[str] = []
+    if not keda_ok and any(s.consumes_mq for s in specs):
+        warnings.append(
+            "集群未安装 KEDA：异步块以固定副本(min=1)运行，未启用基于队列深度的自动扩缩。"
+            "安装 KEDA 后重新部署即可恢复弹性伸缩。"
+        )
+
+    manifests = render_all_manifests(specs, ctx, keda_enabled=keda_ok)
 
     deployment.status = "deploying"
     await session.commit()
@@ -241,8 +256,8 @@ async def deploy(session: AsyncSession, deployment: FlowDeployment) -> dict[str,
     deployment.block_statuses = block_statuses
     await session.commit()
     K8S_DEPLOY.labels(action="deploy", result="ok").inc()
-    logger.info("flow_deployed", deployment_id=deployment.id, blocks=len(specs))
-    return {"status": deployment.status, "block_statuses": block_statuses}
+    logger.info("flow_deployed", deployment_id=deployment.id, blocks=len(specs), keda=keda_ok)
+    return {"status": deployment.status, "block_statuses": block_statuses, "warnings": warnings}
 
 
 async def destroy(session: AsyncSession, deployment: FlowDeployment) -> dict[str, Any]:

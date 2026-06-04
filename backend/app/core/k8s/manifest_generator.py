@@ -382,19 +382,28 @@ def render_block_manifests(
     *,
     max_replica: int,
     msgs_per_replica: int,
+    keda_enabled: bool = True,
 ) -> list[dict[str, Any]]:
-    """渲染单个 Block 的全部 K8s manifest。"""
+    """渲染单个 Block 的全部 K8s manifest。
+
+    keda_enabled=False（集群未装 KEDA）时：跳过 ScaledObject，且异步块退化为固定副本
+    min≥1（否则 0 副本无人消费队列），保证功能可用、仅失去自动扩缩。
+    """
     min_r = min_replicas_for(spec)
-    manifests: list[dict[str, Any]] = [build_deployment(spec, ctx, min_replicas=max(min_r, 1) if spec.serves_http else min_r)]
+    if not keda_enabled and spec.consumes_mq:
+        min_r = max(min_r, 1)
+    dep_min = max(min_r, 1) if spec.serves_http else min_r
+    manifests: list[dict[str, Any]] = [build_deployment(spec, ctx, min_replicas=dep_min)]
     svc = build_service(spec, ctx)
     if svc:
         manifests.append(svc)
     manifests.append(build_network_policy(spec, ctx))
-    so = build_scaledobject(
-        spec, ctx, max_replica=max_replica, msgs_per_replica=msgs_per_replica, min_replica=min_r
-    )
-    if so:
-        manifests.append(so)
+    if keda_enabled:
+        so = build_scaledobject(
+            spec, ctx, max_replica=max_replica, msgs_per_replica=msgs_per_replica, min_replica=min_r
+        )
+        if so:
+            manifests.append(so)
     return manifests
 
 
