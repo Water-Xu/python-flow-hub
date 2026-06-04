@@ -42,7 +42,8 @@ K8s 执行与扩缩内核（KEDA）、镜像构建与供应链加固、GPU 与 G
 ```
 
 - **控制面绝不在 Pod 内跑 Docker**：dev 本地由开发者机器 / 本地 Linux runner 的 Docker daemon 承载；
-  生产执行 = Block 自己的常驻 Deployment（`pyflow_runtime` 自消费 MQ / 暴露 `/invoke`，决策 3.1 模型 A）。
+  生产执行：块=常驻 invoke Deployment（暴露 `/invoke`）；MQ 触发的接口=Flow-Consumer Deployment
+  （`pyflow_runtime` 消费 `flow.{api_id}.queue` 并按 DAG 驱动整条 Flow，决策 3.1 Flow 级模型 A）。
 - **执行框架下沉为共享库 `pyflow_runtime`**：控制面（dev local）与 runner 镜像（prod）单一来源、同 pin 版本。
 
 ---
@@ -57,7 +58,7 @@ lhy-styon-python-flow-hub/
 │   │   ├── core/
 │   │   │   ├── sandbox/     # docker_executor(dev) / k8s_executor(即席 Job)
 │   │   │   ├── flow/        # DAG + flow_runner（含续跑）+ k8s_orchestration + flow_run_store(lease/fence)
-│   │   │   ├── mq/          # 拓扑生成 + 消费者部署管理（不亲自消费生产队列）
+│   │   │   ├── mq/          # 接口/Flow 级拓扑生成 + dev-local 消费者管理（prod 消费者=Flow-Consumer Pod）
 │   │   │   ├── k8s/         # manifest_generator / deployment_manager / keda_manager / cluster_monitor / image_builder / middleware / orchestrator
 │   │   │   ├── versioning/  # version_manager(先MinIO后DB+对账) / diff_service
 │   │   │   ├── storage/     # MinIO 客户端（可注入，便于单测）
@@ -160,13 +161,13 @@ def run(inputs: dict) -> dict:
 | --- | --- |
 | 1 执行隔离 | venv 废弃；dev=Docker(+可选 gVisor)，prod=K8s Pod 原生隔离；控制面不跑 Docker |
 | 2 鉴权 | 接现有 Sa-Token 网关（只校登录态）+ FastAPI 内平台级 RBAC |
-| 3.1 MQ 模型 A | 生产异步单元=Block 常驻 Deployment 自消费；执行框架打进 runner 镜像 |
+| 3.1 MQ 模型 A（Flow 级）| MQ 触发并入「接口管理」(PublishedApi)：一个接口可选 HTTP/MQ/both；异步单元=接口/Flow 级 Flow-Consumer Deployment，消费 `flow.{api_id}.queue` 驱动整条 DAG（调各块 invoke Service）；块一律 HTTP invoke 服务（无 `execution_mode`）；执行框架打进 runner 镜像 |
 | 5 WS 路由 | 输出经 Redis Pub/Sub 跨副本；key 用 hash tag 杜绝 CROSSSLOT |
-| 6 重试 | TTL+DLX 延迟重试 + 退避重入队列（防 KEDA 抖动） |
+| 6 重试 | TTL+DLX 延迟重试 + 退避重入队列（防 KEDA 抖动）；队列按接口 id 命名 `flow.{api_id}.*`，跨流程版本切换稳定，消费者每条消息按 `active_flow_id` 跑整流 |
 | 7 幂等 | 状态机 + fence_token CAS，区分在跑/可接管/终态，崩溃恢复不双跑 |
 | 8 版本存储 | 大字段存 MinIO，DB 存指针；先 MinIO 后 DB + 对账 |
-| 10 拓扑 | 同步编排（控制面调 /invoke）/ 异步编舞（Block 互发队列）二选一 |
-| 12 容量 | 现集群 6vCPU 满载，专用节点池隔离，扩缩参数按容量推导不硬编码 |
+| 10 拓扑 | 同步编排（控制面调 /invoke）/ 异步触发（Flow-Consumer 收 MQ 驱动整条 DAG）二选一 |
+| 12 容量 | 现集群 6vCPU 满载，专用节点池隔离；块为常驻 invoke 副本，MQ 扩缩按 `flow.{api_id}.queue` 深度作用于 Flow-Consumer，参数按容量推导不硬编码 |
 | 13 可观测性 | 接现有 Cloud Trace + Cloud Logging + Prometheus（GMP PodMonitoring） |
 | 15 资源级权限 | owner + grant 表，编辑/部署/查看三面粒度对称 |
 

@@ -15,7 +15,7 @@ from app.db import get_session
 from app.errors import PYFLOW_API_NOT_FOUND, BusinessException
 from app.models.api_portal import PublishedApi
 from app.models.block import Block
-from app.models.flow import Flow, FlowNode
+from app.models.flow import Flow, FlowEdge, FlowNode
 from app.schemas.api_portal import (
     ApiInstanceInfo,
     ApiPolicyRequest,
@@ -73,6 +73,10 @@ async def get_admin_api_docs(
     )).scalars().all()
 
     block_docs = []
+    entry_input_ports: list = []
+    edge_target_ids = {e.target_node_id for e in (await session.execute(
+        select(FlowEdge).where(FlowEdge.flow_id == flow_id)
+    )).scalars().all()}
     for node in nodes:
         if node.block_id:
             block = await session.get(Block, node.block_id)
@@ -84,18 +88,18 @@ async def get_admin_api_docs(
                     "description": block.description,
                     "owner_login_id": block.owner_login_id,
                     "type": block.type,
-                    "execution_mode": block.execution_mode,
                     # 该节点实际调用的入口函数（默认 run）
                     "entrypoint": (node.config or {}).get("entrypoint") or "run",
                     "input_ports": block.input_ports,
                     "output_ports": block.output_ports,
                     "compute_config": block.compute_config,
-                    "mq_config": block.mq_config,
-                    # MQ 调用方式文档（仅 async_mq/both 块非空）
-                    "mq_invocation": build_mq_invocation(block),
                 })
+                # 流程入口块（无入边）端口用于 MQ 示例消息体
+                if node.id not in edge_target_ids:
+                    entry_input_ports.extend(block.input_ports or [])
 
-    mq_blocks = [b for b in block_docs if b.get("mq_invocation")]
+    # 接口级 MQ 触发文档（trigger_type 为 mq/both 时非空）
+    mq_invocation = build_mq_invocation(api, entry_input_ports)
 
     return {
         "api_id": api_id,
@@ -106,11 +110,12 @@ async def get_admin_api_docs(
         "status": api.status,
         "is_locked": api.is_locked,
         "owner_login_id": api.owner_login_id,
+        "trigger_type": api.trigger_type,
         "flow_id": flow_id,
         "flow_name": flow.name if flow else "未知",
         "blocks": block_docs,
-        "mq_supported": len(mq_blocks) > 0,
-        "mq_block_count": len(mq_blocks),
+        "mq_supported": mq_invocation is not None,
+        "mq_invocation": mq_invocation,
         "stats": {
             "total_calls": api.total_calls,
             "success_calls": api.success_calls,

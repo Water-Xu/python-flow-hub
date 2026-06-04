@@ -207,7 +207,7 @@ function addBlockNode(block: Block) {
       id: `n-${Date.now()}`,
       type: 'block',
       position: { x: 120 + Math.random() * 200, y: 120 + Math.random() * 160 },
-      data: { label: block.name, mode: block.execution_mode, block_id: block.id, entrypoint: 'run' },
+      data: { label: block.name, block_id: block.id, entrypoint: 'run' },
     },
   ])
 }

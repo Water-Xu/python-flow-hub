@@ -43,13 +43,21 @@ let precheckTimer: number | undefined
 
 let timer: number | undefined
 
+let _loadInFlight = false
+
 async function load() {
+  if (_loadInFlight) return
+  _loadInFlight = true
   loading.value = true
   try {
-    deployments.value = await deploymentApi.list()
-    flows.value = await flowApi.list()
+    // 两个列表互不依赖，并行请求降低首屏/轮询延迟
+    ;[deployments.value, flows.value] = await Promise.all([
+      deploymentApi.list(),
+      flowApi.list(),
+    ])
   } finally {
     loading.value = false
+    _loadInFlight = false
   }
 }
 
@@ -319,7 +327,10 @@ const statusType: Record<string, string> = {
 
 onMounted(() => {
   load()
-  timer = window.setInterval(load, 15000)
+  // 后台标签暂停轮询，省去不可见时的无谓请求
+  timer = window.setInterval(() => {
+    if (!document.hidden) load()
+  }, 15000)
 })
 onBeforeUnmount(() => timer && clearInterval(timer))
 </script>
@@ -391,7 +402,13 @@ onBeforeUnmount(() => timer && clearInterval(timer))
         <el-tab-pane label="Block 状态" name="status">
           <el-table :data="detail?.block_statuses || []" size="small">
             <el-table-column prop="name" label="块" show-overflow-tooltip />
-            <el-table-column prop="execution_mode" label="模式" width="110" />
+            <el-table-column label="类型" width="130">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.kind === 'flow_consumer' ? 'warning' : 'info'" effect="plain">
+                  {{ row.kind === 'flow_consumer' ? 'Flow 消费者' : 'invoke 服务' }}
+                </el-tag>
+              </template>
+            </el-table-column>
             <el-table-column prop="replicas" label="副本" width="80" />
             <el-table-column prop="ready" label="Ready" width="80" />
             <el-table-column label="存在" width="80">
@@ -492,7 +509,7 @@ onBeforeUnmount(() => timer && clearInterval(timer))
             <div v-for="r in resourceRows" :key="r.block_id" class="res-card">
               <div class="res-card-head">
                 <span class="res-name">{{ r.name }}</span>
-                <el-tag size="small" effect="plain">{{ r.execution_mode }}</el-tag>
+                <el-tag size="small" effect="plain" type="info">invoke</el-tag>
                 <el-button class="res-reset" link size="small" @click="resetResourceRow(r)">
                   <el-icon><RefreshLeft /></el-icon> 恢复默认
                 </el-button>

@@ -9,7 +9,7 @@ from typing import Any
 from pyflow_runtime.executor import discover_entrypoints
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.rbac import Role, require_role
@@ -23,14 +23,17 @@ from app.errors import (
     PYFLOW_BLOCK_NOT_FOUND,
     PYFLOW_EXEC_INPUT_INVALID,
     PYFLOW_EXEC_SANDBOX_ERROR,
+    PYFLOW_FLOW_IN_USE,
     PYFLOW_FLOW_NOT_FOUND,
     BusinessException,
 )
 from app.models.api_portal import PublishedApi
 from app.models.base_mixin import gen_uuid
 from app.models.block import Block
+from app.models.deployment import FlowDeployment
 from app.models.execution import FlowRun
 from app.models.flow import Flow, FlowEdge, FlowNode
+from app.models.version import FlowVersion
 from app.schemas.flow import (
     FlowCreateRequest,
     FlowDetailResponse,
@@ -77,6 +80,38 @@ async def _assert_flow_not_locked(session: AsyncSession, flow_id: str) -> None:
         raise BusinessException(
             PYFLOW_API_LOCKED,
             f"流程被锁定接口 [{api_names}] 引用，禁止修改。如需变更请创建副本。",
+        )
+
+
+async def _assert_flow_deletable(session: AsyncSession, flow_id: str) -> None:
+    """删除前校验：被锁定接口、已发布接口或部署实例引用的流程禁止删除。"""
+    apis = (await session.execute(
+        select(PublishedApi).where(
+            or_(PublishedApi.flow_id == flow_id, PublishedApi.active_flow_id == flow_id)
+        )
+    )).scalars().all()
+    locked_apis = [a for a in apis if a.is_locked]
+    if locked_apis:
+        api_names = ", ".join(a.name for a in locked_apis)
+        raise BusinessException(
+            PYFLOW_API_LOCKED,
+            f"流程被锁定接口 [{api_names}] 引用，禁止删除。如需删除请先解锁。",
+        )
+    if apis:
+        api_names = ", ".join(a.name for a in apis)
+        raise BusinessException(
+            PYFLOW_FLOW_IN_USE,
+            f"流程已发布为接口 [{api_names}]，请先下线接口再删除。",
+        )
+
+    deployments = (await session.execute(
+        select(FlowDeployment).where(FlowDeployment.flow_id == flow_id)
+    )).scalars().all()
+    if deployments:
+        names = ", ".join(d.name for d in deployments)
+        raise BusinessException(
+            PYFLOW_FLOW_IN_USE,
+            f"流程存在部署实例 [{names}]，请先销毁部署再删除。",
         )
 
 
@@ -150,7 +185,6 @@ async def import_flow_zip(
             input_ports=[{"name": "inputs", "type": "any", "required": False}],
             output_ports=[{"name": "output", "type": "any", "required": False}],
             entrypoints=_discover_script_entrypoints(code),
-            execution_mode="sync_http",
         ))
         session.add(FlowNode(
             id=node_id,
@@ -293,6 +327,25 @@ async def copy_flow(
 
     await session.commit()
     return await get_flow(new_flow.id, session, login_id)
+
+
+@router.delete("/{flow_id}")
+async def remove_flow(
+    flow_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.EDITOR)),
+):
+    """删除流程（未被锁定 / 发布 / 部署的流程），级联清理其节点、边、版本与运行记录。"""
+    flow = await _get_flow(session, flow_id)
+    await _assert_flow_deletable(session, flow_id)
+
+    await session.execute(delete(FlowEdge).where(FlowEdge.flow_id == flow_id))
+    await session.execute(delete(FlowNode).where(FlowNode.flow_id == flow_id))
+    await session.execute(delete(FlowVersion).where(FlowVersion.flow_id == flow_id))
+    await session.execute(delete(FlowRun).where(FlowRun.flow_id == flow_id))
+    await session.delete(flow)
+    await session.commit()
+    return {"deleted": flow_id}
 
 
 @router.post("/{flow_id}/run")

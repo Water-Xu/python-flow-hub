@@ -51,16 +51,17 @@ class _SafeDict(dict):
 def render_reply_routing_key(
     template: str | None,
     reply: dict[str, Any],
-    block_id: str = "",
+    api_id: str = "",
 ) -> str:
-    """渲染 reply_routing_key_template（如 "reply.{block_id}" / "order.{snowflakeId}"）。
+    """渲染 reply_routing_key_template（如 "reply.{api_id}" / "order.{snowflakeId}"）。
 
-    模板占位符从 reply 内容 + block_id 取值，缺失键渲染为空串。
+    模板占位符从 reply 内容 + api_id 取值，缺失键渲染为空串。
     """
     if not template:
         return ""
     ctx = _SafeDict(reply)
-    ctx.setdefault("block_id", block_id)
+    ctx.setdefault("api_id", api_id)
+    ctx.setdefault("block_id", api_id)  # 兼容旧模板占位符 {block_id}
     try:
         return template.format_map(ctx)
     except (ValueError, IndexError):

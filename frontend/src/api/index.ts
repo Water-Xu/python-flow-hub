@@ -54,12 +54,10 @@ export interface Block {
   description: string
   type: string
   draft_code: string
-  execution_mode: string
   input_ports: any[]
   output_ports: any[]
   entrypoints: Entrypoint[]
   compute_config: Record<string, any>
-  mq_config: Record<string, any>
 }
 
 export const blockApi = {
@@ -68,8 +66,6 @@ export const blockApi = {
   create: (data: Partial<Block>) => client.post<any, Block>('/api/blocks', data),
   update: (id: string, data: Partial<Block>) => client.put<any, Block>(`/api/blocks/${id}`, data),
   remove: (id: string) => client.delete(`/api/blocks/${id}`),
-  run: (id: string, inputs: Record<string, any>, entrypoint?: string) =>
-    client.post(`/api/blocks/${id}/run`, { inputs, entrypoint }),
   /** 静态扫描脚本暴露的入口函数清单（供节点选择调用哪个函数） */
   discoverEntrypoints: (id: string) =>
     client.post<any, { block_id: string; entrypoints: Entrypoint[] }>(
@@ -81,6 +77,7 @@ export const flowApi = {
   list: () => client.get<any, any[]>('/api/flows').then(ensureArray<any>),
   get: (id: string) => client.get<any, any>(`/api/flows/${id}`),
   create: (data: { name: string; description?: string }) => client.post('/api/flows', data),
+  remove: (id: string) => client.delete(`/api/flows/${id}`),
   saveGraph: (id: string, nodes: any[], edges: any[]) =>
     client.put(`/api/flows/${id}/graph`, { nodes, edges }),
   run: (id: string, inputs: Record<string, any>) => client.post(`/api/flows/${id}/run`, { inputs }),
@@ -147,7 +144,6 @@ export interface BlockResourceSpec {
 export interface BlockResource {
   block_id: string
   name: string
-  execution_mode: string
   default: Required<BlockResourceSpec>
   override: BlockResourceSpec
   effective: Required<BlockResourceSpec>
@@ -211,6 +207,8 @@ export interface PublishedApi {
   active_flow_id: string | null
   owner_login_id: string
   status: string
+  trigger_type: string
+  mq_config: Record<string, any>
   is_locked: boolean
   lock_reason: string | null
   locked_by: string | null
@@ -242,6 +240,9 @@ export const apiPortalApi = {
   pause: (id: string) => client.post(`/api/portal/apis/${id}/pause`),
   activate: (id: string) => client.post(`/api/portal/apis/${id}/activate`),
   getDocs: (id: string) => client.get<any, any>(`/api/portal/apis/${id}/docs`),
+  /** 配置接口触发方式（http/mq/both）+ MQ 触发参数（队列/条件/映射/回复/重试，决策 3.1 Flow 级） */
+  updateMq: (id: string, data: { trigger_type: string; mq_config: Record<string, any> }) =>
+    client.put<any, PublishedApi>(`/api/portal/apis/${id}/mq`, data),
   copyFlow: (flowId: string) => client.post<any, any>(`/api/flows/${flowId}/copy`),
   /**
    * 在线测试：直接调用公开入口 POST /api/public/{path}，返回完整 AxiosResponse，
@@ -254,28 +255,29 @@ export const apiPortalApi = {
     }),
 }
 
+/** MQ 消费者管理（接口/Flow 级，决策 3.1 重写为 Flow 级模型 A，全部按 api_id 维度）。 */
 export const mqApi = {
   getStatus: () => client.get<any, any>('/api/mq/status'),
-  getBlockStatus: (blockId: string) => client.get<any, any>(`/api/mq/blocks/${blockId}/status`),
-  getDepth: (blockId: string) => client.get<any, any>(`/api/mq/blocks/${blockId}/depth`),
-  start: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/start`),
-  stop: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/stop`),
-  restart: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/restart`),
-  /** 同步执行（兼容 local/k8s，记录执行历史，返回结果） */
-  testRun: (blockId: string, data: { payload?: object; snowflake_id?: string }) =>
-    client.post<any, any>(`/api/mq/blocks/${blockId}/test-run`, data),
-  /** 仅发布到队列（需要消费者正在运行） */
-  publish: (blockId: string, data: { payload?: object; snowflake_id?: string }) =>
-    client.post<any, any>(`/api/mq/blocks/${blockId}/publish`, data),
+  getApiStatus: (apiId: string) => client.get<any, any>(`/api/mq/apis/${apiId}/status`),
+  getDepth: (apiId: string) => client.get<any, any>(`/api/mq/apis/${apiId}/depth`),
+  start: (apiId: string) => client.post<any, any>(`/api/mq/apis/${apiId}/start`),
+  stop: (apiId: string) => client.post<any, any>(`/api/mq/apis/${apiId}/stop`),
+  restart: (apiId: string) => client.post<any, any>(`/api/mq/apis/${apiId}/restart`),
+  /** 用 MQ payload 同步驱动整条 Flow（兼容 local/k8s，返回 outputs） */
+  testRun: (apiId: string, data: { payload?: object; snowflake_id?: string }) =>
+    client.post<any, any>(`/api/mq/apis/${apiId}/test-run`, data),
+  /** 仅发布到接口队列 flow.{api_id}.queue（需要消费者正在运行） */
+  publish: (apiId: string, data: { payload?: object; snowflake_id?: string }) =>
+    client.post<any, any>(`/api/mq/apis/${apiId}/publish`, data),
   startAll: () => client.post<any, any>('/api/mq/start-all'),
   stopAll: () => client.post<any, any>('/api/mq/stop-all'),
   /** DLQ 运维：预览死信样本 */
-  peekDlq: (blockId: string, limit = 10) =>
-    client.get<any, any>(`/api/mq/blocks/${blockId}/dlq`, { params: { limit } }),
+  peekDlq: (apiId: string, limit = 10) =>
+    client.get<any, any>(`/api/mq/apis/${apiId}/dlq`, { params: { limit } }),
   /** DLQ 运维：全部重投回主队列（重置 x-retry-count，DEPLOYER） */
-  requeueDlq: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/dlq/requeue`),
+  requeueDlq: (apiId: string) => client.post<any, any>(`/api/mq/apis/${apiId}/dlq/requeue`),
   /** DLQ 运维：清空死信（DEPLOYER） */
-  purgeDlq: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/dlq/purge`),
+  purgeDlq: (apiId: string) => client.post<any, any>(`/api/mq/apis/${apiId}/dlq/purge`),
 }
 
 export const healthApi = {

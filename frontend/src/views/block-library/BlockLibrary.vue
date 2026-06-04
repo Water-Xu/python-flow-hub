@@ -8,7 +8,7 @@ const router = useRouter()
 const blocks = ref<Block[]>([])
 const loading = ref(false)
 const dialogVisible = ref(false)
-const form = ref({ name: '', description: '', type: 'script', execution_mode: 'sync_http' })
+const form = ref({ name: '', description: '', type: 'script' })
 
 async function load() {
   loading.value = true
@@ -26,7 +26,7 @@ async function createBlock() {
     draft_code: 'def run(inputs):\n    return {"echo": inputs}\n',
   })
   dialogVisible.value = false
-  form.value = { name: '', description: '', type: 'script', execution_mode: 'sync_http' }
+  form.value = { name: '', description: '', type: 'script' }
   router.push(`/blocks/${block.id}`)
 }
 
@@ -68,7 +68,7 @@ onMounted(load)
           <div class="card-top">
             <span class="type-dot" :style="{ background: typeColor[b.type] || '#888' }" />
             <span class="block-name">{{ b.name }}</span>
-            <el-tag size="small" effect="dark">{{ b.execution_mode }}</el-tag>
+            <el-tag size="small" effect="dark">{{ b.type }}</el-tag>
           </div>
           <p class="block-desc">{{ b.description || '暂无描述' }}</p>
           <div class="card-foot">
@@ -94,13 +94,6 @@ onMounted(load)
             <el-option label="notebook" value="notebook" />
             <el-option label="gcp_bigquery" value="gcp_bigquery" />
             <el-option label="gcp_storage" value="gcp_storage" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="执行模式">
-          <el-select v-model="form.execution_mode" style="width: 100%">
-            <el-option label="sync_http 同步" value="sync_http" />
-            <el-option label="async_mq 异步" value="async_mq" />
-            <el-option label="both 两者" value="both" />
           </el-select>
         </el-form-item>
       </el-form>

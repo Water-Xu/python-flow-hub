@@ -20,6 +20,7 @@ PYFLOW_VERSION_NOT_STABLE = (41803, "lang.pyflow.version.not_stable")
 PYFLOW_EXEC_INPUT_INVALID = (41804, "lang.pyflow.exec.input_invalid")
 PYFLOW_FLOW_DAG_INVALID = (41805, "lang.pyflow.flow.dag_invalid")
 PYFLOW_FORBIDDEN_RESOURCE = (41806, "lang.pyflow.resource.forbidden")
+PYFLOW_FLOW_IN_USE = (41807, "lang.pyflow.flow.in_use")
 
 # 接口管理 4xxxx —— 41810~41819
 PYFLOW_API_NOT_FOUND = (41810, "lang.pyflow.api.not_found")

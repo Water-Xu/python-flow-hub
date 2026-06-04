@@ -31,14 +31,16 @@ _DEFAULT_KSA = {
 
 @dataclass
 class BlockDeploySpec:
-    """单个 Block 的部署描述（由 Block 模型 + 稳定版本派生）。"""
+    """单个 Block 的部署描述（由 Block 模型 + 稳定版本派生）。
+
+    MQ 触发已上移到接口/Flow 级（FlowConsumerSpec）：块在 Flow 内一律作为 HTTP invoke 服务，
+    被 Flow-Consumer / 同步编排按 DAG 调用 /invoke（决策 3.1 重写为 Flow 级模型 A）。
+    """
 
     block_id: str
     name: str
     type: str = "script"                       # script|notebook|gcp_bigquery|gcp_storage
-    execution_mode: str = "sync_http"          # sync_http|async_mq|both
     compute_config: dict[str, Any] = field(default_factory=dict)
-    mq_config: dict[str, Any] = field(default_factory=dict)
     env_vars: dict[str, str] = field(default_factory=dict)
     secret_refs: dict[str, str] = field(default_factory=dict)
     gcp_resource_scope: list[str] = field(default_factory=list)
@@ -52,16 +54,37 @@ class BlockDeploySpec:
         return self.block_id.replace("-", "")[:8]
 
     @property
-    def consumes_mq(self) -> bool:
-        return self.execution_mode in ("async_mq", "both")
-
-    @property
     def serves_http(self) -> bool:
-        return self.execution_mode in ("sync_http", "both")
+        # 块一律暴露 /invoke（被 Flow 编排调用）
+        return True
 
     @property
     def gpu_enabled(self) -> bool:
         return bool(self.compute_config.get("gpu_enabled"))
+
+
+@dataclass
+class FlowConsumerSpec:
+    """接口/Flow 级 MQ 消费者部署描述（决策 3.1 重写为 Flow 级模型 A）。
+
+    消费 flow.{api_id}.queue，收到消息后按 DAG 驱动整条 Flow（调各块 /invoke Service）。
+    KEDA 按该队列深度扩缩本 Deployment。
+    """
+
+    api_id: str
+    api_name: str
+    flow_id: str
+    mq_config: dict[str, Any] = field(default_factory=dict)
+    # DAG 快照：{"nodes": [{id, node_type, block_id, config, service}], "edges": [...]}
+    dag: dict[str, Any] = field(default_factory=dict)
+    compute_config: dict[str, Any] = field(default_factory=dict)
+    env_vars: dict[str, str] = field(default_factory=dict)
+    secret_refs: dict[str, str] = field(default_factory=dict)
+    image: str = ""
+
+    @property
+    def api_short(self) -> str:
+        return self.api_id.replace("-", "")[:8]
 
 
 @dataclass
@@ -174,15 +197,14 @@ def deployment_name(ctx: DeployContext, spec: BlockDeploySpec) -> str:
 # ─────────────────────────── Manifests ───────────────────────────
 
 def build_deployment(spec: BlockDeploySpec, ctx: DeployContext, *, min_replicas: int) -> dict[str, Any]:
-    """生成 Block 常驻 Deployment（决策 3.1 模型 A）。
+    """生成 Block 常驻 Deployment（决策 3.1 重写为 Flow 级模型 A）。
 
-    consumer 角色：自消费 block.{id}.queue（async_mq）；
-    invoke 角色：暴露 /invoke（sync_http；both 同时消费 + 服务）。
+    invoke 角色：暴露 /invoke，被 Flow-Consumer / 同步编排按 DAG 调用。
     """
     name = deployment_name(ctx, spec)
     labels = _labels(spec, ctx)
     image = spec.image or (ctx.gpu_runner_image if spec.gpu_enabled else ctx.runner_image)
-    role = "invoke" if spec.serves_http else "consumer"
+    role = "invoke"
 
     env = [
         {"name": "PYFLOW_RUNNER_ROLE", "value": role},
@@ -334,31 +356,152 @@ def build_network_policy(spec: BlockDeploySpec, ctx: DeployContext) -> dict[str,
     }
 
 
-def build_scaledobject(
-    spec: BlockDeploySpec, ctx: DeployContext, *, max_replica: int, msgs_per_replica: int, min_replica: int
-) -> dict[str, Any] | None:
-    """KEDA ScaledObject（仅 async_mq/both 块；扩缩对应 Block Deployment，决策 3.1/12）。"""
-    if not spec.consumes_mq:
-        return None
-    name = deployment_name(ctx, spec)
+def render_block_manifests(
+    spec: BlockDeploySpec,
+    ctx: DeployContext,
+    *,
+    keda_enabled: bool = True,
+) -> list[dict[str, Any]]:
+    """渲染单个 Block 的全部 K8s manifest（invoke 服务，常驻 min≥1，决策 4）。"""
+    manifests: list[dict[str, Any]] = [build_deployment(spec, ctx, min_replicas=1)]
+    svc = build_service(spec, ctx)
+    if svc:
+        manifests.append(svc)
+    manifests.append(build_network_policy(spec, ctx))
+    return manifests
+
+
+# ─────────────────────────── Flow-Consumer（接口/Flow 级 MQ） ───────────────────────────
+
+def flow_consumer_name(ctx: DeployContext, spec: FlowConsumerSpec) -> str:
+    prefix = ctx.resource_prefix or "flow"
+    return f"{prefix}-fc-{spec.api_short}"[:63]
+
+
+def _flow_consumer_labels(spec: FlowConsumerSpec, ctx: DeployContext) -> dict[str, str]:
+    return {
+        "app": f"pyflow-fc-{spec.api_short}",
+        "pyflow.api/id": spec.api_id,
+        "pyflow.flow/id": spec.flow_id,
+        "pyflow.deploy/prefix": ctx.resource_prefix or "adhoc",
+        "pyflow.runtime/protocol": RUNTIME_PROTOCOL_VERSION,
+    }
+
+
+def build_flow_consumer_deployment(
+    spec: FlowConsumerSpec, ctx: DeployContext, *, min_replicas: int
+) -> dict[str, Any]:
+    """Flow-Consumer 常驻 Deployment：消费 flow.{api_id}.queue 驱动整条 DAG（决策 3.1）。"""
+    import json
+
+    name = flow_consumer_name(ctx, spec)
+    labels = _flow_consumer_labels(spec, ctx)
+    image = spec.image or ctx.runner_image
+
+    env = [
+        {"name": "PYFLOW_RUNNER_ROLE", "value": "flow_consumer"},
+        {"name": "PYFLOW_API_ID", "value": spec.api_id},
+        {"name": "PYFLOW_FLOW_ID", "value": spec.flow_id},
+        {"name": "PYFLOW_NAMESPACE", "value": ctx.namespace},
+        {"name": "PYFLOW_MQ_CONFIG", "value": json.dumps(spec.mq_config or {}, ensure_ascii=False)},
+        {"name": "PYFLOW_FLOW_DAG", "value": json.dumps(spec.dag or {}, ensure_ascii=False)},
+        {"name": "PYFLOW_PROTOCOL_VERSION", "value": RUNTIME_PROTOCOL_VERSION},
+        {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+    ]
+    for k, v in (spec.env_vars or {}).items():
+        env.append({"name": k, "value": str(v)})
+
+    env_from = []
+    if ctx.inject_middleware and ctx.middleware_secret:
+        env_from.append({"secretRef": {"name": ctx.middleware_secret}})
+
+    compute = spec.compute_config or {}
+    pod_spec: dict[str, Any] = {
+        "serviceAccountName": ctx.ksa_default,
+        "securityContext": pod_security_context(),
+        "containers": [
+            {
+                "name": "flow-consumer",
+                "image": image,
+                "env": env,
+                "envFrom": env_from,
+                "resources": container_resources(compute),
+                "securityContext": container_security_context(),
+                "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}],
+            }
+        ],
+        "volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": "100Mi"}}],
+        "nodeSelector": {"cloud.google.com/gke-nodepool": WORKERS_NODE_POOL},
+        "runtimeClassName": "gvisor",
+    }
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": name, "namespace": ctx.namespace, "labels": labels},
+        "spec": {
+            "replicas": max(min_replicas, 0),
+            "selector": {"matchLabels": {"app": labels["app"]}},
+            "template": {"metadata": {"labels": labels}, "spec": pod_spec},
+        },
+    }
+
+
+def build_flow_consumer_network_policy(
+    spec: FlowConsumerSpec, ctx: DeployContext
+) -> dict[str, Any]:
+    """Flow-Consumer egress：kube-dns + 中间件白名单（RabbitMQ/Redis）+ 同命名空间块 Service。"""
+    labels = _flow_consumer_labels(spec, ctx)
+    egress: list[dict[str, Any]] = [
+        {  # kube-dns
+            "to": [{"namespaceSelector": {}}],
+            "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}],
+        },
+        {  # 同命名空间块 invoke Service（驱动 DAG）
+            "to": [{"podSelector": {}}],
+            "ports": [{"protocol": "TCP", "port": INVOKE_PORT}],
+        },
+    ]
+    if ctx.inject_middleware and ctx.middleware_egress:
+        egress.extend(ctx.middleware_egress)
+    return {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+            "name": f"{flow_consumer_name(ctx, spec)}-egress",
+            "namespace": ctx.namespace,
+            "labels": labels,
+        },
+        "spec": {
+            "podSelector": {"matchLabels": {"app": labels["app"]}},
+            "policyTypes": ["Egress"],
+            "egress": egress,
+        },
+    }
+
+
+def build_flow_scaledobject(
+    spec: FlowConsumerSpec, ctx: DeployContext, *, max_replica: int, msgs_per_replica: int
+) -> dict[str, Any]:
+    """KEDA ScaledObject：按 flow.{api_id}.queue 深度扩缩 Flow-Consumer Deployment（决策 3.1/6/12）。"""
+    name = flow_consumer_name(ctx, spec)
     return {
         "apiVersion": "keda.sh/v1alpha1",
         "kind": "ScaledObject",
         "metadata": {
             "name": f"{name}-scaler",
             "namespace": ctx.namespace,
-            "labels": _labels(spec, ctx),
+            "labels": _flow_consumer_labels(spec, ctx),
         },
         "spec": {
             "scaleTargetRef": {"name": name},
-            "minReplicaCount": min_replica,
+            "minReplicaCount": 0,
             "maxReplicaCount": max_replica,
             "triggers": [
                 {
                     "type": "rabbitmq",
                     "metadata": {
                         "protocol": "http",
-                        "queueName": f"block.{spec.block_id}.queue",
+                        "queueName": f"flow.{spec.api_id}.queue",
                         "mode": "QueueLength",
                         "value": str(msgs_per_replica),
                     },
@@ -369,41 +512,28 @@ def build_scaledobject(
     }
 
 
-def min_replicas_for(spec: BlockDeploySpec) -> int:
-    """both / sync_http 强制 ≥1（决策 4，永不 scale-to-zero）；async_mq 可为 0。"""
-    if spec.execution_mode in ("sync_http", "both"):
-        return 1
-    return 0
-
-
-def render_block_manifests(
-    spec: BlockDeploySpec,
+def render_flow_consumer_manifests(
+    spec: FlowConsumerSpec,
     ctx: DeployContext,
     *,
     max_replica: int,
     msgs_per_replica: int,
     keda_enabled: bool = True,
 ) -> list[dict[str, Any]]:
-    """渲染单个 Block 的全部 K8s manifest。
+    """渲染 Flow-Consumer 的全部 K8s manifest。
 
-    keda_enabled=False（集群未装 KEDA）时：跳过 ScaledObject，且异步块退化为固定副本
-    min≥1（否则 0 副本无人消费队列），保证功能可用、仅失去自动扩缩。
+    keda_enabled=False（集群未装 KEDA）时：跳过 ScaledObject，消费者退化为固定 1 副本
+    （否则 0 副本无人消费队列），保证功能可用、仅失去自动扩缩。
     """
-    min_r = min_replicas_for(spec)
-    if not keda_enabled and spec.consumes_mq:
-        min_r = max(min_r, 1)
-    dep_min = max(min_r, 1) if spec.serves_http else min_r
-    manifests: list[dict[str, Any]] = [build_deployment(spec, ctx, min_replicas=dep_min)]
-    svc = build_service(spec, ctx)
-    if svc:
-        manifests.append(svc)
-    manifests.append(build_network_policy(spec, ctx))
+    min_r = 0 if keda_enabled else 1
+    manifests: list[dict[str, Any]] = [
+        build_flow_consumer_deployment(spec, ctx, min_replicas=min_r),
+        build_flow_consumer_network_policy(spec, ctx),
+    ]
     if keda_enabled:
-        so = build_scaledobject(
-            spec, ctx, max_replica=max_replica, msgs_per_replica=msgs_per_replica, min_replica=min_r
-        )
-        if so:
-            manifests.append(so)
+        manifests.append(build_flow_scaledobject(
+            spec, ctx, max_replica=max_replica, msgs_per_replica=msgs_per_replica
+        ))
     return manifests
 
 
@@ -424,19 +554,16 @@ def capacity_precheck(
 ) -> PrecheckResult:
     """节点池 allocatable vs 请求总量（决策 12）。
 
-    常驻副本（sync/both，min≥1）按 request 累加；async 块按 min=0 不计入基线，
-    但 max_replica 的瞬时峰值不在此校验（由 KEDA + Node Autoscaler 处理）。
+    块均为常驻 invoke 副本（min≥1）按 request 累加；Flow-Consumer 的瞬时峰值
+    不在此校验（由 KEDA + Node Autoscaler 处理）。
     """
     total_cpu_m = 0
     total_mem_mib = 0
     for s in specs:
-        replicas = 1 if s.execution_mode in ("sync_http", "both") else 0
-        if replicas == 0:
-            continue
         cpu = parse_cpu_millicores(s.compute_config.get("cpu_request", "100m"), 100)
         mem = parse_mem_mib(s.compute_config.get("memory_request", "256Mi"), 256)
-        total_cpu_m += cpu * replicas
-        total_mem_mib += mem * replicas
+        total_cpu_m += cpu
+        total_mem_mib += mem
 
     pool_cpu_m = int(pool_cpu_cores * 1000)
     ok = total_cpu_m <= pool_cpu_m and total_mem_mib <= pool_mem_mib

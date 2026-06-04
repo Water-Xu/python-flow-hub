@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -28,30 +28,34 @@ from app.errors import (
     PYFLOW_EXEC_SANDBOX_ERROR,
     BusinessException,
 )
+from app.core.mq.validation import validate_mq_config
 from app.models.api_portal import PublishedApi
 from app.models.block import Block
 from app.models.flow import Flow, FlowEdge, FlowNode
-from app.schemas.api_portal import ApiResponse, PublishApiRequest
+from app.schemas.api_portal import ApiMqConfigRequest, ApiResponse, PublishApiRequest
 
 router = APIRouter(tags=["api-portal"])
 settings = get_settings()
 
-# 内存限流计数器：{api_id: [(timestamp, count)]}（dev local；生产用 Redis）
-_rate_counters: dict[str, list[float]] = defaultdict(list)
+# 内存限流计数器：{api_id: deque[timestamp]}（dev local；生产用 Redis）
+_rate_counters: dict[str, deque[float]] = defaultdict(deque)
 
 
 def _check_rate_limit(api: PublishedApi) -> None:
-    """简单滑动窗口限流（60 秒）。dev 模式；生产使用 Redis。"""
+    """滑动窗口限流（60 秒）。dev 模式；生产使用 Redis。
+
+    用 deque 仅从左端弹出过期时间戳（O(过期数)），避免每次请求重建整个列表。
+    """
     if not api.rate_limit_enabled:
         return
     now = time.time()
-    window = _rate_counters[api.id]
-    # 清理 60s 窗口外的记录
     cutoff = now - 60.0
-    _rate_counters[api.id] = [t for t in window if t > cutoff]
-    if len(_rate_counters[api.id]) >= api.rate_limit_per_minute:
+    window = _rate_counters[api.id]
+    while window and window[0] <= cutoff:
+        window.popleft()
+    if len(window) >= api.rate_limit_per_minute:
         raise BusinessException(PYFLOW_API_RATE_LIMITED, f"限流 {api.rate_limit_per_minute} req/min")
-    _rate_counters[api.id].append(now)
+    window.append(now)
 
 
 async def _get_api(session: AsyncSession, api_id: str) -> PublishedApi:
@@ -172,6 +176,30 @@ async def activate_api(
     return {"status": "active"}
 
 
+@router.put("/api/portal/apis/{api_id}/mq", response_model=ApiResponse)
+async def update_api_mq_config(
+    api_id: str,
+    req: ApiMqConfigRequest,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.EDITOR)),
+):
+    """配置接口触发方式（http/mq/both）与 MQ 触发参数（队列/条件/映射/回复/重试）。
+
+    MQ 触发已上移到接口/Flow 级（决策 3.1 重写为 Flow 级模型 A）：
+    消费者按 flow.{api_id}.queue 消费，收到消息驱动整条 Flow 编排。
+    """
+    api = await _get_api(session, api_id)
+    if api.is_locked:
+        raise BusinessException(PYFLOW_API_LOCKED, f"接口 {api.name} 已锁定，无法修改触发配置")
+    # 服务端校验（决策 1/6/10）：非法配置拦在运行期之外
+    validate_mq_config(req.mq_config, req.trigger_type)
+    api.trigger_type = req.trigger_type
+    api.mq_config = req.mq_config if req.trigger_type in ("mq", "both") else {}
+    await session.commit()
+    await session.refresh(api)
+    return api
+
+
 @router.get("/api/portal/apis/{api_id}/docs")
 async def get_api_docs(
     api_id: str,
@@ -206,14 +234,11 @@ async def get_api_docs(
                     "entrypoints": block.entrypoints,
                     # 该节点实际调用的入口函数（默认 run）
                     "entrypoint": (node.config or {}).get("entrypoint") or "run",
-                    "execution_mode": block.execution_mode,
-                    "mq_config": block.mq_config,
-                    # MQ 调用方式文档（仅 async_mq/both 块非空），供门户展示 + Mock 测试预填
-                    "mq_invocation": build_mq_invocation(block),
                 })
 
-    # 流程内支持 MQ 异步触发的块（供前端展示「通过 MQ 调用」区与汇总标记）
-    mq_blocks = [b for b in block_docs if b.get("mq_invocation")]
+    # 接口级 MQ 触发文档（trigger_type 为 mq/both 时非空），用流程入口块端口生成示例消息体
+    entry_ports = _entry_input_ports(nodes, edges, block_docs)
+    mq_invocation = build_mq_invocation(api, entry_ports)
 
     return {
         "api_id": api_id,
@@ -222,6 +247,7 @@ async def get_api_docs(
         "path": f"{settings.public_api_prefix}/api/public/{api.path}",
         "method": "POST",
         "status": api.status,
+        "trigger_type": api.trigger_type,
         "flow_id": flow_id,
         "flow_name": flow.name if flow else "未知",
         "node_count": len(nodes),
@@ -229,10 +255,25 @@ async def get_api_docs(
         "blocks": block_docs,
         "request_example": {"inputs": {}},
         "response_example": {"outputs": {}, "flow_run_id": "uuid", "status": "succeeded"},
-        # ── MQ 调用支持 ──
-        "mq_supported": len(mq_blocks) > 0,
-        "mq_block_count": len(mq_blocks),
+        # ── MQ 触发支持（接口级）──
+        "mq_supported": mq_invocation is not None,
+        "mq_invocation": mq_invocation,
     }
+
+
+def _entry_input_ports(
+    nodes: list[Any], edges: list[Any], block_docs: list[dict[str, Any]]
+) -> list[Any]:
+    """流程入口块（无入边的块节点）的 input_ports 合集，用于生成 MQ 示例消息体。"""
+    targets = {e.target_node_id for e in edges}
+    entry_block_ids = {
+        n.block_id for n in nodes if n.block_id and n.id not in targets
+    }
+    ports: list[Any] = []
+    for doc in block_docs:
+        if doc["block_id"] in entry_block_ids:
+            ports.extend(doc.get("input_ports") or [])
+    return ports
 
 
 # ── 公开调用入口 ───────────────────────────────────────────────────────────────
@@ -286,13 +327,17 @@ async def invoke_api(
         for e in edges_rows
     ]
 
+    # 一次 IN 查询批量装载所有块，避免按节点 N+1 逐个 session.get
+    block_ids = {n["block_id"] for n in nodes if n.get("block_id")}
     block_cache: dict[str, Block] = {}
-    for n in nodes:
-        if n.get("block_id") and n["block_id"] not in block_cache:
-            b = await session.get(Block, n["block_id"])
-            if b is None:
-                raise BusinessException(PYFLOW_BLOCK_NOT_FOUND, n["block_id"])
-            block_cache[n["block_id"]] = b
+    if block_ids:
+        rows = (await session.execute(
+            select(Block).where(Block.id.in_(block_ids))
+        )).scalars().all()
+        block_cache = {b.id: b for b in rows}
+        missing = block_ids - block_cache.keys()
+        if missing:
+            raise BusinessException(PYFLOW_BLOCK_NOT_FOUND, next(iter(missing)))
 
     start_ts = time.time()
     try:

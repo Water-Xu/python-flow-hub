@@ -1,20 +1,28 @@
-"""集群状态采集（Phase 4a）：Block Deployment 副本/Pod 状态 → 部署中心 / WS 推送。"""
+"""集群状态采集（Phase 4a）：Block / Flow-Consumer Deployment 副本/Pod 状态 → 部署中心 / WS 推送。"""
 
 from __future__ import annotations
 
 from typing import Any
 
 from app.core.k8s.deployment_manager import read_deployment_status
-from app.core.k8s.manifest_generator import BlockDeploySpec, DeployContext, deployment_name
+from app.core.k8s.manifest_generator import (
+    BlockDeploySpec,
+    DeployContext,
+    FlowConsumerSpec,
+    deployment_name,
+    flow_consumer_name,
+)
 from app.observability.logging import get_logger
 
 logger = get_logger("pyflow.k8s.monitor")
 
 
 async def collect_deployment_status(
-    specs: list[BlockDeploySpec], ctx: DeployContext
+    specs: list[BlockDeploySpec],
+    ctx: DeployContext,
+    flow_consumer_specs: list[FlowConsumerSpec] | None = None,
 ) -> list[dict[str, Any]]:
-    """采集一个 FlowDeployment 下所有 Block 的副本状态。"""
+    """采集一个 FlowDeployment 下所有 Block invoke 服务 + Flow-Consumer 的副本状态。"""
     statuses: list[dict[str, Any]] = []
     for spec in specs:
         name = deployment_name(ctx, spec)
@@ -27,11 +35,26 @@ async def collect_deployment_status(
             "block_id": spec.block_id,
             "name": spec.name,
             "deployment": name,
-            "execution_mode": spec.execution_mode,
+            "kind": "block",
             **st,
         }
         statuses.append(block_status)
         _update_metrics(ctx.resource_prefix, spec.block_id, st.get("replicas", 0))
+
+    for fc in flow_consumer_specs or []:
+        name = flow_consumer_name(ctx, fc)
+        try:
+            st = await read_deployment_status(name, ctx.namespace)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("flow_consumer_status_failed", api_id=fc.api_id, error=str(exc))
+            st = {"exists": False, "replicas": 0, "ready": 0, "error": str(exc)}
+        statuses.append({
+            "api_id": fc.api_id,
+            "name": fc.api_name,
+            "deployment": name,
+            "kind": "flow_consumer",
+            **st,
+        })
     return statuses
 
 

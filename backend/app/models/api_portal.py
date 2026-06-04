@@ -34,6 +34,13 @@ class PublishedApi(Base, UUIDMixin, TimestampMixin):
     # active | paused | deprecated
     status: Mapped[str] = mapped_column(String(16), default="active")
 
+    # ── 触发方式（决策 3.1 模型 A 重写为 Flow/接口级） ──
+    # http：仅同步 HTTP 调用；mq：仅 MQ 异步触发；both：两者皆可
+    trigger_type: Mapped[str] = mapped_column(String(16), default="http")
+    # MQ 触发配置（queue/exchange/routing_key/input_mapping/condition/reply/retry 等）；
+    # 队列按接口 id 命名 flow.{api_id}.queue，消费者每条消息读 active_flow_id 跑整条 Flow。
+    mq_config: Mapped[dict] = mapped_column(JSON, default=dict)
+
     # ── 锁定（管理员操作） ──
     is_locked: Mapped[bool] = mapped_column(Boolean, default=False)
     lock_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

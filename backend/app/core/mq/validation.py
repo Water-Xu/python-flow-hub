@@ -1,6 +1,6 @@
 """MQ 配置服务端校验（决策 1/6/10：拦截非法配置进入运行期）。
 
-保存/更新 async_mq / both 块时校验：
+保存/更新触发方式为 mq / both 的接口（PublishedApi）时校验：
 - condition_expression 必须是合法 jmespath/jsonpath（杜绝运行期才暴露的语法错误，且绝不 eval）；
 - input_mapping 必须是 dict[str, str]；
 - reply_enabled 时必须指定 reply_routing_key_template 或 reply_exchange；
@@ -22,9 +22,9 @@ def _fail(detail: str) -> None:
     raise BusinessException(PYFLOW_EXEC_INPUT_INVALID, detail)
 
 
-def validate_mq_config(mq_config: dict[str, Any] | None, execution_mode: str) -> None:
-    """校验 MQ 配置；sync_http 块无需 mq_config 直接放行。"""
-    if execution_mode not in ("async_mq", "both"):
+def validate_mq_config(mq_config: dict[str, Any] | None, trigger_type: str) -> None:
+    """校验 MQ 配置；纯 http 触发的接口无需 mq_config 直接放行。"""
+    if trigger_type not in ("mq", "both"):
         return
     cfg = mq_config or {}
 

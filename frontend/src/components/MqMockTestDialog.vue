@@ -5,8 +5,8 @@ import { mqApi } from '@/api'
 
 const props = defineProps<{
   modelValue: boolean
-  blockId: string
-  blockName: string
+  apiId: string
+  apiName: string
   /** 预填的 Mock 消息体（来自接口文档 mq_invocation.message_example） */
   presetPayload?: Record<string, any> | null
 }>()
@@ -48,7 +48,7 @@ function formatPayload() {
 }
 
 async function run() {
-  if (!props.blockId) return
+  if (!props.apiId) return
   let body: object
   try {
     body = payload.value.trim() ? JSON.parse(payload.value) : {}
@@ -58,7 +58,7 @@ async function run() {
   running.value = true
   result.value = null
   try {
-    const res = await mqApi.testRun(props.blockId, {
+    const res = await mqApi.testRun(props.apiId, {
       payload: body,
       snowflake_id: snowflakeId.value || undefined,
     })
@@ -87,9 +87,9 @@ async function run() {
   >
     <div class="mq-test-target">
       <el-icon><MessageBox /></el-icon>
-      <span class="tgt-label">目标块</span>
-      <strong>{{ blockName }}</strong>
-      <el-tag size="small" type="primary" effect="plain">async_mq</el-tag>
+      <span class="tgt-label">目标接口</span>
+      <strong>{{ apiName }}</strong>
+      <el-tag size="small" type="primary" effect="plain">MQ 触发</el-tag>
     </div>
 
     <div class="mq-test-section">
@@ -107,7 +107,7 @@ async function run() {
         class="mq-editor"
         placeholder='{ "value": 1 }'
       />
-      <div class="mq-hint">将经过块的 input_mapping 规则提取 inputs，再同步执行代码（不入队，结果实时返回）</div>
+      <div class="mq-hint">将经过接口的 input_mapping 规则提取 inputs，再同步驱动整条流程（不入队，结果实时返回）</div>
     </div>
 
     <div class="mq-test-section">
@@ -120,34 +120,23 @@ async function run() {
     <transition name="mq-fade">
       <div v-if="result" class="mq-result">
         <div class="res-header">
-          <el-tag :type="result.status === 'success' ? 'success' : 'danger'" effect="dark">
+          <el-tag :type="result.status === 'succeeded' ? 'success' : 'danger'" effect="dark">
             <el-icon style="margin-right:4px">
-              <CircleCheck v-if="result.status === 'success'" />
+              <CircleCheck v-if="result.status === 'succeeded'" />
               <CircleClose v-else />
             </el-icon>
-            {{ result.status === 'success' ? '执行成功' : '执行失败' }}
+            {{ result.status === 'succeeded' ? '流程执行成功' : '流程执行失败' }}
           </el-tag>
-          <el-tag type="info" size="small" effect="plain">
-            <el-icon style="margin-right:4px"><Timer /></el-icon>{{ result.duration_ms }} ms
-          </el-tag>
-          <span class="res-id dim">execution_id: {{ result.execution_id }}</span>
+          <span class="res-id dim" v-if="result.snowflake_id">snowflakeId: {{ result.snowflake_id }}</span>
         </div>
 
         <div class="res-section" v-if="result.inputs_used && Object.keys(result.inputs_used).length">
           <div class="res-label">实际 inputs（经 input_mapping 提取）</div>
           <pre class="res-pre">{{ JSON.stringify(result.inputs_used, null, 2) }}</pre>
         </div>
-        <div class="res-section" v-if="result.output !== null && result.output !== undefined">
-          <div class="res-label">输出结果 output</div>
-          <pre class="res-pre res-output">{{ JSON.stringify(result.output, null, 2) }}</pre>
-        </div>
-        <div class="res-section" v-if="result.stdout">
-          <div class="res-label">标准输出 stdout</div>
-          <pre class="res-pre">{{ result.stdout }}</pre>
-        </div>
-        <div class="res-section" v-if="result.stderr">
-          <div class="res-label res-err-label">错误输出 stderr</div>
-          <pre class="res-pre res-stderr">{{ result.stderr }}</pre>
+        <div class="res-section" v-if="result.outputs !== null && result.outputs !== undefined">
+          <div class="res-label">流程输出 outputs（按节点）</div>
+          <pre class="res-pre res-output">{{ JSON.stringify(result.outputs, null, 2) }}</pre>
         </div>
       </div>
     </transition>

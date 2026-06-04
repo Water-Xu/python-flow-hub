@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { mqApi, blockApi, type Block } from '@/api'
+import { mqApi, apiPortalApi, type PublishedApi } from '@/api'
 
 const consumers = ref<any[]>([])
 const mode = ref('local')
-const blocks = ref<Block[]>([])
+const mqApis = ref<PublishedApi[]>([])
 const loading = ref(false)
 const polling = ref<ReturnType<typeof setInterval>>()
 const clockTimer = ref<ReturnType<typeof setInterval>>()
@@ -15,56 +15,61 @@ const nowTs = ref(Date.now())
 
 // DLQ 运维抽屉
 const dlqDrawer = ref(false)
-const dlqTarget = ref<{ block_id: string; block_name: string } | null>(null)
+const dlqTarget = ref<{ api_id: string; api_name: string } | null>(null)
 const dlqMessages = ref<any[]>([])
 const dlqLoading = ref(false)
 const dlqActing = ref(false)
 
 // 测试执行弹窗
 const publishDialogVisible = ref(false)
-const publishTarget = ref<{ block_id: string; block_name: string } | null>(null)
+const publishTarget = ref<{ api_id: string; api_name: string } | null>(null)
 const publishPayload = ref('{\n  "value": 1\n}')
 const snowflakeId = ref('')
 const publishing = ref(false)
 const runResult = ref<any>(null)   // 执行返回值
 const showResult = ref(false)
 
+let _loadInFlight = false
+
 async function load() {
+  // 防止 8s 轮询与手动/动作后刷新叠加：上一次未完成时直接跳过本次
+  if (_loadInFlight) return
+  _loadInFlight = true
   loading.value = true
   try {
-    const [status, allBlocks] = await Promise.all([
+    const [status, allApis] = await Promise.all([
       mqApi.getStatus(),
-      blockApi.list(),
+      apiPortalApi.list(),
     ])
     mode.value = status.mode
-    blocks.value = allBlocks.filter((b: Block) => ['async_mq', 'both'].includes(b.execution_mode))
+    mqApis.value = allApis.filter((a: PublishedApi) => ['mq', 'both'].includes(a.trigger_type))
 
-    // 合并消费者状态与队列深度
+    // 合并消费者状态与队列深度（按 api_id 维度）
     const consumerMap = Object.fromEntries(
-      (status.consumers || []).map((c: any) => [c.block_id, c])
+      (status.consumers || []).map((c: any) => [c.api_id, c])
     )
 
-    // 对每个 async_mq 块补充深度信息
     const enriched = await Promise.all(
-      blocks.value.map(async (b: Block) => {
-        const consumer = consumerMap[b.id] || null
+      mqApis.value.map(async (a: PublishedApi) => {
+        const consumer = consumerMap[a.id] || null
         let depth = { main: 0, dlq: 0 }
         try {
-          depth = await mqApi.getDepth(b.id)
+          depth = await mqApi.getDepth(a.id)
         } catch {}
-        return { block: b, consumer, depth }
+        return { api: a, consumer, depth }
       })
     )
     consumers.value = enriched
     lastUpdated.value = Date.now()
   } finally {
     loading.value = false
+    _loadInFlight = false
   }
 }
 
-async function startConsumer(blockId: string) {
+async function startConsumer(apiId: string) {
   try {
-    const res = await mqApi.start(blockId)
+    const res = await mqApi.start(apiId)
     ElMessage.success(res.started ? '消费者已启动' : res.message || '已请求启动')
     setTimeout(load, 800)
   } catch (e: any) {
@@ -72,9 +77,9 @@ async function startConsumer(blockId: string) {
   }
 }
 
-async function stopConsumer(blockId: string) {
+async function stopConsumer(apiId: string) {
   try {
-    await mqApi.stop(blockId)
+    await mqApi.stop(apiId)
     ElMessage.success('已停止')
     setTimeout(load, 400)
   } catch (e: any) {
@@ -82,9 +87,9 @@ async function stopConsumer(blockId: string) {
   }
 }
 
-async function restartConsumer(blockId: string) {
+async function restartConsumer(apiId: string) {
   try {
-    await mqApi.restart(blockId)
+    await mqApi.restart(apiId)
     ElMessage.success('已重启')
     setTimeout(load, 800)
   } catch (e: any) {
@@ -117,7 +122,7 @@ async function stopAll() {
 }
 
 function openPublish(item: any) {
-  publishTarget.value = { block_id: item.block.id, block_name: item.block.name }
+  publishTarget.value = { api_id: item.api.id, api_name: item.api.name }
   publishPayload.value = '{\n  "value": 1\n}'
   snowflakeId.value = ''
   runResult.value = null
@@ -136,7 +141,7 @@ async function doPublish() {
   runResult.value = null
   showResult.value = false
   try {
-    const res = await mqApi.testRun(publishTarget.value!.block_id, {
+    const res = await mqApi.testRun(publishTarget.value!.api_id, {
       payload,
       snowflake_id: snowflakeId.value || undefined,
     })
@@ -154,7 +159,7 @@ async function doPublish() {
 
 // ── DLQ 运维（查看死信 / 重投 / 清空）─────────────────────────────────────────
 async function openDlq(item: any) {
-  dlqTarget.value = { block_id: item.block.id, block_name: item.block.name }
+  dlqTarget.value = { api_id: item.api.id, api_name: item.api.name }
   dlqMessages.value = []
   dlqDrawer.value = true
   await loadDlq()
@@ -164,7 +169,7 @@ async function loadDlq() {
   if (!dlqTarget.value) return
   dlqLoading.value = true
   try {
-    const res = await mqApi.peekDlq(dlqTarget.value.block_id, 20)
+    const res = await mqApi.peekDlq(dlqTarget.value.api_id, 20)
     dlqMessages.value = res.messages || []
   } catch {
     dlqMessages.value = []
@@ -177,7 +182,7 @@ async function requeueDlq() {
   if (!dlqTarget.value) return
   try {
     await ElMessageBox.confirm(
-      '确认将该块所有死信重投回主队列？将重置 x-retry-count 重新计数。',
+      '确认将该接口所有死信重投回主队列？将重置 x-retry-count 重新计数。',
       '重投死信', { type: 'warning' },
     )
   } catch {
@@ -185,7 +190,7 @@ async function requeueDlq() {
   }
   dlqActing.value = true
   try {
-    const res = await mqApi.requeueDlq(dlqTarget.value.block_id)
+    const res = await mqApi.requeueDlq(dlqTarget.value.api_id)
     ElMessage.success(`已重投 ${res.requeued} 条死信`)
     await loadDlq()
     setTimeout(load, 600)
@@ -198,7 +203,7 @@ async function purgeDlq() {
   if (!dlqTarget.value) return
   try {
     await ElMessageBox.confirm(
-      '确认清空该块 DLQ？死信将被永久删除，不可恢复。',
+      '确认清空该接口 DLQ？死信将被永久删除，不可恢复。',
       '清空死信', { type: 'warning', confirmButtonText: '清空', confirmButtonClass: 'el-button--danger' },
     )
   } catch {
@@ -206,7 +211,7 @@ async function purgeDlq() {
   }
   dlqActing.value = true
   try {
-    const res = await mqApi.purgeDlq(dlqTarget.value.block_id)
+    const res = await mqApi.purgeDlq(dlqTarget.value.api_id)
     ElMessage.success(`已清空 ${res.purged} 条死信`)
     await loadDlq()
     setTimeout(load, 600)
@@ -227,6 +232,10 @@ const statusType: Record<string, string> = {
   connecting: 'warning',
   stopped: 'info',
   error: 'danger',
+}
+
+const triggerTypeLabel: Record<string, string> = {
+  http: 'HTTP', mq: 'MQ', both: 'HTTP+MQ',
 }
 
 const totalRunning = computed(() =>
@@ -265,7 +274,10 @@ function onVisibility() {
 onMounted(() => {
   load()
   polling.value = setInterval(tick, 8000)
-  clockTimer.value = setInterval(() => (nowTs.value = Date.now()), 1000)
+  // 后台标签暂停时钟刷新，避免无谓的每秒响应式更新
+  clockTimer.value = setInterval(() => {
+    if (!document.hidden) nowTs.value = Date.now()
+  }, 1000)
   document.addEventListener('visibilitychange', onVisibility)
 })
 onUnmounted(() => {
@@ -313,7 +325,7 @@ onUnmounted(() => {
       </div>
       <div class="pf-card ov-card" style="animation-delay:60ms">
         <div class="ov-icon blue"><el-icon size="22"><Collection /></el-icon></div>
-        <div><span class="ov-val">{{ blocks.length }}</span><span class="ov-label"> async_mq 块</span></div>
+        <div><span class="ov-val">{{ mqApis.length }}</span><span class="ov-label"> MQ 接口</span></div>
       </div>
       <div class="pf-card ov-card" :class="{'ov-warn': totalDlq > 0}" style="animation-delay:120ms">
         <div class="ov-icon" :class="totalDlq > 0 ? 'red' : 'dim-icon'">
@@ -326,14 +338,14 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 消费者列表 -->
+    <!-- 消费者列表（按接口/Flow 维度） -->
     <transition-group name="list" tag="div" class="consumer-list">
-      <div v-for="item in consumers" :key="item.block.id" class="pf-card consumer-card">
+      <div v-for="item in consumers" :key="item.api.id" class="pf-card consumer-card">
         <div class="cc-header">
           <div class="cc-name-row">
-            <span class="cc-name">{{ item.block.name }}</span>
-            <el-tag :type="item.block.execution_mode === 'async_mq' ? 'primary' : 'warning'" size="small" effect="plain">
-              {{ item.block.execution_mode }}
+            <span class="cc-name">{{ item.api.name }}</span>
+            <el-tag :type="item.api.trigger_type === 'mq' ? 'primary' : 'warning'" size="small" effect="plain">
+              {{ triggerTypeLabel[item.api.trigger_type] || item.api.trigger_type }}
             </el-tag>
             <el-tag
               :type="statusType[item.consumer?.status || 'stopped']"
@@ -388,16 +400,16 @@ onUnmounted(() => {
         </div>
 
         <!-- MQ 配置摘要 -->
-        <div class="mq-config-summary" v-if="item.block.mq_config?.queue">
+        <div class="mq-config-summary">
           <el-icon><MessageBox /></el-icon>
-          <code>{{ item.block.mq_config.queue }}</code>
-          <span class="dim" v-if="item.block.mq_config.condition_expression">
-            条件: {{ item.block.mq_config.condition_expression.slice(0, 40) }}
+          <code>{{ item.api.mq_config?.queue || `flow.${item.api.id}.queue` }}</code>
+          <span class="dim" v-if="item.api.mq_config?.condition_expression">
+            条件: {{ item.api.mq_config.condition_expression.slice(0, 40) }}
           </span>
-          <el-tag v-if="item.block.mq_config.reply_enabled" size="small" type="success" effect="plain">
+          <el-tag v-if="item.api.mq_config?.reply_enabled" size="small" type="success" effect="plain">
             有回复
           </el-tag>
-          <span class="dim">重试 {{ item.block.mq_config.max_retry || 3 }}x / {{ item.block.mq_config.retry_delay_ms || 5000 }}ms</span>
+          <span class="dim">重试 {{ item.api.mq_config?.max_retry || 3 }}x / {{ item.api.mq_config?.retry_delay_ms || 5000 }}ms</span>
         </div>
 
         <div class="cc-actions">
@@ -406,7 +418,7 @@ onUnmounted(() => {
             type="success"
             size="small"
             :disabled="mode !== 'local'"
-            @click="startConsumer(item.block.id)"
+            @click="startConsumer(item.api.id)"
           >
             <el-icon><VideoPlay /></el-icon> 启动
           </el-button>
@@ -414,11 +426,11 @@ onUnmounted(() => {
             v-else
             type="warning"
             size="small"
-            @click="stopConsumer(item.block.id)"
+            @click="stopConsumer(item.api.id)"
           >
             <el-icon><VideoPause /></el-icon> 停止
           </el-button>
-          <el-button size="small" @click="restartConsumer(item.block.id)">
+          <el-button size="small" @click="restartConsumer(item.api.id)">
             <el-icon><RefreshRight /></el-icon> 重启
           </el-button>
           <el-button size="small" type="primary" @click="openPublish(item)">
@@ -439,14 +451,14 @@ onUnmounted(() => {
 
     <el-empty
       v-if="!loading && consumers.length === 0"
-      description="暂无 async_mq / both 模式的调用块，请先在块编辑器中配置 MQ 触发"
+      description="暂无 MQ / both 触发方式的接口，请先在「接口管理」中为接口配置 MQ 触发"
     />
 
     <!-- 测试执行 Dialog -->
     <el-dialog v-model="publishDialogVisible" title="MQ 消息测试执行" width="600px" destroy-on-close>
       <el-form label-width="90px" v-if="publishTarget">
-        <el-form-item label="目标块">
-          <strong>{{ publishTarget.block_name }}</strong>
+        <el-form-item label="目标接口">
+          <strong>{{ publishTarget.api_name }}</strong>
         </el-form-item>
         <el-form-item label="消息体 JSON">
           <el-input
@@ -456,7 +468,7 @@ onUnmounted(() => {
             style="font-family:monospace;font-size:12px"
             placeholder='{"value": 1}'
           />
-          <div class="form-hint">将经过块的 input_mapping 规则提取 inputs，再同步执行代码</div>
+          <div class="form-hint">将经过接口的 input_mapping 规则提取 inputs，再同步驱动整条 Flow</div>
         </el-form-item>
         <el-form-item label="snowflakeId">
           <el-input v-model="snowflakeId" placeholder="留空自动生成（幂等键）" />
@@ -467,11 +479,10 @@ onUnmounted(() => {
       <transition name="fade">
         <div v-if="showResult && runResult" class="run-result">
           <div class="res-header">
-            <el-tag :type="runResult.status === 'success' ? 'success' : 'danger'" size="large">
-              {{ runResult.status === 'success' ? '✓ 执行成功' : '✗ 执行失败' }}
+            <el-tag :type="runResult.status === 'succeeded' ? 'success' : 'danger'" size="large">
+              {{ runResult.status === 'succeeded' ? '✓ 执行成功' : '✗ 执行失败' }}
             </el-tag>
-            <span class="res-dur">{{ runResult.duration_ms }} ms</span>
-            <span class="res-id dim">execution_id: {{ runResult.execution_id }}</span>
+            <span class="res-id dim">snowflake_id: {{ runResult.snowflake_id }}</span>
           </div>
 
           <div class="res-section" v-if="runResult.inputs_used && Object.keys(runResult.inputs_used).length">
@@ -479,19 +490,9 @@ onUnmounted(() => {
             <pre class="res-pre">{{ JSON.stringify(runResult.inputs_used, null, 2) }}</pre>
           </div>
 
-          <div class="res-section" v-if="runResult.output !== null && runResult.output !== undefined">
-            <div class="res-label">输出结果 output</div>
-            <pre class="res-pre res-output">{{ JSON.stringify(runResult.output, null, 2) }}</pre>
-          </div>
-
-          <div class="res-section" v-if="runResult.stdout">
-            <div class="res-label">标准输出 stdout</div>
-            <pre class="res-pre res-stdout">{{ runResult.stdout }}</pre>
-          </div>
-
-          <div class="res-section" v-if="runResult.stderr">
-            <div class="res-label res-err-label">错误输出 stderr</div>
-            <pre class="res-pre res-stderr">{{ runResult.stderr }}</pre>
+          <div class="res-section" v-if="runResult.outputs !== null && runResult.outputs !== undefined">
+            <div class="res-label">流程输出 outputs</div>
+            <pre class="res-pre res-output">{{ JSON.stringify(runResult.outputs, null, 2) }}</pre>
           </div>
         </div>
       </transition>
@@ -510,7 +511,7 @@ onUnmounted(() => {
       <template #header>
         <div class="dlq-head">
           <el-icon color="#ef4444"><Warning /></el-icon>
-          <span>DLQ 运维 · {{ dlqTarget?.block_name }}</span>
+          <span>DLQ 运维 · {{ dlqTarget?.api_name }}</span>
         </div>
       </template>
       <div class="dlq-body">

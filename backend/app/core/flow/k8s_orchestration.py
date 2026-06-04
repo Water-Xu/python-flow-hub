@@ -123,8 +123,7 @@ async def drive_flow_run(
         block = block_cache.get(node.get("block_id"))
         if block is None:
             raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, f"block missing for node {node['id']}")
-        spec = BlockDeploySpec(block_id=block.id, name=block.name, type=block.type,
-                               execution_mode=block.execution_mode)
+        spec = BlockDeploySpec(block_id=block.id, name=block.name, type=block.type)
         entrypoint = (node.get("config") or {}).get("entrypoint") or "run"
         return await invoke_block_service(
             deployment_name(ctx, spec), namespace, node_inputs, entrypoint=entrypoint

@@ -6,7 +6,12 @@ import asyncio
 import json
 
 from pyflow_runtime import consumer as C
-from pyflow_runtime.consumer import consume_with_idempotency, protocol_compatible
+from pyflow_runtime.consumer import (
+    consume_flow_with_idempotency,
+    consume_with_idempotency,
+    protocol_compatible,
+)
+from pyflow_runtime.flow_dag import run_flow
 from pyflow_runtime.idempotency import IdempotencyStore, state_key
 
 REPLY_MQ = {
@@ -140,6 +145,46 @@ async def test_processing_alive_returns_backoff(fake_redis, clock):
         body, {}, block, store_b, execute_fn, message_id="m5"
     )
     assert action == "backoff"
+
+
+async def test_flow_consumer_drives_dag_and_idempotent(fake_redis, clock):
+    """决策 3.1 重写为 Flow 级模型 A：消费者收到单条消息驱动整条 DAG，
+    幂等保证重复投递不重跑整流（execute_fn 内 run_flow 只跑一次）。"""
+    store = _store(fake_redis, clock)
+    nodes = [
+        {"id": "n1", "node_type": "block", "config": {}},
+        {"id": "n2", "node_type": "block", "config": {}},
+    ]
+    edges = [{"source_node_id": "n1", "target_node_id": "n2",
+              "source_port": "out", "target_port": "in"}]
+    calls = {"n": 0}
+
+    async def node_executor(node, inputs):
+        calls["n"] += 1
+        return {"v": inputs.get("v", inputs.get("value", 0)) + 1}
+
+    async def execute_fn(inputs):
+        outputs = await run_flow(nodes, edges, inputs, node_executor)
+        return outputs["n2"]
+
+    body = {"header": {"snowflakeId": "FLOW1"}, "value": 1}
+    block = {"mq_config": {}, "compute_config": {}}
+
+    a1 = await consume_flow_with_idempotency(
+        body, {}, block, store, execute_fn, message_id="fm1"
+    )
+    assert a1 == "ack"
+    assert calls["n"] == 2                       # n1 + n2 各执行一次
+    state = await store.get_state("FLOW1:0")
+    assert state["status"] == "SUCCESS"
+    assert state["result"] == {"v": 3}           # value 1 → n1=2 → n2=3
+
+    # 真重复投递（同 snowflakeId + retry_count）：命中 SUCCESS，不重跑整流
+    a2 = await consume_flow_with_idempotency(
+        body, {}, block, store, execute_fn, message_id="fm1"
+    )
+    assert a2 == "ack"
+    assert calls["n"] == 2                        # 未再次驱动 DAG
 
 
 async def test_lease_lost_during_execution_returns_backoff(fake_redis, clock, monkeypatch):

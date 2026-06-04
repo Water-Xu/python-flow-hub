@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""PyFlowHub 块执行与 Flow 整流执行测试脚本。
+"""PyFlowHub 块 CRUD 与 Flow 整流执行测试脚本。
 
 环境变量：
   PYFLOW_BASE_URL   控制面地址，默认 http://localhost:8000
   PYFLOW_TOKEN      Bearer Token（PYFLOW_AUTH_ENABLED=true 时必填）
 
 可选：
-  PYFLOW_SKIP_FLOW  设为 1 时仅测单块执行，跳过 Flow /run
+  PYFLOW_SKIP_FLOW  设为 1 时仅测块 CRUD，跳过 Flow /run
 
 用户 Block 代码须定义：def run(inputs): 并 return {"echo": inputs} 等可断言结果
 
@@ -60,9 +60,9 @@ def _api(method: str, path: str, body: dict | None = None) -> dict:
         raise RuntimeError(f"{method} {path} -> HTTP {exc.code}: {err}") from exc
 
 
-def test_block_run() -> str:
-    """创建脚本块、执行、删除；返回 block_id 供 Flow 图复用。"""
-    print("\n--- 1. 单块执行 POST /api/blocks/{id}/run ---")
+def test_block_crud() -> None:
+    """块 CRUD 冒烟：创建 + 删除（决策 3.1 后块不再有独立 HTTP 执行入口，执行统一走 Flow 编排）。"""
+    print("\n--- 1. 块 CRUD POST/DELETE /api/blocks ---")
     block = _api("POST", "/api/blocks", {
         "name": "script-test-echo",
         "description": "scripts/test_block_and_flow_run.py 自动创建",
@@ -70,25 +70,11 @@ def test_block_run() -> str:
         "draft_code": SAMPLE_CODE,
         "input_ports": [{"name": "inputs", "type": "any", "required": False}],
         "output_ports": [{"name": "output", "type": "any", "required": False}],
-        "execution_mode": "sync_http",
     })
     block_id = block["id"]
     print(f"  已创建 block_id={block_id}")
-
-    block_inputs = {"a": 3, "b": 7}
-    result = _api("POST", f"/api/blocks/{block_id}/run", {"inputs": block_inputs})
-    print(f"  execution_id={result.get('execution_id')}  status={result.get('status')}")
-    print(f"  output={json.dumps(result.get('output'), ensure_ascii=False)}")
-
-    out = result.get("output") or {}
-    echo = out.get("echo")
-    print(f"  echo={json.dumps(echo, ensure_ascii=False)}")
-    if result.get("status") != "success" or echo != block_inputs:
-        raise RuntimeError(f"块执行结果不符合预期（echo 应回显 inputs）: {result}")
-
     _api("DELETE", f"/api/blocks/{block_id}")
     print("  已清理测试块")
-    return block_id
 
 
 def test_flow_run() -> None:
@@ -107,7 +93,6 @@ def test_flow_run() -> None:
         "draft_code": SAMPLE_CODE,
         "input_ports": [{"name": "inputs", "type": "any"}],
         "output_ports": [{"name": "output", "type": "any"}],
-        "execution_mode": "sync_http",
     })
     block_id = block["id"]
     node_id = "node-test-1"
@@ -147,7 +132,7 @@ def test_flow_run() -> None:
 def main() -> int:
     print(f"PyFlowHub 执行测试  base_url={BASE_URL}")
     try:
-        test_block_run()
+        test_block_crud()
         if not SKIP_FLOW:
             test_flow_run()
         else:

@@ -36,7 +36,5 @@ class Block(Base, UUIDMixin, TimestampMixin):
     secret_refs: Mapped[dict] = mapped_column(JSON, default=dict)
     gcp_resource_scope: Mapped[list] = mapped_column(JSON, default=list)
 
-    # sync_http | async_mq | both
-    execution_mode: Mapped[str] = mapped_column(String(16), default="sync_http")
-    mq_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 块在 Flow 内一律作为 HTTP invoke 服务被驱动；MQ 触发已上移到接口/Flow 级（PublishedApi.mq_config）
     compute_config: Mapped[dict] = mapped_column(JSON, default=dict)

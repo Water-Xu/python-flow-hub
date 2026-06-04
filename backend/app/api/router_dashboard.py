@@ -33,9 +33,9 @@ async def _counts(session: AsyncSession) -> dict:
     blocks = (await session.execute(select(func.count()).select_from(Block))).scalar() or 0
     flows = (await session.execute(select(func.count()).select_from(Flow))).scalar() or 0
     apis = (await session.execute(select(func.count()).select_from(PublishedApi))).scalar() or 0
-    async_blocks = (await session.execute(
-        select(func.count()).select_from(Block).where(
-            Block.execution_mode.in_(["async_mq", "both"])
+    mq_apis = (await session.execute(
+        select(func.count()).select_from(PublishedApi).where(
+            PublishedApi.trigger_type.in_(["mq", "both"])
         )
     )).scalar() or 0
 
@@ -47,7 +47,7 @@ async def _counts(session: AsyncSession) -> dict:
         "blocks": blocks,
         "flows": flows,
         "apis": apis,
-        "async_blocks": async_blocks,
+        "mq_apis": mq_apis,
         "deployments_total": sum(dep_status.values()),
         "deployments_by_status": dep_status,
         "deployments_running": dep_status.get("running", 0),

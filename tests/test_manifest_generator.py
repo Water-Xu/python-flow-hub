@@ -5,7 +5,11 @@ from __future__ import annotations
 from app.core.k8s.manifest_generator import (
     BlockDeploySpec,
     DeployContext,
+    FlowConsumerSpec,
     build_deployment,
+    build_flow_consumer_deployment,
+    build_flow_consumer_network_policy,
+    build_flow_scaledobject,
     build_network_policy,
     capacity_precheck,
     container_security_context,
@@ -13,10 +17,10 @@ from app.core.k8s.manifest_generator import (
     gcp_scope_precheck,
     gpu_precheck,
     middleware_egress_rules,
-    min_replicas_for,
     parse_cpu_millicores,
     parse_mem_mib,
     render_block_manifests,
+    render_flow_consumer_manifests,
     runtime_class,
 )
 
@@ -48,23 +52,24 @@ def test_runtime_class_gvisor_only_non_gpu():
     assert runtime_class(True) is None  # GPU 块禁用 gVisor（决策 1）
 
 
-def test_min_replicas_sync_never_zero():
-    assert min_replicas_for(BlockDeploySpec("b1", "n", execution_mode="sync_http")) == 1
-    assert min_replicas_for(BlockDeploySpec("b1", "n", execution_mode="both")) == 1
-    assert min_replicas_for(BlockDeploySpec("b1", "n", execution_mode="async_mq")) == 0
+def test_block_always_serves_http():
+    """决策 3.1 重写：块一律作为 invoke 服务暴露 /invoke（无 execution_mode）。"""
+    assert BlockDeploySpec("b1", "n").serves_http is True
+    assert BlockDeploySpec("b1", "n", type="gcp_bigquery").serves_http is True
 
 
 def test_capacity_precheck_pass_and_fail():
     specs = [
-        BlockDeploySpec("b1", "n1", execution_mode="sync_http",
+        BlockDeploySpec("b1", "n1",
                         compute_config={"cpu_request": "500m", "memory_request": "512Mi"}),
-        BlockDeploySpec("b2", "n2", execution_mode="async_mq"),  # min=0 不计基线
+        BlockDeploySpec("b2", "n2",
+                        compute_config={"cpu_request": "200m", "memory_request": "256Mi"}),
     ]
     ok = capacity_precheck(specs, pool_cpu_cores=4.0, pool_mem_mib=8192)
     assert ok.ok is True
 
     heavy = [
-        BlockDeploySpec(f"b{i}", "n", execution_mode="sync_http",
+        BlockDeploySpec(f"b{i}", "n",
                         compute_config={"cpu_request": "2000m", "memory_request": "2Gi"})
         for i in range(5)
     ]
@@ -106,10 +111,10 @@ def test_gcp_scope_precheck():
 
 
 def test_build_deployment_gpu_no_gvisor():
-    spec = BlockDeploySpec("abcdef12-0000", "gpu-block", execution_mode="async_mq",
+    spec = BlockDeploySpec("abcdef12-0000", "gpu-block",
                            compute_config={"gpu_enabled": True, "gpu_type": "nvidia-tesla-t4"})
     ctx = DeployContext(runner_image="runner:1", gpu_runner_image="gpu-runner:1")
-    dep = build_deployment(spec, ctx, min_replicas=0)
+    dep = build_deployment(spec, ctx, min_replicas=1)
     pod = dep["spec"]["template"]["spec"]
     assert "runtimeClassName" not in pod  # GPU 块不附 gvisor
     assert any(t["key"] == "pyflow-gpu" for t in pod["tolerations"])
@@ -118,7 +123,7 @@ def test_build_deployment_gpu_no_gvisor():
 
 
 def test_build_deployment_cpu_has_gvisor_and_protocol_label():
-    spec = BlockDeploySpec("abcdef12-0000", "cpu-block", execution_mode="sync_http")
+    spec = BlockDeploySpec("abcdef12-0000", "cpu-block")
     ctx = DeployContext(runner_image="runner:1")
     dep = build_deployment(spec, ctx, min_replicas=1)
     assert dep["spec"]["template"]["spec"]["runtimeClassName"] == "gvisor"
@@ -155,7 +160,7 @@ def test_middleware_egress_rules_ns_and_cidr():
 
 
 def test_network_policy_injects_middleware_egress():
-    spec = BlockDeploySpec("b1", "n", execution_mode="async_mq")
+    spec = BlockDeploySpec("b1", "n")
     egress = middleware_egress_rules(
         middleware_namespace="lhy-styon", ns_ports=[5672], cidr_ports=[("10.0.1.0/24", 6379)]
     )
@@ -170,8 +175,7 @@ def test_network_policy_injects_middleware_egress():
 
 
 def test_build_deployment_envfrom_middleware_secret():
-    spec = BlockDeploySpec("abcdef12-0000", "n", execution_mode="sync_http",
-                           env_vars={"FOO": "bar"})
+    spec = BlockDeploySpec("abcdef12-0000", "n", env_vars={"FOO": "bar"})
     ctx = DeployContext(runner_image="runner:1", inject_middleware=True,
                         middleware_secret="pyflow-block-middleware")
     dep = build_deployment(spec, ctx, min_replicas=1)
@@ -184,28 +188,94 @@ def test_build_deployment_envfrom_middleware_secret():
 
 
 def test_build_deployment_no_middleware_when_disabled():
-    spec = BlockDeploySpec("abcdef12-0000", "n", execution_mode="sync_http")
+    spec = BlockDeploySpec("abcdef12-0000", "n")
     ctx = DeployContext(runner_image="runner:1", inject_middleware=False, middleware_secret="x")
     dep = build_deployment(spec, ctx, min_replicas=1)
     container = dep["spec"]["template"]["spec"]["containers"][0]
     assert container["envFrom"] == []
 
 
-def test_render_block_manifests_with_keda():
-    spec = BlockDeploySpec("abcdef12-0000", "n", execution_mode="async_mq")
+def test_render_block_manifests_invoke_only():
+    """决策 3.1 重写：块一律 invoke 服务，常驻 min=1 + Service，无块级 ScaledObject。"""
+    spec = BlockDeploySpec("abcdef12-0000", "n")
     ctx = DeployContext(runner_image="runner:1")
-    ms = render_block_manifests(spec, ctx, max_replica=5, msgs_per_replica=10, keda_enabled=True)
+    ms = render_block_manifests(spec, ctx)
+    kinds = [m["kind"] for m in ms]
+    assert "ScaledObject" not in kinds        # MQ 扩缩上移到 Flow-Consumer
+    assert "Service" in kinds                 # invoke 角色对外暴露 /invoke
+    dep = next(m for m in ms if m["kind"] == "Deployment")
+    assert dep["spec"]["replicas"] == 1
+    env = {e["name"]: e["value"] for e in dep["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["PYFLOW_RUNNER_ROLE"] == "invoke"
+
+
+# ─────────────────── Flow-Consumer（接口/Flow 级 MQ，决策 3.1） ───────────────────
+
+def _flow_consumer_spec() -> FlowConsumerSpec:
+    return FlowConsumerSpec(
+        api_id="api1234-5678",
+        api_name="订单流程",
+        flow_id="flow-9999",
+        mq_config={"queue": "flow.api1234-5678.queue", "max_retry": 3, "retry_delay_ms": 5000},
+        dag={"nodes": [{"id": "n1", "block_id": "b1", "service": "flow-abcdef12"}], "edges": []},
+        compute_config={"cpu_request": "200m", "memory_request": "256Mi"},
+    )
+
+
+def test_flow_consumer_deployment_role_and_env():
+    spec = _flow_consumer_spec()
+    ctx = DeployContext(runner_image="runner:1")
+    dep = build_flow_consumer_deployment(spec, ctx, min_replicas=0)
+    assert dep["spec"]["replicas"] == 0
+    container = dep["spec"]["template"]["spec"]["containers"][0]
+    env = {e["name"]: e["value"] for e in container["env"]}
+    assert env["PYFLOW_RUNNER_ROLE"] == "flow_consumer"
+    assert env["PYFLOW_API_ID"] == "api1234-5678"
+    assert env["PYFLOW_FLOW_ID"] == "flow-9999"
+    # DAG 快照随消费者部署，供 runner 驱动整条 Flow
+    assert "n1" in env["PYFLOW_FLOW_DAG"]
+    # 消费者无对外端口（不是 HTTP invoke 服务）
+    assert "ports" not in container
+
+
+def test_flow_scaledobject_queue_name_uses_api_id():
+    """KEDA 按 flow.{api_id}.queue 深度扩缩 Flow-Consumer（跨版本切换队列稳定）。"""
+    spec = _flow_consumer_spec()
+    ctx = DeployContext(runner_image="runner:1")
+    so = build_flow_scaledobject(spec, ctx, max_replica=8, msgs_per_replica=10)
+    assert so["kind"] == "ScaledObject"
+    trigger = so["spec"]["triggers"][0]
+    assert trigger["type"] == "rabbitmq"
+    assert trigger["metadata"]["queueName"] == "flow.api1234-5678.queue"
+    assert so["spec"]["maxReplicaCount"] == 8
+    assert so["spec"]["minReplicaCount"] == 0
+
+
+def test_flow_consumer_network_policy_allows_block_invoke():
+    """消费者需放行同命名空间块 invoke Service(8000) 才能驱动 DAG。"""
+    spec = _flow_consumer_spec()
+    np = build_flow_consumer_network_policy(spec, DeployContext())
+    assert np["spec"]["policyTypes"] == ["Egress"]
+    ports = [p["port"] for rule in np["spec"]["egress"] for p in rule.get("ports", [])]
+    assert 8000 in ports   # INVOKE_PORT
+    assert 53 in ports     # kube-dns
+
+
+def test_render_flow_consumer_manifests_with_keda():
+    spec = _flow_consumer_spec()
+    ctx = DeployContext(runner_image="runner:1")
+    ms = render_flow_consumer_manifests(spec, ctx, max_replica=8, msgs_per_replica=10, keda_enabled=True)
     kinds = [m["kind"] for m in ms]
     assert "ScaledObject" in kinds
     dep = next(m for m in ms if m["kind"] == "Deployment")
-    assert dep["spec"]["replicas"] == 0  # 有 KEDA：异步块 0 起步，由队列深度拉起
+    assert dep["spec"]["replicas"] == 0   # KEDA：0 起步由队列深度拉起
 
 
-def test_render_block_manifests_keda_degraded():
-    """集群未装 KEDA：跳过 ScaledObject，异步块退化为固定副本 min=1（否则无人消费）。"""
-    spec = BlockDeploySpec("abcdef12-0000", "n", execution_mode="async_mq")
+def test_render_flow_consumer_manifests_keda_degraded():
+    """集群未装 KEDA：消费者退化为固定 1 副本（否则 0 副本无人消费队列）。"""
+    spec = _flow_consumer_spec()
     ctx = DeployContext(runner_image="runner:1")
-    ms = render_block_manifests(spec, ctx, max_replica=5, msgs_per_replica=10, keda_enabled=False)
+    ms = render_flow_consumer_manifests(spec, ctx, max_replica=8, msgs_per_replica=10, keda_enabled=False)
     kinds = [m["kind"] for m in ms]
     assert "ScaledObject" not in kinds
     dep = next(m for m in ms if m["kind"] == "Deployment")

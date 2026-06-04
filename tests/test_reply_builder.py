@@ -39,7 +39,10 @@ def test_build_reply_optional_missing_is_none():
 
 def test_render_routing_key_substitutes_placeholders():
     reply = {"snowflakeId": "SF1"}
-    assert render_reply_routing_key("reply.{block_id}", reply, "blk9") == "reply.blk9"
+    # 接口/Flow 级占位符 {api_id}（决策 3.1 重写为 Flow 级模型 A）
+    assert render_reply_routing_key("reply.{api_id}", reply, "api9") == "reply.api9"
+    # 兼容旧模板占位符 {block_id}（同样取 scope_id=api_id）
+    assert render_reply_routing_key("reply.{block_id}", reply, "api9") == "reply.api9"
     assert render_reply_routing_key("order.{snowflakeId}", reply) == "order.SF1"
 
 

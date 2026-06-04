@@ -7,8 +7,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.rbac import Role, require_role
-from app.core.execution_service import execute_block
-from app.core.mq.validation import validate_mq_config
 from app.db import get_session
 from app.errors import (
     PYFLOW_API_LOCKED,
@@ -24,7 +22,6 @@ from app.models.flow import FlowNode
 from app.schemas.block import (
     BlockCreateRequest,
     BlockResponse,
-    BlockRunRequest,
     BlockUpdateRequest,
 )
 
@@ -111,7 +108,6 @@ async def save_block(
     login_id: str = Depends(require_role(Role.EDITOR)),
 ):
     _check_env_vars(req.env_vars)
-    validate_mq_config(req.mq_config, req.execution_mode)
     block = Block(
         name=req.name,
         description=req.description,
@@ -122,8 +118,6 @@ async def save_block(
         output_ports=[p.model_dump() for p in req.output_ports],
         entrypoints=_compute_entrypoints(req.draft_code),
         env_vars=req.env_vars,
-        execution_mode=req.execution_mode,
-        mq_config=req.mq_config,
         compute_config=req.compute_config.model_dump(),
     )
     session.add(block)
@@ -153,11 +147,6 @@ async def update_block(
     data = req.model_dump(exclude_unset=True)
     if "env_vars" in data and data["env_vars"]:
         _check_env_vars(data["env_vars"])
-    # 校验 MQ 配置（决策 1/6/10）：以更新后的 execution_mode + mq_config 为准
-    if "mq_config" in data or "execution_mode" in data:
-        exec_mode = data.get("execution_mode", block.execution_mode)
-        mq_cfg = data.get("mq_config", block.mq_config)
-        validate_mq_config(mq_cfg, exec_mode)
     for key, value in data.items():
         if key in {"input_ports", "output_ports"} and value is not None:
             value = [p.model_dump() if hasattr(p, "model_dump") else p for p in value]
@@ -205,8 +194,6 @@ async def copy_block(
         output_ports=list(src.output_ports),
         entrypoints=list(src.entrypoints or []),
         env_vars=dict(src.env_vars),
-        execution_mode=src.execution_mode,
-        mq_config=dict(src.mq_config) if src.mq_config else {},
         compute_config=dict(src.compute_config) if src.compute_config else {},
     )
     session.add(copy)
@@ -232,25 +219,5 @@ async def discover_block_entrypoints(
     return {"block_id": block_id, "entrypoints": entrypoints}
 
 
-@router.post("/{block_id}/run")
-async def run_block_endpoint(
-    block_id: str,
-    req: BlockRunRequest,
-    session: AsyncSession = Depends(get_session),
-    login_id: str = Depends(require_role(Role.EDITOR)),
-):
-    """触发 HTTP 执行（dev 本地 Docker 沙箱）。返回 execution_id + 结果。"""
-    block = await _get_block(session, block_id)
-    record = await execute_block(
-        session, block_id=block.id, code=block.draft_code,
-        inputs=req.inputs, login_id=login_id,
-        entrypoint=req.entrypoint or "run",
-    )
-    return {
-        "execution_id": record.id,
-        "status": record.status,
-        "output": record.output,
-        "stdout": record.stdout,
-        "stderr": record.stderr,
-        "duration_ms": record.duration_ms,
-    }
+# 单块 HTTP 执行入口已移除（决策 3.1 Flow 级模型 A）：块不再对外暴露独立 HTTP 触发，
+# 仅作为 Flow 内的 invoke 服务被编排驱动；调试请通过「调试执行 (Jupyter)」或发布接口后整流测试。

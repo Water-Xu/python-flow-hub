@@ -1,6 +1,6 @@
-"""aio-pika 消费者核心（在 Block Pod 内运行，决策 3.1 模型 A）。
+"""aio-pika 消费者核心（在 Flow-Consumer Pod 内运行，决策 3.1 重写为 Flow 级模型 A）。
 
-消费 block.{block_id}.queue，按决策 7 幂等状态机执行用户代码：
+消费 flow.{api_id}.queue，按决策 7 幂等状态机驱动整条 Flow 编排：
 - 抢占 / 接管：fence_token CAS，区分在跑 / 可接管 / 已终态；
 - 执行期间后台心跳续租 lease，心跳失败（被接管）则主动 abort，绝不双跑（决策 7）；
 - 失败走 TTL+DLX 重试（决策 6）；owner 存活 / 接管竞争失败走退避重入；
@@ -219,14 +219,22 @@ async def _republish_reply_if_needed(
             await store.mark_reply_sent(idem_id, int(fence_token), state_ttl)
 
 
-def queue_topology(block_id: str, retry_delay_ms: int) -> dict[str, Any]:
-    """返回该 block 的完整队列拓扑声明（供部署时声明 / 本地消费者建队列）。"""
+def queue_topology(scope_id: str, retry_delay_ms: int) -> dict[str, Any]:
+    """返回该接口/Flow 的完整队列拓扑声明（供部署时声明 / 本地消费者建队列）。
+
+    scope_id 即 PublishedApi.id，队列命名 flow.{scope_id}.*。
+    """
     return {
-        "main": {"name": backoff_queue.main_queue(block_id),
-                 "arguments": backoff_queue.queue_arguments(block_id, retry_delay_ms)},
-        "dlq": {"name": backoff_queue.dlq_queue(block_id),
-                "arguments": backoff_queue.dlq_arguments(block_id, retry_delay_ms)},
-        "backoff": {"name": backoff_queue.backoff_queue(block_id),
-                    "arguments": backoff_queue.backoff_arguments(block_id)},
-        "dead": {"name": backoff_queue.dead_queue(block_id), "arguments": {}},
+        "main": {"name": backoff_queue.main_queue(scope_id),
+                 "arguments": backoff_queue.queue_arguments(scope_id, retry_delay_ms)},
+        "dlq": {"name": backoff_queue.dlq_queue(scope_id),
+                "arguments": backoff_queue.dlq_arguments(scope_id, retry_delay_ms)},
+        "backoff": {"name": backoff_queue.backoff_queue(scope_id),
+                    "arguments": backoff_queue.backoff_arguments(scope_id)},
+        "dead": {"name": backoff_queue.dead_queue(scope_id), "arguments": {}},
     }
+
+
+# consume_with_idempotency 与具体执行单元无关（仅读 mq_config/compute_config + 调 execute_fn），
+# Flow 级触发复用同一函数：execute_fn 内部驱动整条 DAG，幂等/条件/回复语义完全一致。
+consume_flow_with_idempotency = consume_with_idempotency

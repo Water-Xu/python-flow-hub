@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { flowApi } from '@/api'
 
 const router = useRouter()
@@ -9,6 +9,7 @@ const flows = ref<any[]>([])
 const loading = ref(false)
 const dialogVisible = ref(false)
 const importing = ref(false)
+const deletingId = ref('')
 const form = ref({ name: '', description: '' })
 const fileInput = ref<HTMLInputElement>()
 
@@ -26,6 +27,26 @@ async function createFlow() {
   const flow: any = await flowApi.create(form.value)
   dialogVisible.value = false
   router.push(`/flows/${flow.id}`)
+}
+
+async function removeFlow(flow: any) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除流程「${flow.name}」吗？此操作将一并清理其节点、边与版本记录，不可恢复。`,
+      '删除流程',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
+    )
+  } catch {
+    return
+  }
+  deletingId.value = flow.id
+  try {
+    await flowApi.remove(flow.id)
+    ElMessage.success('流程已删除')
+    flows.value = flows.value.filter((f) => f.id !== flow.id)
+  } finally {
+    deletingId.value = ''
+  }
 }
 
 function pickZip() {
@@ -73,6 +94,16 @@ onMounted(load)
     <div v-loading="loading">
       <transition-group name="list" tag="div" class="grid-inner">
         <div v-for="f in flows" :key="f.id" class="pf-card flow-card" @click="router.push(`/flows/${f.id}`)">
+          <el-button
+            class="flow-delete"
+            type="danger"
+            :icon="'Delete'"
+            circle
+            size="small"
+            :loading="deletingId === f.id"
+            title="删除流程"
+            @click.stop="removeFlow(f)"
+          />
           <div class="flow-icon">{{ f.source === 'zip_import' ? '📁' : '🔗' }}</div>
           <div class="flow-name">
             {{ f.name }}
@@ -124,6 +155,24 @@ onMounted(load)
 .flow-card {
   padding: 20px;
   cursor: pointer;
+  position: relative;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+.flow-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+.flow-delete {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  opacity: 0;
+  transform: scale(0.8);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.flow-card:hover .flow-delete {
+  opacity: 1;
+  transform: scale(1);
 }
 .flow-icon {
   font-size: 28px;

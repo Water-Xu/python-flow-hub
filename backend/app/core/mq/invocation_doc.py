@@ -1,9 +1,9 @@
-"""接口文档 — MQ 调用方式信息生成（决策 3.1/6）。
+"""接口文档 — MQ 调用方式信息生成（决策 3.1/6，Flow 级触发）。
 
-接口门户 / 接口管理在展示 HTTP 调用参数之外，还需说明流程内支持 MQ 异步触发的块
-（execution_mode 为 async_mq / both）该如何通过消息队列调用：队列 / 交换机 / 路由键、
-消息体格式、input_mapping 提取规则、条件订阅、回复与重试策略，并提供可直接 Mock 测试的
-示例消息体。该模块从 Block.mq_config 与 input_ports 生成只读文档片段，供前端渲染与测试预填。
+接口门户 / 接口管理在展示 HTTP 调用参数之外，还需说明触发方式为 mq / both 的接口
+该如何通过消息队列触发整条 Flow：队列 / 交换机 / 路由键、消息体格式、input_mapping
+提取规则、条件订阅、回复与重试策略，并提供可直接 Mock 测试的示例消息体。
+该模块从 PublishedApi.mq_config 与流程入口端口生成只读文档片段，供前端渲染与测试预填。
 """
 
 from __future__ import annotations
@@ -47,47 +47,51 @@ def _sample_for(port: Any) -> Any:
     return _TYPE_SAMPLES.get(_port_type(port).lower(), "...")
 
 
-def build_mq_invocation(block: Any) -> dict[str, Any] | None:
-    """为单个调用块生成 MQ 调用方式文档；非 MQ 块返回 None。
+def build_mq_invocation(
+    api: Any,
+    entry_input_ports: list[Any] | None = None,
+) -> dict[str, Any] | None:
+    """为接口生成 MQ 触发方式文档；纯 http 触发返回 None。
 
-    :param block: Block ORM 实例（需含 id / execution_mode / mq_config / input_ports）。
-    :return: MQ 调用信息字典（队列拓扑、消息格式、映射规则、重试/回复策略、示例消息体），
-             块非 async_mq/both 时返回 None。
+    :param api: PublishedApi ORM 实例（需含 id / trigger_type / mq_config）。
+    :param entry_input_ports: 流程入口块的 input_ports，用于生成示例消息体（可选）。
+    :return: MQ 触发信息字典（队列拓扑、消息格式、映射规则、重试/回复策略、示例消息体），
+             接口触发方式非 mq/both 时返回 None。
     """
-    if getattr(block, "execution_mode", "sync_http") not in ("async_mq", "both"):
+    if getattr(api, "trigger_type", "http") not in ("mq", "both"):
         return None
 
     # 延迟导入，与控制面对 pyflow_runtime 的统一约定一致（避免导入顺序耦合）
     from pyflow_runtime.backoff_queue import dlq_queue, main_queue
 
-    cfg = block.mq_config or {}
-    queue = cfg.get("queue") or main_queue(block.id)
+    cfg = api.mq_config or {}
+    queue = cfg.get("queue") or main_queue(api.id)
     exchange = (cfg.get("exchange") or "").strip()
     routing_key = (cfg.get("routing_key") or "").strip() or queue
     input_mapping = cfg.get("input_mapping") or {}
 
-    # 生成示例消息体：header（含幂等键）+ 各输入端口占位值（零配置直通场景）
+    # 生成示例消息体：header（含幂等键）+ 流程入口端口占位值（零配置直通场景）
     body: dict[str, Any] = {
         "header": {"snowflakeId": "雪花ID（幂等键，留空自动生成）"},
     }
-    for port in block.input_ports or []:
+    for port in entry_input_ports or []:
         name = _port_name(port)
         if name:
             body[name] = _sample_for(port)
 
     return {
-        "block_id": block.id,
-        "block_name": block.name,
-        "execution_mode": block.execution_mode,
+        "api_id": api.id,
+        "api_name": api.name,
+        "trigger_type": api.trigger_type,
         # ── 队列拓扑 ──
         "queue": queue,
         "exchange": exchange or "(default exchange)",
         "routing_key": routing_key,
-        "dlq_queue": dlq_queue(block.id),
+        "dlq_queue": dlq_queue(api.id),
         # ── 条件订阅 ──
         "condition_language": cfg.get("condition_language") or "jmespath",
         "condition_expression": cfg.get("condition_expression") or "",
-        # ── 字段映射（消息字段 → 块输入）──
+        # ── 字段映射（消息字段 → 流程输入）──
         "input_mapping": input_mapping,
         # ── 回复 ──
         "reply_enabled": bool(cfg.get("reply_enabled")),

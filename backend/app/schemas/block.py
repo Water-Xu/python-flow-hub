@@ -43,8 +43,6 @@ class BlockCreateRequest(BaseModel):
     input_ports: list[Port] = []
     output_ports: list[Port] = []
     env_vars: dict[str, str] = {}
-    execution_mode: Literal["sync_http", "async_mq", "both"] = "sync_http"
-    mq_config: dict[str, Any] = {}
     compute_config: BlockComputeConfig = BlockComputeConfig()
 
 
@@ -55,8 +53,6 @@ class BlockUpdateRequest(BaseModel):
     input_ports: list[Port] | None = None
     output_ports: list[Port] | None = None
     env_vars: dict[str, str] | None = None
-    execution_mode: Literal["sync_http", "async_mq", "both"] | None = None
-    mq_config: dict[str, Any] | None = None
     compute_config: BlockComputeConfig | None = None
 
 
@@ -70,16 +66,8 @@ class BlockResponse(BaseModel):
     input_ports: list[Any]
     output_ports: list[Any]
     entrypoints: list[Any] = []
-    execution_mode: str
-    mq_config: dict[str, Any]
     compute_config: dict[str, Any]
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
-
-
-class BlockRunRequest(BaseModel):
-    inputs: dict[str, Any] = {}
-    # 调用脚本中的哪个入口函数（默认 run，支持一脚本多函数）
-    entrypoint: str | None = None
