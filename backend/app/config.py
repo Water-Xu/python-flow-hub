@@ -26,8 +26,8 @@ class Settings(BaseSettings):
 
     # ── K8s 节点池容量（决策 12：参数按实际容量推导，不硬编码 20/5）─────────────
     # pyflow-workers 节点池可分配总量（部署预检 allocatable vs 请求总量）
-    workers_pool_cpu_cores: float = 4.0      # 节点池可分配总核数（保守值）
-    workers_pool_mem_mib: int = 8192         # 节点池可分配总内存 MiB
+    workers_pool_cpu_cores: float = 2.0      # 节点池单节点可分配核数（e2-standard-2；CPU 配额受限，提配额后调大）
+    workers_pool_mem_mib: int = 6144         # 节点池单节点可分配内存 MiB（e2-standard-2 ~6Gi 可分配）
     # KEDA 默认每副本消息数（按单条消息处理耗时标定）
     keda_msgs_per_replica: int = 10
     keda_max_replica_cap: int = 10           # maxReplica 上限兜底
