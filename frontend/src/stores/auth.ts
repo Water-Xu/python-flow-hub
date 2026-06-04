@@ -28,29 +28,24 @@ export const useAuthStore = defineStore(
 
     function setUser(u: UserInfo) {
       user.value = u
+      localStorage.setItem('pyflow_user', JSON.stringify(u))
     }
 
     function logout() {
       token.value = ''
       user.value = null
       localStorage.removeItem('pyflow_token')
+      localStorage.removeItem('pyflow_user')
     }
 
-    // 恢复 localStorage 中的 token（页面刷新时）
-    function restoreToken() {
-      const saved = localStorage.getItem('pyflow_token')
-      if (saved && !token.value) {
-        token.value = saved
-      }
-    }
+    // Store 初始化时从 localStorage 恢复（替代 pinia-persist）
+    const savedToken = localStorage.getItem('pyflow_token')
+    if (savedToken) token.value = savedToken
+    try {
+      const savedUser = localStorage.getItem('pyflow_user')
+      if (savedUser) user.value = JSON.parse(savedUser)
+    } catch {}
 
-    return { token, user, loading, isLoggedIn, isAdmin, isEditor, setToken, setUser, logout, restoreToken }
-  },
-  {
-    persist: {
-      key: 'pyflow-auth',
-      storage: localStorage,
-      pick: ['token', 'user'],
-    },
+    return { token, user, loading, isLoggedIn, isAdmin, isEditor, setToken, setUser, logout }
   },
 )
