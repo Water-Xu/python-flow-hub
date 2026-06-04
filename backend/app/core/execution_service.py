@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.sandbox.docker_executor import run_block
 from app.core.ws.ws_hub import hub
+from app.errors import BusinessException
 from app.models.execution import ExecutionRecord
 from app.observability.metrics import EXEC_COUNT, EXEC_DURATION
 
@@ -42,9 +43,16 @@ async def execute_block(
         record.stderr = result.stderr
         record.status = "failed" if result.error else "success"
         EXEC_COUNT.labels(block_id=block_id, status=record.status).inc()
+    except BusinessException as exc:
+        # 业务异常（如沙箱/K8s Job 失败）：保留 detail 诊断信息，避免只剩 code:msgKey
+        record.status = "failed"
+        record.stderr = exc.detail or f"{exc.code}:{exc.msg_key}"
+        await hub.publish_output(execution_id, record.stderr, "stderr")
+        EXEC_COUNT.labels(block_id=block_id, status="failed").inc()
     except Exception as exc:  # noqa: BLE001
         record.status = "failed"
         record.stderr = str(exc)
+        await hub.publish_output(execution_id, record.stderr, "stderr")
         EXEC_COUNT.labels(block_id=block_id, status="failed").inc()
     finally:
         record.duration_ms = int((time.perf_counter() - start) * 1000)

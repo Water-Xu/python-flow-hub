@@ -65,6 +65,12 @@ def _build_job_manifest(job_name: str, payload_b64: str) -> dict[str, Any]:
                 "spec": {
                     "restartPolicy": "Never",
                     "serviceAccountName": settings.k8s_job_service_account,
+                    # Pod 级 securityContext：满足 PodSecurity "restricted" 准入（seccompProfile 必填）
+                    "securityContext": {
+                        "runAsNonRoot": sec.get("runAsNonRoot", True),
+                        "runAsUser": sec.get("runAsUser", 65534),
+                        "seccompProfile": sec.get("seccompProfile", {"type": "RuntimeDefault"}),
+                    },
                     "volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": "100Mi"}}],
                     "containers": [
                         {
@@ -72,14 +78,27 @@ def _build_job_manifest(job_name: str, payload_b64: str) -> dict[str, Any]:
                             "image": settings.runner_image,
                             "imagePullPolicy": "IfNotPresent",
                             "command": ["python", "-c", _EXEC_BOOTSTRAP],
-                            "env": [{"name": "PYFLOW_EXEC_PAYLOAD_B64", "value": payload_b64}],
+                            "env": [
+                                {"name": "PYFLOW_EXEC_PAYLOAD_B64", "value": payload_b64},
+                                # 只读根文件系统下禁止写 .pyc，避免无谓写盘失败
+                                {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+                            ],
                             "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}],
+                            # 显式 resources：避免命名空间 LimitRange/ResourceQuota 拒绝创建
+                            "resources": {
+                                "requests": {"cpu": "100m", "memory": "128Mi"},
+                                "limits": {"cpu": "500m", "memory": "1Gi"},
+                            },
+                            # 完整 SecurityContext（含 seccompProfile/capabilities），决策 1，restricted 准入达标
                             "securityContext": {
                                 "runAsNonRoot": sec.get("runAsNonRoot", True),
                                 "runAsUser": sec.get("runAsUser", 65534),
                                 "readOnlyRootFilesystem": sec.get("readOnlyRootFilesystem", True),
                                 "allowPrivilegeEscalation": sec.get(
                                     "allowPrivilegeEscalation", False
+                                ),
+                                "seccompProfile": sec.get(
+                                    "seccompProfile", {"type": "RuntimeDefault"}
                                 ),
                                 "capabilities": sec.get("capabilities", {"drop": ["ALL"]}),
                             },
@@ -118,9 +137,8 @@ def _run_job_sync(code: str, inputs: dict[str, Any], timeout: int) -> ExecutionO
             if status.succeeded:
                 return _collect_pod_logs(core_api, ns, job_name)
             if status.failed:
-                logs = _try_collect_logs(core_api, ns, job_name)
-                detail = logs or "k8s job failed"
-                raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, detail[:500])
+                detail = _collect_failure_detail(core_api, ns, job_name)
+                raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, detail[:800])
             time.sleep(0.5)
         raise BusinessException(PYFLOW_EXEC_TIMEOUT, "k8s job execution timeout")
     finally:
@@ -138,6 +156,66 @@ def _try_collect_logs(core_api: Any, namespace: str, job_name: str) -> str:
     try:
         out = _collect_pod_logs(core_api, namespace, job_name)
         return (out.stdout or "") + (out.stderr or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _collect_failure_detail(core_api: Any, namespace: str, job_name: str) -> str:
+    """Job 失败时采集可诊断信息：容器等待/终止原因 + exitCode + 日志。
+
+    很多失败（ImagePullBackOff / 启动崩溃 / OOMKilled / 权限）pod 不产生应用日志，
+    仅凭日志会得到空串；此处补充 container_statuses 与 pod 事件级原因，便于定位。
+    """
+    parts: list[str] = []
+    try:
+        pods = core_api.list_namespaced_pod(
+            namespace=namespace, label_selector=f"job-name={job_name}",
+        ).items
+        if pods:
+            pod = pods[0]
+            phase = getattr(pod.status, "phase", None)
+            if phase:
+                parts.append(f"pod phase={phase}")
+            if getattr(pod.status, "reason", None):
+                parts.append(f"reason={pod.status.reason}")
+            for cs in (pod.status.container_statuses or []):
+                state = cs.state
+                if state and state.waiting and state.waiting.reason:
+                    parts.append(
+                        f"container waiting: {state.waiting.reason}"
+                        f"{' - ' + state.waiting.message if state.waiting.message else ''}"
+                    )
+                if state and state.terminated:
+                    term = state.terminated
+                    parts.append(
+                        f"container terminated: reason={term.reason} exit={term.exit_code}"
+                        f"{' - ' + term.message if term.message else ''}"
+                    )
+    except Exception:  # noqa: BLE001
+        pass
+
+    logs = _try_collect_logs(core_api, namespace, job_name)
+    if logs.strip():
+        parts.append("logs:\n" + logs.strip())
+
+    # 无 pod / 无日志（如准入拒绝 FailedCreate）时，事件里才有真正原因
+    if not logs.strip():
+        events = _collect_events(core_api, namespace, job_name)
+        if events:
+            parts.append("events: " + events)
+
+    return " | ".join(parts) if parts else "k8s job failed (no diagnostics available)"
+
+
+def _collect_events(core_api: Any, namespace: str, job_name: str) -> str:
+    """读取与该 Job 关联的最近事件（捕获 PodSecurity 准入拒绝 / FailedCreate 等原因）。"""
+    try:
+        evs = core_api.list_namespaced_event(
+            namespace=namespace,
+            field_selector=f"involvedObject.name={job_name}",
+        ).items
+        msgs = [f"{e.reason}: {e.message}" for e in evs if e.message][-3:]
+        return " ; ".join(msgs)
     except Exception:  # noqa: BLE001
         return ""
 
