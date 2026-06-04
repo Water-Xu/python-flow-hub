@@ -16,15 +16,17 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["create", "get", "list", "update", "delete"]
+  # Service：existing 资源用 patch（保留 clusterIP，见 deployment_manager._apply_one）
   - apiGroups: [""]
     resources: ["services"]
-    verbs: ["create", "get", "list", "update", "delete"]
+    verbs: ["create", "get", "list", "update", "patch", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs", "jobs/status"]
     verbs: ["create", "get", "list", "update", "delete"]
+  # KEDA：existing 资源用 patch（server-side patch，见 deployment_manager._apply_one）
   - apiGroups: ["keda.sh"]
     resources: ["scaledobjects", "triggerauthentications"]
-    verbs: ["create", "get", "list", "update", "delete"]
+    verbs: ["create", "get", "list", "update", "patch", "delete"]
   # Secret：仅限 pyflow-* 前缀（决策 14 / 数据模型 secret_refs + KEDA auth）
   - apiGroups: [""]
     resources: ["secrets"]
