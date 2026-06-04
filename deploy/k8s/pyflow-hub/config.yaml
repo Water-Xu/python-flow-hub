@@ -12,7 +12,9 @@ data:
   PYFLOW_MINIO_BUCKET: "pyflow-versions"
   PYFLOW_AUTH_ENABLED: "true"
   PYFLOW_GCP_PROJECT: "lhy-styon-dev-4832"
-  PYFLOW_OTLP_ENDPOINT: "http://otel-collector:4318"
+  # OTel Collector 部署在 lhy-styon 命名空间，pyflow-hub 在 pyflow-blocks，
+  # 必须用跨命名空间 FQDN，否则裸 service 名解析不到 → 导出失败刷 Error Reporting
+  PYFLOW_OTLP_ENDPOINT: "http://otel-collector.lhy-styon.svc.cluster.local:4318"
   PYFLOW_SATOKEN_VERIFY_URL: "http://lhy-styon-gateway:8201/lhy-styon-auth/token/verify"
 # ⚠️ 敏感连接串（pyflow-hub-secret）不落仓库明文（决策 8/14），由运维一次性创建：
 #   kubectl create secret generic pyflow-hub-secret -n pyflow-blocks --from-literal=... （见 deploy skill）
