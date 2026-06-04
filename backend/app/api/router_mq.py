@@ -147,13 +147,59 @@ class PublishTestRequest(BaseModel):
     snowflake_id: str | None = None
 
 
+@router.post("/blocks/{block_id}/test-run")
+async def test_run_block(
+    block_id: str,
+    req: PublishTestRequest,
+    session: AsyncSession = Depends(get_session),
+    login_id: str = Depends(require_role(Role.EDITOR)),
+):
+    """用 MQ payload 直接同步执行块代码，记录执行历史并返回结果（兼容 local/k8s 模式）。
+
+    执行逻辑与消费者一致：先经 input_mapping 提取 inputs，再调用 execution_service。
+    结果实时返回，并在执行历史中可查。
+    """
+    from app.core.execution_service import execute_block
+
+    block = await _get_block(session, block_id)
+    snowflake_id = req.snowflake_id or str(uuid.uuid4()).replace("-", "")
+    payload = req.payload
+
+    # 与消费者保持一致：用 input_mapping 从消息体中提取 inputs
+    mq_cfg = block.mq_config or {}
+    try:
+        from pyflow_runtime.input_mapper import map_inputs
+        inputs = map_inputs(payload, mq_cfg.get("input_mapping"))
+    except Exception:
+        inputs = payload  # mapping 失败则把整个 payload 当 inputs
+
+    record = await execute_block(
+        session,
+        block_id=block.id,
+        code=block.draft_code or "",
+        inputs=inputs,
+        login_id=login_id,
+    )
+
+    return {
+        "execution_id": record.id,
+        "status": record.status,
+        "output": record.output,
+        "stdout": record.stdout,
+        "stderr": record.stderr,
+        "duration_ms": record.duration_ms,
+        "inputs_used": inputs,
+        "snowflake_id": snowflake_id,
+    }
+
+
 @router.post("/blocks/{block_id}/publish")
 async def publish_test_message(
     block_id: str,
     req: PublishTestRequest,
     _: str = Depends(require_role(Role.EDITOR)),
 ):
-    """向块主队列发布一条测试消息（用于调试异步触发流程）。"""
+    """向块主队列发布一条 MQ 消息（需要 RabbitMQ 已连接且消费者正在运行）。"""
     mgr = get_consumer_manager()
     if not mgr._connection or mgr._connection.is_closed:
         ok = await mgr.connect()

@@ -151,6 +151,10 @@ export const mqApi = {
   start: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/start`),
   stop: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/stop`),
   restart: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/restart`),
+  /** 同步执行（兼容 local/k8s，记录执行历史，返回结果） */
+  testRun: (blockId: string, data: { payload?: object; snowflake_id?: string }) =>
+    client.post<any, any>(`/api/mq/blocks/${blockId}/test-run`, data),
+  /** 仅发布到队列（需要消费者正在运行） */
   publish: (blockId: string, data: { payload?: object; snowflake_id?: string }) =>
     client.post<any, any>(`/api/mq/blocks/${blockId}/publish`, data),
   startAll: () => client.post<any, any>('/api/mq/start-all'),

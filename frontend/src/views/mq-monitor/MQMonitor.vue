@@ -9,12 +9,14 @@ const blocks = ref<Block[]>([])
 const loading = ref(false)
 const polling = ref<ReturnType<typeof setInterval>>()
 
-// 测试发布弹窗
+// 测试执行弹窗
 const publishDialogVisible = ref(false)
 const publishTarget = ref<{ block_id: string; block_name: string } | null>(null)
 const publishPayload = ref('{\n  "value": 1\n}')
 const snowflakeId = ref('')
 const publishing = ref(false)
+const runResult = ref<any>(null)   // 执行返回值
+const showResult = ref(false)
 
 async function load() {
   loading.value = true
@@ -106,6 +108,8 @@ function openPublish(item: any) {
   publishTarget.value = { block_id: item.block.id, block_name: item.block.name }
   publishPayload.value = '{\n  "value": 1\n}'
   snowflakeId.value = ''
+  runResult.value = null
+  showResult.value = false
   publishDialogVisible.value = true
 }
 
@@ -117,16 +121,18 @@ async function doPublish() {
     return ElMessage.error('消息体必须是合法 JSON')
   }
   publishing.value = true
+  runResult.value = null
+  showResult.value = false
   try {
-    const res = await mqApi.publish(publishTarget.value!.block_id, {
+    const res = await mqApi.testRun(publishTarget.value!.block_id, {
       payload,
       snowflake_id: snowflakeId.value || undefined,
     })
     if (res.error) {
       ElMessage.error(res.error)
     } else {
-      ElMessage.success(`消息已发布 snowflakeId: ${res.snowflake_id}`)
-      publishDialogVisible.value = false
+      runResult.value = res
+      showResult.value = true
       setTimeout(load, 500)
     }
   } finally {
@@ -145,8 +151,19 @@ const totalRunning = computed(() =>
   consumers.value.filter(c => c.consumer?.status === 'running').length
 )
 const totalDlq = computed(() =>
-  consumers.value.reduce((sum, c) => sum + (c.depth?.dlq || 0), 0)
+  consumers.value.reduce((sum, c) => {
+    const dlq = c.depth?.dlq ?? 0
+    return sum + (dlq > 0 ? dlq : 0)   // -1（不可达）不计入
+  }, 0)
 )
+
+/** -1 表示 RabbitMQ Management API 不可达，显示 N/A */
+function depthLabel(val: number): string {
+  return val === -1 ? 'N/A' : String(val)
+}
+function depthHidden(val: number): boolean {
+  return val <= 0   // 0 和 -1 都隐藏 badge
+}
 
 function formatDuration(startedAt: number): string {
   const sec = Math.floor(Date.now() / 1000 - startedAt)
@@ -228,13 +245,19 @@ onUnmounted(() => clearInterval(polling.value))
 
           <!-- 队列深度 -->
           <div class="depth-badges">
-            <el-badge :value="item.depth.main" :hidden="item.depth.main === 0" type="primary">
-              <el-tag size="small" effect="plain">主队列</el-tag>
+            <el-badge :value="item.depth.main" :hidden="depthHidden(item.depth.main)" type="primary">
+              <el-tooltip :content="item.depth.main === -1 ? 'RabbitMQ Management 不可达' : `主队列: ${item.depth.main}`">
+                <el-tag size="small" effect="plain">
+                  主队列 {{ item.depth.main === -1 ? 'N/A' : '' }}
+                </el-tag>
+              </el-tooltip>
             </el-badge>
-            <el-badge :value="item.depth.dlq" :hidden="item.depth.dlq === 0" type="danger">
-              <el-tag size="small" effect="plain" :type="item.depth.dlq > 0 ? 'danger' : 'info'">
-                DLQ
-              </el-tag>
+            <el-badge :value="item.depth.dlq" :hidden="depthHidden(item.depth.dlq)" type="danger">
+              <el-tooltip :content="item.depth.dlq === -1 ? 'RabbitMQ Management 不可达' : `DLQ: ${item.depth.dlq}`">
+                <el-tag size="small" effect="plain" :type="item.depth.dlq > 0 ? 'danger' : 'info'">
+                  DLQ {{ item.depth.dlq === -1 ? 'N/A' : '' }}
+                </el-tag>
+              </el-tooltip>
             </el-badge>
           </div>
         </div>
@@ -309,12 +332,11 @@ onUnmounted(() => clearInterval(polling.value))
       description="暂无 async_mq / both 模式的调用块，请先在块编辑器中配置 MQ 触发"
     />
 
-    <!-- 发布测试消息 Dialog -->
-    <el-dialog v-model="publishDialogVisible" title="发布测试消息" width="520px">
-      <el-form label-width="100px" v-if="publishTarget">
+    <!-- 测试执行 Dialog -->
+    <el-dialog v-model="publishDialogVisible" title="MQ 消息测试执行" width="600px" destroy-on-close>
+      <el-form label-width="90px" v-if="publishTarget">
         <el-form-item label="目标块">
           <strong>{{ publishTarget.block_name }}</strong>
-          <code style="margin-left:8px;font-size:12px">block.{{ publishTarget.block_id.slice(0,8) }}....queue</code>
         </el-form-item>
         <el-form-item label="消息体 JSON">
           <el-input
@@ -322,15 +344,54 @@ onUnmounted(() => clearInterval(polling.value))
             type="textarea"
             :rows="6"
             style="font-family:monospace;font-size:12px"
+            placeholder='{"value": 1}'
           />
+          <div class="form-hint">将经过块的 input_mapping 规则提取 inputs，再同步执行代码</div>
         </el-form-item>
         <el-form-item label="snowflakeId">
-          <el-input v-model="snowflakeId" placeholder="留空自动生成" />
+          <el-input v-model="snowflakeId" placeholder="留空自动生成（幂等键）" />
         </el-form-item>
       </el-form>
+
+      <!-- 执行结果区 -->
+      <transition name="fade">
+        <div v-if="showResult && runResult" class="run-result">
+          <div class="res-header">
+            <el-tag :type="runResult.status === 'success' ? 'success' : 'danger'" size="large">
+              {{ runResult.status === 'success' ? '✓ 执行成功' : '✗ 执行失败' }}
+            </el-tag>
+            <span class="res-dur">{{ runResult.duration_ms }} ms</span>
+            <span class="res-id dim">execution_id: {{ runResult.execution_id }}</span>
+          </div>
+
+          <div class="res-section" v-if="runResult.inputs_used && Object.keys(runResult.inputs_used).length">
+            <div class="res-label">实际 inputs（经 input_mapping 提取后）</div>
+            <pre class="res-pre">{{ JSON.stringify(runResult.inputs_used, null, 2) }}</pre>
+          </div>
+
+          <div class="res-section" v-if="runResult.output !== null && runResult.output !== undefined">
+            <div class="res-label">输出结果 output</div>
+            <pre class="res-pre res-output">{{ JSON.stringify(runResult.output, null, 2) }}</pre>
+          </div>
+
+          <div class="res-section" v-if="runResult.stdout">
+            <div class="res-label">标准输出 stdout</div>
+            <pre class="res-pre res-stdout">{{ runResult.stdout }}</pre>
+          </div>
+
+          <div class="res-section" v-if="runResult.stderr">
+            <div class="res-label res-err-label">错误输出 stderr</div>
+            <pre class="res-pre res-stderr">{{ runResult.stderr }}</pre>
+          </div>
+        </div>
+      </transition>
+
       <template #footer>
-        <el-button @click="publishDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="publishing" @click="doPublish">发布</el-button>
+        <el-button @click="publishDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="publishing" @click="doPublish">
+          <el-icon><VideoPlay /></el-icon>
+          {{ showResult ? '重新执行' : '执行' }}
+        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -432,4 +493,56 @@ onUnmounted(() => clearInterval(polling.value))
   border-radius: 3px;
 }
 .cc-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* 表单提示 */
+.form-hint { font-size: 12px; color: var(--pf-text-dim); margin-top: 4px; }
+
+/* 执行结果面板 */
+.run-result {
+  margin-top: 16px;
+  border-top: 1px solid var(--pf-border);
+  padding-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: slide-up 0.25s ease;
+}
+.res-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.res-dur { font-size: 13px; color: var(--pf-text-dim); }
+.res-id  { font-size: 11px; }
+.res-section { display: flex; flex-direction: column; gap: 4px; }
+.res-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pf-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.res-err-label { color: #ef4444; }
+.res-pre {
+  background: var(--pf-panel-2);
+  border: 1px solid var(--pf-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 180px;
+  overflow-y: auto;
+  margin: 0;
+}
+.res-output { color: #4ade80; }
+.res-stdout { color: var(--pf-text); }
+.res-stderr { color: #f87171; }
+
+/* 淡入动画 */
+.fade-enter-active { transition: opacity 0.3s, transform 0.3s; }
+.fade-enter-from   { opacity: 0; transform: translateY(6px); }
 </style>
