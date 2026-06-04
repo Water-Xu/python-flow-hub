@@ -96,8 +96,51 @@ export const execApi = {
 
 export const deploymentApi = {
   list: () => client.get<any, any[]>('/api/deployments').then(ensureArray<any>),
+  get: (id: string) => client.get<any, any>(`/api/deployments/${id}`),
   create: (data: { flow_id: string; name: string; environment: string }) =>
     client.post('/api/deployments', data),
+  /** 一键部署到 K8s（构建镜像 + apply Deployment/Service/KEDA/NetworkPolicy，DEPLOYER） */
+  deploy: (id: string) => client.post<any, any>(`/api/deployments/${id}/deploy`),
+  /** 销毁部署（删除全部 K8s 资源，ADMIN） */
+  destroy: (id: string) => client.delete<any, any>(`/api/deployments/${id}`),
+  /** 实时 K8s 状态（Pod 副本 / Ready） */
+  status: (id: string) => client.get<any, any>(`/api/deployments/${id}/status`),
+  /** 容量预检（部署前评估节点池余量） */
+  precheck: (id: string) => client.get<any, any>(`/api/deployments/${id}/precheck`),
+  /** 渲染 K8s manifest 预览（不 apply） */
+  manifests: (id: string) => client.get<any, any>(`/api/deployments/${id}/manifests`),
+}
+
+export const versionApi = {
+  listBlockVersions: (blockId: string) =>
+    client.get<any, any[]>(`/api/versions/blocks/${blockId}`).then(ensureArray<any>),
+  createBlockVersion: (
+    blockId: string,
+    data: { version_tag: string; commit_message?: string; requirements_text?: string; set_stable?: boolean },
+  ) => client.post<any, any>(`/api/versions/blocks/${blockId}`, data),
+  getBlockVersion: (versionId: string) =>
+    client.get<any, any>(`/api/versions/block-versions/${versionId}`),
+  setBlockStable: (versionId: string) =>
+    client.post<any, any>(`/api/versions/block-versions/${versionId}/stable`),
+  diffBlock: (blockId: string, fromVersion: string, toVersion: string) =>
+    client.get<any, any>(`/api/versions/blocks/${blockId}/diff`, {
+      params: { from_version: fromVersion, to_version: toVersion },
+    }),
+  listFlowVersions: (flowId: string) =>
+    client.get<any, any[]>(`/api/versions/flows/${flowId}`).then(ensureArray<any>),
+  createFlowVersion: (
+    flowId: string,
+    data: { version_tag: string; commit_message?: string; set_stable?: boolean },
+  ) => client.post<any, any>(`/api/versions/flows/${flowId}`, data),
+}
+
+export const jupyterApi = {
+  start: (blockId: string) => client.post<any, any>(`/api/jupyter/${blockId}/start`),
+  execute: (blockId: string, code: string) =>
+    client.post<any, any>(`/api/jupyter/${blockId}/execute`, { code }),
+  interrupt: (blockId: string) => client.post<any, any>(`/api/jupyter/${blockId}/interrupt`),
+  shutdown: (blockId: string) => client.post<any, any>(`/api/jupyter/${blockId}/shutdown`),
+  status: (blockId: string) => client.get<any, any>(`/api/jupyter/${blockId}/status`),
 }
 
 export interface PublishedApi {

@@ -1,0 +1,30 @@
+# 依赖层 runner 镜像（决策 11）：在统一基础镜像上叠加用户 requirements。
+# 缓存键 = requirements_hash（非 GPU）/ (cuda_version, requirements_hash)（GPU）。
+# Block 代码不烧进镜像，启动从 MinIO 拉取注入。
+ARG BASE_IMAGE=python:3.11-slim
+FROM ${BASE_IMAGE}
+
+ARG INDEX_URL=""
+
+WORKDIR /runner
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* || true
+
+# 共享执行库（与控制面同 pin 版本，决策 3.1 点 5）
+COPY pyflow_runtime /opt/pyflow_runtime
+RUN pip install --no-cache-dir /opt/pyflow_runtime fastapi==0.115.0 uvicorn==0.30.6
+
+# 用户依赖层：优先 wheel，限制源码构建触发 setup.py（供应链加固 3）
+COPY requirements.txt /runner/requirements.txt
+RUN if [ -n "$INDEX_URL" ]; then \
+      pip install --no-cache-dir --only-binary :all: --index-url "$INDEX_URL" -r /runner/requirements.txt; \
+    else \
+      pip install --no-cache-dir --only-binary :all: -r /runner/requirements.txt; \
+    fi
+
+COPY runner/entrypoint.py /runner/entrypoint.py
+
+USER 65534
+ENV PYFLOW_RUNNER_ROLE=consumer
+ENTRYPOINT ["python", "/runner/entrypoint.py"]

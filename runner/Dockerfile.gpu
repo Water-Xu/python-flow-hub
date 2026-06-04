@@ -1,0 +1,20 @@
+# GPU runner 基础镜像（决策 11 GPU 分层 / 决策 1：GPU 块禁用 gVisor，靠 SecurityContext 兜底）。
+# 按 (cuda_version, requirements_hash) 分层缓存；CUDA 版本须与 GPU 节点池驱动兼容（部署预检校验）。
+ARG CUDA_VERSION=12.4.1
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04
+
+WORKDIR /runner
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3-pip curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyflow_runtime /opt/pyflow_runtime
+RUN pip3 install --no-cache-dir /opt/pyflow_runtime fastapi==0.115.0 uvicorn==0.30.6
+
+# 用户依赖层：Cloud Build 据 (cuda_version, requirements_hash) 在此叠加
+COPY runner/entrypoint.py /runner/entrypoint.py
+
+USER 65534
+ENV PYFLOW_RUNNER_ROLE=consumer
+ENTRYPOINT ["python3", "/runner/entrypoint.py"]

@@ -1,0 +1,28 @@
+# 按块类型隔离的 KSA（决策 14：Workload Identity，绝不下发 SA key 文件）。
+# manifest_generator 据 block.type 注入对应 KSA：
+#   gcp_bigquery → pyflow-block-bq   gcp_storage → pyflow-block-gcs   其它 → pyflow-block-default（零权限）
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pyflow-block-default
+  namespace: pyflow-blocks
+  # 零权限默认 KSA：不绑定任何 GSA（普通 script/notebook 块）
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pyflow-block-bq
+  namespace: pyflow-blocks
+  annotations:
+    # 绑定最小权限 GSA：仅 bigquery.dataViewer + bigquery.jobUser
+    iam.gke.io/gcp-service-account: pyflow-block-bq@lhy-styon-dev-4832.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pyflow-block-gcs
+  namespace: pyflow-blocks
+  annotations:
+    # 绑定最小权限 GSA：仅 storage.objectViewer（需写再单授）
+    iam.gke.io/gcp-service-account: pyflow-block-gcs@lhy-styon-dev-4832.iam.gserviceaccount.com

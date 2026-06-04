@@ -4,7 +4,9 @@
 > RabbitMQ 异步触发（含幂等/DLQ）、Sa-Token RBAC 接入、KEDA 云原生扩缩容。
 > 与现有 GKE / RabbitMQ / Redis Cluster / MinIO 基础设施完全对齐。
 
-本仓库当前实现 **Phase 1a 执行内核 MVP**（不穿网关）+ 完整的部署/CICD/K8s 骨架，后续 Phase 1b~5 按方案分批接入。
+本仓库已实现 **Phase 1a → Phase 5 全链路**：执行内核、网关/鉴权、RabbitMQ 异步触发、版本管理、
+K8s 执行与扩缩内核（KEDA）、镜像构建与供应链加固、GPU 与 GCP 托管块、Jupyter 开发态，
+配套完整的部署 / CICD / K8s 清单。
 
 ---
 
@@ -51,17 +53,29 @@
 lhy-styon-python-flow-hub/
 ├── backend/                 # FastAPI 控制面（编排/部署/拓扑生成，不常驻消费生产队列）
 │   ├── app/
-│   │   ├── api/             # REST/WS 路由：blocks/flows/exec/deployments/rbac/ws/health
-│   │   ├── core/            # sandbox(docker执行) / flow(DAG+runner) / ws(Redis PubSub)
+│   │   ├── api/             # REST/WS 路由：blocks/flows/exec/deployments/versions/gateway/jupyter/rbac/ws/health
+│   │   ├── core/
+│   │   │   ├── sandbox/     # docker_executor(dev) / k8s_executor(即席 Job)
+│   │   │   ├── flow/        # DAG + flow_runner（含续跑）+ k8s_orchestration + flow_run_store(lease/fence)
+│   │   │   ├── mq/          # 拓扑生成 + 消费者部署管理（不亲自消费生产队列）
+│   │   │   ├── k8s/         # manifest_generator / deployment_manager / keda_manager / cluster_monitor / image_builder / orchestrator
+│   │   │   ├── versioning/  # version_manager(先MinIO后DB+对账) / diff_service
+│   │   │   ├── storage/     # MinIO 客户端（可注入，便于单测）
+│   │   │   ├── jupyter/     # kernel_manager（仅 local 模式）
+│   │   │   └── ws/          # Redis PubSub 多副本路由
 │   │   ├── auth/            # sa_token_client + rbac（平台级角色 + 资源级 ACL）
-│   │   ├── models/          # SQLAlchemy ORM（收敛版数据模型）
+│   │   ├── models/          # SQLAlchemy ORM（含 BlockVersion/FlowVersion）
 │   │   ├── observability/   # structlog / Prometheus / OTel
-│   │   └── migrations/      # Alembic（独立 Cloud SQL 库）
+│   │   └── migrations/      # Alembic（独立 Cloud SQL 库；0001~0004）
 │   └── Dockerfile
 ├── pyflow_runtime/          # 执行侧共享库：幂等状态机/条件引擎/输入映射/回复/退避/沙箱常量
-├── runner/                  # runner 镜像（基础镜像 + pyflow_runtime；启动从 MinIO 拉代码）
-├── frontend/                # Vue3 + Vite + Element Plus + VueFlow
-├── deploy/k8s/              # namespace / pyflow-hub / migration-job / keda / ingress / node-pools
+├── runner/                  # runner 镜像（Dockerfile / Dockerfile.deps 依赖层 / Dockerfile.gpu）
+├── frontend/                # Vue3 + Vite + Element Plus + VueFlow（含 DiffEditor/VersionDrawer/JupyterCell）
+├── tests/                   # 核心模块单测（幂等/条件/回复/manifest/容量/GPU/版本/续跑）
+├── deploy/
+│   ├── k8s/                 # namespace / pyflow-hub / migration-job / keda / ingress / node-pools / network-policies / workload-identity
+│   ├── cloudbuild/          # runner-deps.yaml（依赖层构建 + 供应链加固）
+│   └── iam/                 # 最小权限构建 SA + 托管块 GSA / Workload Identity 配置
 ├── docker-compose.yml       # 本地依赖（PostgreSQL + Redis + RabbitMQ + MinIO）
 ├── cloudbuild.yaml          # Cloud Build：构建三镜像 + 迁移 + 滚动更新
 └── .github/workflows/       # GitHub Actions：push master 自动部署 GCP
@@ -118,7 +132,13 @@ npm run dev
 3. **运行整流**：Flow 编辑器「运行整流」→ 控制面按 DAG 拓扑序依次执行各块、内存传递 output→input、
    条件分支控制面求值后只激活命中路径（决策 10 同步编排在 dev 本地的等价路径）。
 4. **执行历史**：查看每次执行的输入/返回值/stdout/stderr。
-5. **部署中心**：创建 FlowDeployment（K8s 实际编排在 Phase 4a 接入）。
+5. **版本管理**（Phase 3）：块编辑器「版本」→ 发布版本（代码/依赖/Notebook 存 MinIO，DB 存指针 + sha 对账）→
+   Monaco 并排 diff 对比任意两版本 → 一键切换稳定版。
+6. **部署中心**（Phase 4a）：新建 FlowDeployment → 容量/GPU/scope 预检 → 一键部署到 K8s
+   （生成 Deployment + Service + KEDA ScaledObject + NetworkPolicy）→ 实时副本状态 / Manifest 预览 / 销毁。
+7. **调试执行 (Jupyter)**（Phase 5，仅 local）：块编辑器「调试执行」标签页，多 Cell 交互式开发，与生产执行链路完全隔离。
+
+> 同步调用入口：`POST /flow/{deployment_id}/invoke`（整流编排，FlowRun lease+fence 续跑）、`POST /invoke/{block_id}`（单块）。
 
 调用块代码约定：
 
@@ -191,11 +211,16 @@ git push master
 | Phase | 状态 | 说明 |
 | --- | --- | --- |
 | 1a 执行内核 MVP | ✅ 已实现 | Block CRUD、Docker 沙箱执行、dev-local 整流编排、DAG 校验、WS 输出、VueFlow 画布、条件分支、Alembic 独立库 |
-| 1b 网关/鉴权 | 🟡 骨架 | sa_token_client / rbac / ingress patch 已就位，待接入网关发布 |
-| 2 异步触发 | 🟡 骨架 | pyflow_runtime 消费者/幂等/退避/回复已实现，待接 MQ 面板 |
-| 3 版本管理 | ⬜ 规划 | MinIO 大字段 + diff |
-| 4a/4b/4c K8s/供应链/GPU | 🟡 骨架 | RBAC/KEDA 模板/节点池/runner 镜像就位，待编排器接入 |
-| 5 Jupyter | ⬜ 规划 | dev 专属 |
+| 1b 网关/鉴权 | ✅ 已实现 | sa_token_client / 平台级 RBAC / 资源级 ACL / ingress patch |
+| 2 异步触发 | ✅ 已实现 | aio-pika 消费者、幂等状态机+fence CAS、TTL+DLX 重试、退避重入、字段透传回复、MQ 面板 + DLQ 运维 |
+| 3 版本管理 | ✅ 已实现 | BlockVersion/FlowVersion 快照（大字段存 MinIO，DB 存指针 + sha 对账）、Monaco diff、稳定版切换、对账任务 |
+| 4a K8s 执行与扩缩 | ✅ 已实现 | manifest_generator + 容量预检、deployment/keda/cluster 管理、一键部署/销毁、K8s 同步编排 /invoke、FlowRun lease+fence 多副本续跑、部署中心前端 |
+| 4b 镜像与供应链 | ✅ 已实现 | image_builder（Cloud Build + requirements_hash 分层缓存）、最小权限构建 SA、依赖白名单/wheel 优先/pip-audit、协议版本门禁 |
+| 4c GPU 与托管块 | ✅ 已实现 | GPU manifest（禁 gVisor）+ 配额/CUDA 兼容预检、GCP 托管块 Workload Identity KSA + egress 白名单 + scope 预检 |
+| 5 Jupyter | ✅ 已实现 | jupyter_client 内核（仅 local 模式）、Cell UI 组件，与生产执行链路完全解耦 |
+
+> 测试：`tests/` 共 58 项核心单测（幂等/接管/退避/条件引擎/回复/manifest 安全上下文/容量·GPU·scope 预检/版本 sha 对账/续跑），
+> 运行 `pytest -q`（AIR：全自动 / 独立 / 可重复，零外部服务）。
 
 ---
 

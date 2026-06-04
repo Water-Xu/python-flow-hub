@@ -20,7 +20,15 @@ from app.api import (
     router_rbac,
     router_ws,
 )
-from app.api import router_api_portal, router_api_admin, router_mq, router_auth
+from app.api import (
+    router_api_portal,
+    router_api_admin,
+    router_mq,
+    router_auth,
+    router_versions,
+    router_gateway,
+    router_jupyter,
+)
 from app.config import get_settings
 from app.core.mq.consumer_manager import get_consumer_manager
 from app.db import init_models
@@ -35,10 +43,13 @@ logger = get_logger()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
     configure_logging()
     logger.info("pyflow_startup", mode=settings.deployment_mode)
     await init_models()
 
+    resume_task = None
     # dev-local：尝试连接 RabbitMQ（连接失败不阻断启动，等用户手动 start_all）
     if settings.deployment_mode == "local":
         mgr = get_consumer_manager()
@@ -47,12 +58,22 @@ async def lifespan(app: FastAPI):
             logger.info("mq_consumer_manager_ready")
         else:
             logger.warning("mq_not_connected_consumers_disabled")
+    else:
+        # k8s 多副本：周期续跑扫描，控制面重启不丢进行中 flow（决策 10）
+        from app.core.flow.k8s_orchestration import resume_loop
+
+        resume_task = asyncio.create_task(resume_loop(settings.k8s_namespace))
 
     yield
 
     logger.info("pyflow_shutdown")
     if settings.deployment_mode == "local":
         await get_consumer_manager().disconnect()
+        from app.core.jupyter.kernel_manager import get_registry
+
+        await get_registry().shutdown_all()
+    if resume_task is not None:
+        resume_task.cancel()
 
 
 app = FastAPI(
@@ -84,6 +105,10 @@ app.include_router(router_api_portal.router)
 app.include_router(router_api_admin.router)
 app.include_router(router_mq.router)
 app.include_router(router_auth.router)
+app.include_router(router_versions.router)
+app.include_router(router_gateway.router)
+if settings.deployment_mode == "local":
+    app.include_router(router_jupyter.router)
 
 configure_tracing(app)
 

@@ -1,0 +1,54 @@
+# 依赖层镜像构建（决策 11 + Phase 4b 供应链加固）
+# 由控制面 image_builder 按 requirements_hash 触发；命中缓存则跳过。
+# 用专用最小权限构建 SA（pyflow-builder@，仅 AR writer + 读依赖源），--service-account 显式指定。
+substitutions:
+  _REGION: us-central1
+  _PROJECT: lhy-styon-dev-4832
+  _REPO: lhy-styon
+  _REQ_HASH: none
+  _BASE_IMAGE: python:3.11-slim
+  _INDEX_URL: '' # 私有 PyPI 镜像；空则默认源（dev）
+
+steps:
+  # 1) 依赖审计：高危阻断发布（供应链加固 5）
+  - name: 'python:3.11-slim'
+    id: audit
+    entrypoint: bash
+    args:
+      - '-c'
+      - 'pip install pip-audit && pip-audit -r requirements.txt'
+
+  # 2) 构建依赖层（优先 wheel，限制源码构建触发 setup.py；构建沙箱网络由 worker pool / VPC-SC 收敛）
+  - name: 'gcr.io/cloud-builders/docker'
+    id: build
+    waitFor: [audit]
+    args:
+      - build
+      - '--build-arg'
+      - 'BASE_IMAGE=$_BASE_IMAGE'
+      - '--build-arg'
+      - 'INDEX_URL=$_INDEX_URL'
+      - '-f'
+      - runner/Dockerfile.deps
+      - '-t'
+      - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-runner:dep-$_REQ_HASH'
+      - '.'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    id: push
+    waitFor: [build]
+    args:
+      - push
+      - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-runner:dep-$_REQ_HASH'
+
+images:
+  - '$_REGION-docker.pkg.dev/$_PROJECT/$_REPO/pyflow-runner:dep-$_REQ_HASH'
+
+# 专用最小权限构建 SA（供应链加固 1）
+serviceAccount: 'projects/lhy-styon-dev-4832/serviceAccounts/pyflow-builder@lhy-styon-dev-4832.iam.gserviceaccount.com'
+options:
+  logging: CLOUD_LOGGING_ONLY
+  # 构建沙箱网络收敛：生产应配置 pool（私有 worker pool + VPC-SC，仅放行私有源）
+  # pool:
+  #   name: projects/lhy-styon-dev-4832/locations/us-central1/workerPools/pyflow-build-pool
+timeout: 1200s

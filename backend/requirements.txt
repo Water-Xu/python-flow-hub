@@ -18,6 +18,9 @@ docker==7.1.0
 kubernetes==31.0.0
 python-multipart==0.0.9
 websockets==13.0.1
+# Jupyter 开发态内核（仅 local 模式，与生产执行链路隔离，决策 9）
+jupyter-client==8.6.2
+ipykernel==6.29.5
 opentelemetry-api==1.27.0
 opentelemetry-sdk==1.27.0
 opentelemetry-exporter-otlp-proto-http==1.27.0

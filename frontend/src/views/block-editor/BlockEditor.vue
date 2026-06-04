@@ -4,6 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import CodeEditor from '@/components/CodeEditor.vue'
 import ExecutionTerminal from '@/components/ExecutionTerminal.vue'
+import VersionDrawer from '@/components/VersionDrawer.vue'
+import JupyterCell from '@/components/JupyterCell.vue'
 import { blockApi, mqApi, type Block } from '@/api'
 
 const route = useRoute()
@@ -19,6 +21,7 @@ const lastExecId = ref<string | undefined>()
 const result = ref<any>(null)
 const term = ref<InstanceType<typeof ExecutionTerminal>>()
 const activeTab = ref('code')
+const versionDrawer = ref(false)
 
 // MQ 配置
 const mqForm = ref({
@@ -242,11 +245,22 @@ onMounted(load)
       </div>
       <div>
         <el-button :loading="saving" @click="save">保存草稿</el-button>
+        <el-button @click="versionDrawer = true">
+          <el-icon><Files /></el-icon> 版本
+        </el-button>
         <el-button type="primary" :loading="running" @click="run">
           <el-icon><VideoPlay /></el-icon> 运行
         </el-button>
       </div>
     </header>
+
+    <VersionDrawer
+      v-model="versionDrawer"
+      resource-type="block"
+      :resource-id="blockId"
+      :resource-name="block?.name"
+      @stable-changed="load"
+    />
 
     <el-tabs v-model="activeTab" class="block-tabs">
       <!-- 代码 Tab -->
@@ -273,6 +287,11 @@ onMounted(load)
             </transition>
           </div>
         </div>
+      </el-tab-pane>
+
+      <!-- Jupyter 调试执行 Tab（决策 9：仅 local 模式，与生产执行链路隔离） -->
+      <el-tab-pane label="调试执行 (Jupyter)" name="jupyter">
+        <JupyterCell :block-id="blockId" />
       </el-tab-pane>
 
       <!-- MQ 配置 Tab -->

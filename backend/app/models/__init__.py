@@ -6,6 +6,7 @@ from app.models.execution import FlowRun, ExecutionRecord
 from app.models.rbac import PyFlowUserRole, PyFlowResourceGrant
 from app.models.deployment import FlowDeployment
 from app.models.api_portal import PublishedApi
+from app.models.version import BlockVersion, FlowVersion
 
 __all__ = [
     "Block",
@@ -18,4 +19,6 @@ __all__ = [
     "PyFlowResourceGrant",
     "FlowDeployment",
     "PublishedApi",
+    "BlockVersion",
+    "FlowVersion",
 ]

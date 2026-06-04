@@ -28,3 +28,18 @@ MQ_REPLY_PUBLISHED = Counter(
 MQ_QUEUE_DEPTH = Gauge(
     "pyflow_mq_queue_depth", "MQ 队列就绪深度（main/dlq）", ["block_id", "queue"]
 )
+
+# ── 版本双写对账（决策 8/13）────────────────────────────────────────────────
+VERSION_RECONCILE = Gauge(
+    "pyflow_version_reconcile",
+    "版本双写对账：孤儿对象/悬挂指针/损坏数",
+    ["kind"],   # kind: orphan_objects | missing_objects | corrupted
+)
+
+# ── K8s 部署与扩缩（决策 12/Phase 4a）──────────────────────────────────────
+K8S_DEPLOY = Counter(
+    "pyflow_k8s_deploy_total", "K8s 部署动作计数", ["action", "result"]
+)
+K8S_BLOCK_REPLICAS = Gauge(
+    "pyflow_k8s_block_replicas", "Block Deployment 当前副本数", ["resource_prefix", "block_id"]
+)

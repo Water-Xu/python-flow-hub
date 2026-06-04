@@ -19,6 +19,10 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+# 让测试可直接 import app.*（控制面 backend 加入 sys.path）
+BACKEND = ROOT / "backend"
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
 
 from pyflow_runtime import idempotency as _idem  # noqa: E402
 

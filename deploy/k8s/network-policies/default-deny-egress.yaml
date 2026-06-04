@@ -1,0 +1,12 @@
+# 基线 egress deny-all（决策 1/14）：pyflow-blocks 命名空间内所有 Pod 默认禁止出网，
+# 各 Block 由 manifest_generator 生成的 NetworkPolicy 按白名单放行（kube-dns / Private Google Access / RabbitMQ）。
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pyflow-default-deny-egress
+  namespace: pyflow-blocks
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress: []

@@ -24,8 +24,16 @@ async def run_flow(
     initial_inputs: dict[str, Any],
     node_executor: NodeExecutor,
     checkpoint: Checkpoint | None = None,
+    *,
+    prior_outputs: dict[str, dict[str, Any]] | None = None,
+    prior_active_ports: dict[str, str] | None = None,
+    prior_skipped: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """执行整流，返回 {node_id: output}。"""
+    """执行整流，返回 {node_id: output}。
+
+    续跑（决策 10，4a 多副本）：传入 prior_* 还原已完成节点的输出 / 分支决策 / 跳过集合，
+    已完成节点不重跑（其下游幂等 key 含 run_id:node_id）。
+    """
     order = topological_order(nodes, edges)
     node_map = {n["id"]: n for n in nodes}
 
@@ -34,14 +42,20 @@ async def run_flow(
     for e in edges:
         in_edges[e["target_node_id"]].append(e)
 
-    outputs: dict[str, dict[str, Any]] = {}
+    outputs: dict[str, dict[str, Any]] = dict(prior_outputs or {})
     # 被分支节点剪枝掉的端口：{node_id: 命中端口}，决定下游是否激活
-    active_ports: dict[str, str] = {}
-    skipped: set[str] = set()
+    active_ports: dict[str, str] = dict(prior_active_ports or {})
+    skipped: set[str] = set(prior_skipped or set())
 
     for node_id in order:
         node = node_map[node_id]
         incoming = in_edges[node_id]
+
+        # 续跑：已完成（有输出 / 已判分支 / 已跳过）的节点不重跑
+        if node_id in skipped:
+            continue
+        if node_id in active_ports or (node_id in outputs and node.get("node_type") != "condition_branch"):
+            continue
 
         # 上游若被剪枝（分支未命中本端口），则本节点跳过
         if incoming and _all_inactive(incoming, active_ports, skipped, outputs):
