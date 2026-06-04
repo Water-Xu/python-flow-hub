@@ -107,6 +107,19 @@ export const apiPortalApi = {
   copyFlow: (flowId: string) => client.post<any, any>(`/api/flows/${flowId}/copy`),
 }
 
+export const mqApi = {
+  getStatus: () => client.get<any, any>('/api/mq/status'),
+  getBlockStatus: (blockId: string) => client.get<any, any>(`/api/mq/blocks/${blockId}/status`),
+  getDepth: (blockId: string) => client.get<any, any>(`/api/mq/blocks/${blockId}/depth`),
+  start: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/start`),
+  stop: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/stop`),
+  restart: (blockId: string) => client.post<any, any>(`/api/mq/blocks/${blockId}/restart`),
+  publish: (blockId: string, data: { payload?: object; snowflake_id?: string }) =>
+    client.post<any, any>(`/api/mq/blocks/${blockId}/publish`, data),
+  startAll: () => client.post<any, any>('/api/mq/start-all'),
+  stopAll: () => client.post<any, any>('/api/mq/stop-all'),
+}
+
 export const apiAdminApi = {
   listAll: () => client.get<any, PublishedApi[]>('/api/admin/apis').then(ensureArray<PublishedApi>),
   get: (id: string) => client.get<any, PublishedApi>(`/api/admin/apis/${id}`),

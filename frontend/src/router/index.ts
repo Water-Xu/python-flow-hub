@@ -33,6 +33,11 @@ const routes = [
     component: () => import('@/views/execution-history/ExecutionHistory.vue'),
   },
   {
+    path: '/mq-monitor',
+    name: 'mq-monitor',
+    component: () => import('@/views/mq-monitor/MQMonitor.vue'),
+  },
+  {
     path: '/api-portal',
     name: 'api-portal',
     component: () => import('@/views/api-portal/ApiPortal.vue'),

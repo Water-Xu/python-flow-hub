@@ -20,8 +20,9 @@ from app.api import (
     router_rbac,
     router_ws,
 )
-from app.api import router_api_portal, router_api_admin
+from app.api import router_api_portal, router_api_admin, router_mq
 from app.config import get_settings
+from app.core.mq.consumer_manager import get_consumer_manager
 from app.db import init_models
 from app.errors import BusinessException, business_exception_handler
 from app.observability.logging import configure_logging, get_logger
@@ -36,9 +37,21 @@ async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("pyflow_startup", mode=settings.deployment_mode)
     await init_models()
-    # 生产队列由 Block Pod 消费；控制面仅 dev local 才按需启动单消费者（此处省略）
+
+    # dev-local：尝试连接 RabbitMQ（连接失败不阻断启动，等用户手动 start_all）
+    if settings.deployment_mode == "local":
+        mgr = get_consumer_manager()
+        connected = await mgr.connect()
+        if connected:
+            logger.info("mq_consumer_manager_ready")
+        else:
+            logger.warning("mq_not_connected_consumers_disabled")
+
     yield
+
     logger.info("pyflow_shutdown")
+    if settings.deployment_mode == "local":
+        await get_consumer_manager().disconnect()
 
 
 app = FastAPI(
@@ -67,6 +80,7 @@ app.include_router(router_rbac.router)
 app.include_router(router_ws.router)
 app.include_router(router_api_portal.router)
 app.include_router(router_api_admin.router)
+app.include_router(router_mq.router)
 
 configure_tracing(app)
 
