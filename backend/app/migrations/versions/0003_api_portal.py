@@ -46,8 +46,8 @@ def upgrade() -> None:
         sa.Column("error_calls", sa.BigInteger, nullable=False, server_default="0"),
         sa.Column("avg_latency_ms", sa.Float, nullable=False, server_default="0"),
         # 时间戳
-        sa.Column("created_at", sa.DateTime, nullable=False),
-        sa.Column("updated_at", sa.DateTime, nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )
     op.create_index("ix_pyflow_published_api_path", "pyflow_published_api", ["path"])
     op.create_index("ix_pyflow_published_api_flow_id", "pyflow_published_api", ["flow_id"])

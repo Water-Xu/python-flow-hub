@@ -31,8 +31,8 @@ def upgrade() -> None:
         sa.Column("output_ports", sa.JSON, nullable=False),
         sa.Column("requirements_hash", sa.String(64), nullable=False, server_default=""),
         sa.Column("content_sha256", sa.String(64), nullable=False, server_default=""),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )
     op.create_index("ix_pyflow_block_version_block_id", "pyflow_block_version", ["block_id"])
 
@@ -48,8 +48,8 @@ def upgrade() -> None:
         sa.Column("content_sha256", sa.String(64), nullable=False, server_default=""),
         sa.Column("node_count", sa.Integer, nullable=False, server_default="0"),
         sa.Column("edge_count", sa.Integer, nullable=False, server_default="0"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )
     op.create_index("ix_pyflow_flow_version_flow_id", "pyflow_flow_version", ["flow_id"])
 
