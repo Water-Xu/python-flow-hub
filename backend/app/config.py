@@ -12,6 +12,12 @@ class Settings(BaseSettings):
 
     deployment_mode: str = "local"          # local | k8s
 
+    k8s_namespace: str = "pyflow-blocks"
+    k8s_job_service_account: str = "pyflow-hub-sa"
+    runner_image: str = (
+        "us-central1-docker.pkg.dev/lhy-styon-dev-4832/lhy-styon/pyflow-runner:latest"
+    )
+
     db_dsn: str = "postgresql+asyncpg://pyflow:pyflow@localhost:5432/pyflow"
 
     redis_url: str = "redis://localhost:6379/0"

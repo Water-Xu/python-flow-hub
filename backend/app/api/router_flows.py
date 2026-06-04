@@ -19,6 +19,7 @@ from app.db import get_session
 from app.errors import (
     PYFLOW_BLOCK_NOT_FOUND,
     PYFLOW_EXEC_INPUT_INVALID,
+    PYFLOW_EXEC_SANDBOX_ERROR,
     PYFLOW_FLOW_NOT_FOUND,
     BusinessException,
 )
@@ -251,11 +252,17 @@ async def run_flow_endpoint(
             block_cache[n["block_id"]] = b
 
     async def node_executor(node: dict[str, Any], inputs: dict[str, Any]) -> dict[str, Any]:
-        block = block_cache[node["block_id"]]
+        block_id = node.get("block_id")
+        if not block_id:
+            raise BusinessException(PYFLOW_EXEC_INPUT_INVALID, f"node {node.get('id')} missing block_id")
+        block = block_cache[block_id]
         record = await execute_block(
-            session, block_id=block.id, code=block.draft_code,
+            session, block_id=block.id, code=block.draft_code or "",
             inputs=inputs, login_id=login_id, flow_run_id=flow_run.id,
         )
+        if record.status != "success":
+            detail = (record.stderr or "block execution failed").strip()[:500]
+            raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, detail)
         out = record.output if isinstance(record.output, dict) else {"value": record.output}
         return out
 

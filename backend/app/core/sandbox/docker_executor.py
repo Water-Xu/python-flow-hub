@@ -16,8 +16,10 @@ from pyflow_runtime.sandbox_config import build_docker_sandbox_config
 
 from app.config import get_settings
 from app.errors import PYFLOW_EXEC_SANDBOX_ERROR, PYFLOW_EXEC_TIMEOUT, BusinessException
+from app.observability.logging import get_logger
 
 settings = get_settings()
+logger = get_logger()
 
 _RESULT_MARKER = "__PYFLOW_RESULT__"
 
@@ -129,7 +131,12 @@ async def run_block(
     allow_in_process_fallback: bool = True,
     timeout: int | None = None,
 ) -> ExecutionOutput:
-    """优先 Docker 沙箱；本机无 Docker 且允许时降级 in-process（仅 dev 调试）。"""
+    """local：Docker 沙箱（可降级 in-process）；k8s：K8s Job + runner 镜像，不走 Docker。"""
+    if settings.deployment_mode == "k8s":
+        from app.core.sandbox.k8s_executor import execute_in_k8s_job
+
+        return await execute_in_k8s_job(code, inputs, timeout=timeout)
+
     docker = _try_import_docker()
     if docker is not None:
         try:
@@ -137,6 +144,15 @@ async def run_block(
         except BusinessException:
             if not allow_in_process_fallback:
                 raise
+        except Exception as exc:
+            # Windows 未启动 Docker Desktop 时 from_env() 常抛 Connection aborted / FileNotFoundError
+            if not allow_in_process_fallback:
+                raise BusinessException(
+                    PYFLOW_EXEC_SANDBOX_ERROR,
+                    "docker daemon unavailable; start Docker Desktop or use deployment_mode=local",
+                ) from exc
+            logger.warning("docker_sandbox_unavailable", error=str(exc)[:200])
     if allow_in_process_fallback and settings.deployment_mode == "local":
+        logger.info("sandbox_fallback_in_process", mode=settings.deployment_mode)
         return await execute_in_process(code, inputs)
     raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, "no sandbox runtime available")
