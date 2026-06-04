@@ -20,7 +20,7 @@ rules:
     resources: ["services"]
     verbs: ["create", "get", "list", "update", "delete"]
   - apiGroups: ["batch"]
-    resources: ["jobs"]
+    resources: ["jobs", "jobs/status"]
     verbs: ["create", "get", "list", "update", "delete"]
   - apiGroups: ["keda.sh"]
     resources: ["scaledobjects", "triggerauthentications"]
