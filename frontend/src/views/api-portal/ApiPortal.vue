@@ -2,6 +2,7 @@
 import { onMounted, ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { apiPortalApi, flowApi, type PublishedApi } from '@/api'
+import MqMockTestDialog from '@/components/MqMockTestDialog.vue'
 
 const apis = ref<PublishedApi[]>([])
 const flows = ref<any[]>([])
@@ -23,6 +24,23 @@ const testResult = ref<{
   latencyMs: number
   data: any
 } | null>(null)
+
+// ── MQ Mock 测试 ──────────────────────────────────────────────────────────
+const mqTestVisible = ref(false)
+const mqTestBlock = ref<{ id: string; name: string; preset: Record<string, any> | null }>({
+  id: '',
+  name: '',
+  preset: null,
+})
+
+function openMqTest(block: any) {
+  mqTestBlock.value = {
+    id: block.mq_invocation?.block_id || block.block_id,
+    name: block.block_name,
+    preset: block.mq_invocation?.message_example || null,
+  }
+  mqTestVisible.value = true
+}
 
 const form = ref({
   name: '',
@@ -323,6 +341,10 @@ onMounted(load)
               <el-tag type="success">{{ docsData.method }}</el-tag>
               <code class="docs-path">{{ docsData.path }}</code>
               <el-tag :type="statusType[docsData.status] || 'info'">{{ docsData.status }}</el-tag>
+              <el-tag v-if="docsData.mq_supported" type="primary" effect="plain">
+                <el-icon style="margin-right:3px"><MessageBox /></el-icon>
+                {{ docsData.mq_block_count }} 个块支持 MQ 调用
+              </el-tag>
             </div>
           </div>
 
@@ -341,10 +363,25 @@ onMounted(load)
                 :key="block.node_id || block.block_id"
                 :title="block.block_name"
               >
+                <template #title>
+                  <span>{{ block.block_name }}</span>
+                  <el-tag
+                    v-if="block.mq_invocation"
+                    size="small"
+                    type="primary"
+                    effect="plain"
+                    style="margin-left:8px"
+                  >
+                    <el-icon style="margin-right:3px"><MessageBox /></el-icon>支持 MQ 调用
+                  </el-tag>
+                </template>
                 <p class="dim" style="margin:0 0 8px">{{ block.description || '暂无描述' }}</p>
                 <p style="margin:0 0 8px">
                   <strong>入口函数：</strong>
                   <code>{{ block.entrypoint || 'run' }}</code>
+                  <el-tag size="small" type="info" effect="plain" style="margin-left:8px">
+                    {{ block.execution_mode }}
+                  </el-tag>
                 </p>
                 <div class="port-grid">
                   <div>
@@ -369,6 +406,75 @@ onMounted(load)
                     </ul>
                   </div>
                 </div>
+
+                <!-- 通过 MQ 调用 -->
+                <transition name="mq-section">
+                  <div v-if="block.mq_invocation" class="mq-invoke">
+                    <div class="mq-invoke-head">
+                      <el-icon><MessageBox /></el-icon>
+                      <span>通过 MQ 调用（RabbitMQ 异步触发）</span>
+                      <el-button
+                        size="small"
+                        type="primary"
+                        plain
+                        class="mq-test-btn"
+                        @click="openMqTest(block)"
+                      >
+                        <el-icon style="margin-right:4px"><VideoPlay /></el-icon>Mock 测试
+                      </el-button>
+                    </div>
+
+                    <div class="mq-kv-grid">
+                      <div class="mq-kv">
+                        <span class="mq-k">主队列</span>
+                        <code>{{ block.mq_invocation.queue }}</code>
+                      </div>
+                      <div class="mq-kv">
+                        <span class="mq-k">交换机</span>
+                        <code>{{ block.mq_invocation.exchange }}</code>
+                      </div>
+                      <div class="mq-kv">
+                        <span class="mq-k">路由键</span>
+                        <code>{{ block.mq_invocation.routing_key }}</code>
+                      </div>
+                      <div class="mq-kv">
+                        <span class="mq-k">死信队列</span>
+                        <code>{{ block.mq_invocation.dlq_queue }}</code>
+                      </div>
+                      <div class="mq-kv">
+                        <span class="mq-k">重试</span>
+                        <span>{{ block.mq_invocation.max_retry }} 次 / {{ block.mq_invocation.retry_delay_ms }}ms</span>
+                      </div>
+                      <div class="mq-kv">
+                        <span class="mq-k">回复</span>
+                        <el-tag size="small" :type="block.mq_invocation.reply_enabled ? 'success' : 'info'" effect="plain">
+                          {{ block.mq_invocation.reply_enabled ? '开启' : '关闭' }}
+                        </el-tag>
+                      </div>
+                    </div>
+
+                    <div v-if="block.mq_invocation.condition_expression" class="mq-line">
+                      <span class="mq-k">条件订阅</span>
+                      <code>{{ block.mq_invocation.condition_language }}: {{ block.mq_invocation.condition_expression }}</code>
+                    </div>
+
+                    <div v-if="Object.keys(block.mq_invocation.input_mapping || {}).length" class="mq-line mq-mapping">
+                      <span class="mq-k">字段映射（输入字段 ← 消息路径）</span>
+                      <ul class="port-list">
+                        <li v-for="(src, target) in block.mq_invocation.input_mapping" :key="target">
+                          <code>{{ target }}</code>
+                          <span class="dim">←</span>
+                          <code>{{ src }}</code>
+                        </li>
+                      </ul>
+                    </div>
+
+                    <div class="mq-line">
+                      <span class="mq-k">示例消息体</span>
+                      <pre class="code-block" style="margin:6px 0 0">{{ JSON.stringify(block.mq_invocation.message_example, null, 2) }}</pre>
+                    </div>
+                  </div>
+                </transition>
               </el-collapse-item>
             </el-collapse>
           </div>
@@ -472,6 +578,14 @@ onMounted(load)
         <el-button @click="testDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- MQ Mock 测试 Dialog（复用组件） -->
+    <MqMockTestDialog
+      v-model="mqTestVisible"
+      :block-id="mqTestBlock.id"
+      :block-name="mqTestBlock.name"
+      :preset-payload="mqTestBlock.preset"
+    />
   </div>
 </template>
 
@@ -651,6 +765,61 @@ onMounted(load)
   overflow-x: auto;
   margin: 8px 0 16px;
 }
+
+/* ── MQ 调用方式区 ── */
+.mq-invoke {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--pf-accent-soft);
+  border-radius: 8px;
+  background: var(--pf-accent-soft);
+}
+.mq-invoke-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--pf-accent);
+  margin-bottom: 10px;
+}
+.mq-test-btn { margin-left: auto; }
+.mq-kv-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+}
+.mq-kv {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.mq-k {
+  color: var(--pf-text-dim);
+  font-size: 11px;
+  min-width: 64px;
+  flex-shrink: 0;
+}
+.mq-kv code {
+  background: var(--pf-panel);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  word-break: break-all;
+}
+.mq-line {
+  margin-top: 10px;
+  font-size: 12px;
+}
+.mq-line code {
+  background: var(--pf-panel);
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.mq-mapping .port-list { margin-top: 6px; }
+.mq-section-enter-active { transition: opacity 0.3s ease, transform 0.3s ease; }
+.mq-section-enter-from { opacity: 0; transform: translateY(8px); }
 
 /* ── 接口测试 ── */
 .test-target {

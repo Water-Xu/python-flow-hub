@@ -17,6 +17,7 @@ from app.auth.rbac import Role, require_role
 from app.config import get_settings
 from app.core.execution_service import execute_block
 from app.core.flow.flow_runner import run_flow
+from app.core.mq.invocation_doc import build_mq_invocation
 from app.db import get_session
 from app.errors import (
     PYFLOW_API_LOCKED,
@@ -206,7 +207,13 @@ async def get_api_docs(
                     # 该节点实际调用的入口函数（默认 run）
                     "entrypoint": (node.config or {}).get("entrypoint") or "run",
                     "execution_mode": block.execution_mode,
+                    "mq_config": block.mq_config,
+                    # MQ 调用方式文档（仅 async_mq/both 块非空），供门户展示 + Mock 测试预填
+                    "mq_invocation": build_mq_invocation(block),
                 })
+
+    # 流程内支持 MQ 异步触发的块（供前端展示「通过 MQ 调用」区与汇总标记）
+    mq_blocks = [b for b in block_docs if b.get("mq_invocation")]
 
     return {
         "api_id": api_id,
@@ -222,6 +229,9 @@ async def get_api_docs(
         "blocks": block_docs,
         "request_example": {"inputs": {}},
         "response_example": {"outputs": {}, "flow_run_id": "uuid", "status": "succeeded"},
+        # ── MQ 调用支持 ──
+        "mq_supported": len(mq_blocks) > 0,
+        "mq_block_count": len(mq_blocks),
     }
 
 

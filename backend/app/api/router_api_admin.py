@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.rbac import Role, require_role
 from app.config import get_settings
+from app.core.mq.invocation_doc import build_mq_invocation
 from app.db import get_session
 from app.errors import PYFLOW_API_NOT_FOUND, BusinessException
 from app.models.api_portal import PublishedApi
@@ -84,10 +85,17 @@ async def get_admin_api_docs(
                     "owner_login_id": block.owner_login_id,
                     "type": block.type,
                     "execution_mode": block.execution_mode,
+                    # 该节点实际调用的入口函数（默认 run）
+                    "entrypoint": (node.config or {}).get("entrypoint") or "run",
                     "input_ports": block.input_ports,
                     "output_ports": block.output_ports,
                     "compute_config": block.compute_config,
+                    "mq_config": block.mq_config,
+                    # MQ 调用方式文档（仅 async_mq/both 块非空）
+                    "mq_invocation": build_mq_invocation(block),
                 })
+
+    mq_blocks = [b for b in block_docs if b.get("mq_invocation")]
 
     return {
         "api_id": api_id,
@@ -101,6 +109,8 @@ async def get_admin_api_docs(
         "flow_id": flow_id,
         "flow_name": flow.name if flow else "未知",
         "blocks": block_docs,
+        "mq_supported": len(mq_blocks) > 0,
+        "mq_block_count": len(mq_blocks),
         "stats": {
             "total_calls": api.total_calls,
             "success_calls": api.success_calls,
