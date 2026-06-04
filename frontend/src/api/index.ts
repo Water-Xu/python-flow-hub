@@ -62,3 +62,70 @@ export const deploymentApi = {
   create: (data: { flow_id: string; name: string; environment: string }) =>
     client.post('/api/deployments', data),
 }
+
+export interface PublishedApi {
+  id: string
+  name: string
+  description: string
+  path: string
+  tags: string
+  flow_id: string
+  active_flow_id: string | null
+  owner_login_id: string
+  status: string
+  is_locked: boolean
+  lock_reason: string | null
+  locked_by: string | null
+  locked_at: string | null
+  rate_limit_enabled: boolean
+  rate_limit_per_minute: number
+  load_balance_strategy: string
+  degradation_enabled: boolean
+  degradation_fallback: Record<string, any>
+  total_calls: number
+  success_calls: number
+  error_calls: number
+  avg_latency_ms: number
+  created_at: string
+  updated_at: string
+}
+
+export const apiPortalApi = {
+  list: () => client.get<any, PublishedApi[]>('/api/portal/apis').then(ensureArray<PublishedApi>),
+  publish: (data: {
+    name: string
+    description?: string
+    path: string
+    tags?: string
+    flow_id: string
+  }) => client.post<any, PublishedApi>('/api/portal/apis', data),
+  get: (id: string) => client.get<any, PublishedApi>(`/api/portal/apis/${id}`),
+  unpublish: (id: string) => client.delete(`/api/portal/apis/${id}`),
+  pause: (id: string) => client.post(`/api/portal/apis/${id}/pause`),
+  activate: (id: string) => client.post(`/api/portal/apis/${id}/activate`),
+  getDocs: (id: string) => client.get<any, any>(`/api/portal/apis/${id}/docs`),
+  copyFlow: (flowId: string) => client.post<any, any>(`/api/flows/${flowId}/copy`),
+}
+
+export const apiAdminApi = {
+  listAll: () => client.get<any, PublishedApi[]>('/api/admin/apis').then(ensureArray<PublishedApi>),
+  get: (id: string) => client.get<any, PublishedApi>(`/api/admin/apis/${id}`),
+  getDocs: (id: string) => client.get<any, any>(`/api/admin/apis/${id}/docs`),
+  getInstances: (id: string) => client.get<any, any>(`/api/admin/apis/${id}/instances`),
+  getOverview: () => client.get<any, any>('/api/admin/stats/overview'),
+  updatePolicy: (
+    id: string,
+    data: {
+      rate_limit_enabled?: boolean
+      rate_limit_per_minute?: number
+      load_balance_strategy?: string
+      degradation_enabled?: boolean
+      degradation_fallback?: object
+    },
+  ) => client.put<any, PublishedApi>(`/api/admin/apis/${id}/policy`, data),
+  lock: (id: string, lock_reason?: string) =>
+    client.post<any, PublishedApi>(`/api/admin/apis/${id}/lock`, { lock_reason }),
+  unlock: (id: string) => client.post<any, PublishedApi>(`/api/admin/apis/${id}/unlock`),
+  switchVersion: (id: string, new_flow_id: string) =>
+    client.post<any, PublishedApi>(`/api/admin/apis/${id}/switch-version`, { new_flow_id }),
+}

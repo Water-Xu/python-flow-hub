@@ -8,6 +8,8 @@ const collapsed = ref(false)
 const menus = [
   { path: '/blocks', label: '调用块', icon: 'Grid' },
   { path: '/flows', label: '流程编排', icon: 'Share' },
+  { path: '/api-portal', label: '接口门户', icon: 'Connection' },
+  { path: '/api-admin', label: '接口管理', icon: 'Management' },
   { path: '/deployments', label: '部署中心', icon: 'Promotion' },
   { path: '/executions', label: '执行历史', icon: 'Histogram' },
 ]

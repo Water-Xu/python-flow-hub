@@ -1,4 +1,4 @@
-"""/api/blocks — Block CRUD + 执行。"""
+"""/api/blocks — Block CRUD + 执行 + 副本创建。"""
 
 from __future__ import annotations
 
@@ -9,8 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.rbac import Role, require_role
 from app.core.execution_service import execute_block
 from app.db import get_session
-from app.errors import PYFLOW_BLOCK_NOT_FOUND, PYFLOW_EXEC_INPUT_INVALID, BusinessException
+from app.errors import (
+    PYFLOW_API_LOCKED,
+    PYFLOW_BLOCK_NOT_FOUND,
+    PYFLOW_EXEC_INPUT_INVALID,
+    BusinessException,
+)
+from app.models.api_portal import PublishedApi
 from app.models.block import Block
+from app.models.flow import FlowNode
 from app.schemas.block import (
     BlockCreateRequest,
     BlockResponse,
@@ -22,6 +29,7 @@ router = APIRouter(prefix="/api/blocks", tags=["blocks"])
 
 # 疑似密钥正则（决策 15：env_vars 仅允许非敏感值）
 import re
+from app.models.base_mixin import gen_uuid
 
 _SECRET_PATTERN = re.compile(r"(SECRET|TOKEN|PASSWORD|PASSWD|KEY|CREDENTIAL|PRIVATE)", re.I)
 
@@ -30,6 +38,29 @@ def _check_env_vars(env_vars: dict[str, str]) -> None:
     for k in env_vars:
         if _SECRET_PATTERN.search(k):
             raise BusinessException(PYFLOW_EXEC_INPUT_INVALID, f"sensitive env key forbidden: {k}")
+
+
+async def _assert_block_not_locked(session: AsyncSession, block_id: str) -> None:
+    """若该块被任何已锁定接口关联的流程引用，则拒绝写操作。"""
+    nodes = (await session.execute(
+        select(FlowNode).where(FlowNode.block_id == block_id)
+    )).scalars().all()
+    flow_ids = {n.flow_id for n in nodes}
+    if not flow_ids:
+        return
+    for flow_id in flow_ids:
+        locked_apis = (await session.execute(
+            select(PublishedApi).where(
+                PublishedApi.active_flow_id == flow_id,
+                PublishedApi.is_locked.is_(True),
+            )
+        )).scalars().all()
+        if locked_apis:
+            api_names = ", ".join(a.name for a in locked_apis)
+            raise BusinessException(
+                PYFLOW_API_LOCKED,
+                f"块被锁定接口 [{api_names}] 引用，禁止修改。如需变更请创建副本。",
+            )
 
 
 async def _get_block(session: AsyncSession, block_id: str) -> Block:
@@ -90,6 +121,7 @@ async def update_block(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(require_role(Role.EDITOR)),
 ):
+    await _assert_block_not_locked(session, block_id)
     block = await _get_block(session, block_id)
     data = req.model_dump(exclude_unset=True)
     if "env_vars" in data and data["env_vars"]:
@@ -111,10 +143,40 @@ async def remove_block(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(require_role(Role.EDITOR)),
 ):
+    await _assert_block_not_locked(session, block_id)
     block = await _get_block(session, block_id)
     await session.delete(block)
     await session.commit()
     return {"deleted": block_id}
+
+
+@router.post("/{block_id}/copy", response_model=BlockResponse)
+async def copy_block(
+    block_id: str,
+    session: AsyncSession = Depends(get_session),
+    login_id: str = Depends(require_role(Role.EDITOR)),
+):
+    """创建块的副本（锁定状态下也允许）。副本不被原接口锁定约束。"""
+    src = await _get_block(session, block_id)
+    copy = Block(
+        id=gen_uuid(),
+        name=f"{src.name} (副本)",
+        description=src.description,
+        owner_login_id=login_id,
+        type=src.type,
+        draft_code=src.draft_code,
+        draft_notebook=src.draft_notebook,
+        input_ports=list(src.input_ports),
+        output_ports=list(src.output_ports),
+        env_vars=dict(src.env_vars),
+        execution_mode=src.execution_mode,
+        mq_config=dict(src.mq_config) if src.mq_config else {},
+        compute_config=dict(src.compute_config) if src.compute_config else {},
+    )
+    session.add(copy)
+    await session.commit()
+    await session.refresh(copy)
+    return copy
 
 
 @router.post("/{block_id}/run")

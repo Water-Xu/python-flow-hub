@@ -32,6 +32,16 @@ const routes = [
     name: 'execution-history',
     component: () => import('@/views/execution-history/ExecutionHistory.vue'),
   },
+  {
+    path: '/api-portal',
+    name: 'api-portal',
+    component: () => import('@/views/api-portal/ApiPortal.vue'),
+  },
+  {
+    path: '/api-admin',
+    name: 'api-admin',
+    component: () => import('@/views/api-admin/ApiAdmin.vue'),
+  },
 ]
 
 export default createRouter({

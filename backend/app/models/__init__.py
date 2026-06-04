@@ -5,6 +5,7 @@ from app.models.flow import Flow, FlowEdge, FlowNode
 from app.models.execution import FlowRun, ExecutionRecord
 from app.models.rbac import PyFlowUserRole, PyFlowResourceGrant
 from app.models.deployment import FlowDeployment
+from app.models.api_portal import PublishedApi
 
 __all__ = [
     "Block",
@@ -16,4 +17,5 @@ __all__ = [
     "PyFlowUserRole",
     "PyFlowResourceGrant",
     "FlowDeployment",
+    "PublishedApi",
 ]

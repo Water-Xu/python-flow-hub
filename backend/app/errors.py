@@ -21,6 +21,12 @@ PYFLOW_EXEC_INPUT_INVALID = (41804, "lang.pyflow.exec.input_invalid")
 PYFLOW_FLOW_DAG_INVALID = (41805, "lang.pyflow.flow.dag_invalid")
 PYFLOW_FORBIDDEN_RESOURCE = (41806, "lang.pyflow.resource.forbidden")
 
+# 接口管理 4xxxx —— 41810~41819
+PYFLOW_API_NOT_FOUND = (41810, "lang.pyflow.api.not_found")
+PYFLOW_API_LOCKED = (41811, "lang.pyflow.api.locked")
+PYFLOW_API_RATE_LIMITED = (41812, "lang.pyflow.api.rate_limited")
+PYFLOW_API_PATH_EXISTS = (41813, "lang.pyflow.api.path_exists")
+
 # 系统异常 5xxxx（网关统一友好提示）—— pyflow 子区间 51800~51899
 PYFLOW_EXEC_TIMEOUT = (51801, "lang.pyflow.exec.timeout")
 PYFLOW_EXEC_SANDBOX_ERROR = (51802, "lang.pyflow.exec.sandbox_error")

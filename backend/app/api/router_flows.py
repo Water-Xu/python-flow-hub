@@ -17,14 +17,16 @@ from app.core.flow.flow_runner import run_flow
 from app.core.flow.zip_import import build_tree, parse_zip
 from app.db import get_session
 from app.errors import (
+    PYFLOW_API_LOCKED,
     PYFLOW_BLOCK_NOT_FOUND,
     PYFLOW_EXEC_INPUT_INVALID,
     PYFLOW_EXEC_SANDBOX_ERROR,
     PYFLOW_FLOW_NOT_FOUND,
     BusinessException,
 )
-from app.models.block import Block
+from app.models.api_portal import PublishedApi
 from app.models.base_mixin import gen_uuid
+from app.models.block import Block
 from app.models.execution import FlowRun
 from app.models.flow import Flow, FlowEdge, FlowNode
 from app.schemas.flow import (
@@ -49,6 +51,22 @@ async def _get_flow(session: AsyncSession, flow_id: str) -> Flow:
     if flow is None:
         raise BusinessException(PYFLOW_FLOW_NOT_FOUND, flow_id)
     return flow
+
+
+async def _assert_flow_not_locked(session: AsyncSession, flow_id: str) -> None:
+    """若该流程被任何已锁定接口关联，则拒绝写操作。"""
+    locked_apis = (await session.execute(
+        select(PublishedApi).where(
+            PublishedApi.active_flow_id == flow_id,
+            PublishedApi.is_locked.is_(True),
+        )
+    )).scalars().all()
+    if locked_apis:
+        api_names = ", ".join(a.name for a in locked_apis)
+        raise BusinessException(
+            PYFLOW_API_LOCKED,
+            f"流程被锁定接口 [{api_names}] 引用，禁止修改。如需变更请创建副本。",
+        )
 
 
 @router.get("", response_model=list[FlowResponse])
@@ -186,6 +204,7 @@ async def save_flow_graph(
     _: str = Depends(require_role(Role.EDITOR)),
 ):
     """保存画布：保存/发布时强制 DAG 无环校验（决策 10）。"""
+    await _assert_flow_not_locked(session, flow_id)
     flow = await _get_flow(session, flow_id)
 
     # 生成节点 ID 后做 DAG 校验
@@ -216,6 +235,52 @@ async def save_flow_graph(
         ))
     await session.commit()
     return await get_flow(flow_id, session, flow.owner_login_id)
+
+
+@router.post("/{flow_id}/copy", response_model=FlowDetailResponse)
+async def copy_flow(
+    flow_id: str,
+    session: AsyncSession = Depends(get_session),
+    login_id: str = Depends(require_role(Role.EDITOR)),
+):
+    """创建流程副本（锁定状态下也允许，副本不受原接口锁定约束）。"""
+    src_flow = await _get_flow(session, flow_id)
+    src_nodes = (await session.execute(
+        select(FlowNode).where(FlowNode.flow_id == flow_id)
+    )).scalars().all()
+    src_edges = (await session.execute(
+        select(FlowEdge).where(FlowEdge.flow_id == flow_id)
+    )).scalars().all()
+
+    new_flow = Flow(
+        id=gen_uuid(),
+        name=f"{src_flow.name} (副本)",
+        description=src_flow.description,
+        owner_login_id=login_id,
+        source="blank",
+    )
+    session.add(new_flow)
+
+    # node id 映射（旧 → 新）
+    id_map: dict[str, str] = {}
+    for n in src_nodes:
+        new_id = gen_uuid()
+        id_map[n.id] = new_id
+        session.add(FlowNode(
+            id=new_id, flow_id=new_flow.id,
+            node_type=n.node_type, block_id=n.block_id,
+            config=dict(n.config), position=dict(n.position),
+        ))
+    for e in src_edges:
+        session.add(FlowEdge(
+            flow_id=new_flow.id,
+            source_node_id=id_map.get(e.source_node_id, e.source_node_id),
+            target_node_id=id_map.get(e.target_node_id, e.target_node_id),
+            source_port=e.source_port, target_port=e.target_port,
+        ))
+
+    await session.commit()
+    return await get_flow(new_flow.id, session, login_id)
 
 
 @router.post("/{flow_id}/run")

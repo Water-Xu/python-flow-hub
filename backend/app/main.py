@@ -20,6 +20,7 @@ from app.api import (
     router_rbac,
     router_ws,
 )
+from app.api import router_api_portal, router_api_admin
 from app.config import get_settings
 from app.db import init_models
 from app.errors import BusinessException, business_exception_handler
@@ -64,6 +65,8 @@ app.include_router(router_execution.router)
 app.include_router(router_deployments.router)
 app.include_router(router_rbac.router)
 app.include_router(router_ws.router)
+app.include_router(router_api_portal.router)
+app.include_router(router_api_admin.router)
 
 configure_tracing(app)
 
