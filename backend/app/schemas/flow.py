@@ -34,6 +34,8 @@ class FlowGraphRequest(BaseModel):
 
     nodes: list[FlowNodeSchema] = []
     edges: list[FlowEdgeSchema] = []
+    # 单一 API 入口节点 ID（None 表示未指定，所有根节点均为入口）
+    entry_node_id: str | None = None
 
 
 class FlowResponse(BaseModel):
@@ -42,6 +44,7 @@ class FlowResponse(BaseModel):
     description: str
     owner_login_id: str
     source: str = "blank"
+    entry_node_id: str | None = None
     created_at: datetime
     updated_at: datetime
 

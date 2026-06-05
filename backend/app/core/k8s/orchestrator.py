@@ -23,8 +23,11 @@ from app.core.k8s.manifest_generator import (
     FlowConsumerSpec,
     capacity_precheck,
     deployment_name,
+    derive_max_replica,
     gcp_scope_precheck,
     gpu_precheck,
+    parse_cpu_millicores,
+    parse_mem_mib,
     render_block_manifests,
     render_flow_consumer_manifests,
 )
@@ -32,7 +35,7 @@ from app.errors import PYFLOW_K8S_DEPLOY_FAILED, BusinessException
 from app.models.api_portal import PublishedApi
 from app.models.block import Block
 from app.models.deployment import FlowDeployment
-from app.models.flow import FlowEdge, FlowNode
+from app.models.flow import Flow, FlowEdge, FlowNode
 from app.models.platform_env import PlatformEnv
 from app.models.version import BlockVersion
 from app.observability.logging import get_logger
@@ -200,6 +203,73 @@ async def list_block_resources(
     return rows
 
 
+async def flow_resource_summary(
+    session: AsyncSession, deployment: FlowDeployment
+) -> dict[str, Any]:
+    """Flow 维度资源汇总（决策 12）：各块均为独立 Pod，这里把它们的请求/上限累加，
+    对照 pyflow-workers 节点池可分配容量给出占用率与容量预检；并估算 KEDA 峰值上限。
+
+    注：块（invoke Service）为常驻副本（min≥1），按 request 计常驻占用；KEDA 实际作用于
+    每条 MQ 接口的 Flow-Consumer（0→N 按队列扩缩），其峰值由各块 limit×maxReplica 估算上界。
+    """
+    specs = await build_specs(session, deployment.flow_id)
+    merge_resource_overrides_into_specs(specs, deployment.resource_overrides or {})
+
+    pool_cpu_cores = settings.workers_pool_cpu_cores
+    pool_mem_mib = settings.workers_pool_mem_mib
+    pool_cpu_m = int(pool_cpu_cores * 1000)
+
+    req_cpu_m = req_mem_mib = lim_cpu_m = lim_mib = 0
+    peak_cpu_m = peak_mem_mib = 0
+    gpu_total = gpu_blocks = 0
+    blocks: list[dict[str, Any]] = []
+    for s in specs:
+        cc = s.compute_config or {}
+        b_req_cpu = parse_cpu_millicores(cc.get("cpu_request", "100m"), 100)
+        b_req_mem = parse_mem_mib(cc.get("memory_request", "256Mi"), 256)
+        b_lim_cpu = parse_cpu_millicores(cc.get("cpu_limit", "1000m"), 1000)
+        b_lim_mem = parse_mem_mib(cc.get("memory_limit", "1Gi"), 1024)
+        max_rep = derive_max_replica(
+            s, pool_cpu_cores=pool_cpu_cores, cap=settings.keda_max_replica_cap
+        )
+        req_cpu_m += b_req_cpu
+        req_mem_mib += b_req_mem
+        lim_cpu_m += b_lim_cpu
+        lim_mib += b_lim_mem
+        peak_cpu_m += b_lim_cpu * max_rep
+        peak_mem_mib += b_lim_mem * max_rep
+        if cc.get("gpu_enabled"):
+            gpu_blocks += 1
+            gpu_total += int(cc.get("gpu_count", 1))
+        blocks.append({
+            "block_id": s.block_id,
+            "name": s.name,
+            "gpu_enabled": bool(cc.get("gpu_enabled", False)),
+            "request": {"cpu_m": b_req_cpu, "mem_mib": b_req_mem},
+            "limit": {"cpu_m": b_lim_cpu, "mem_mib": b_lim_mem},
+            "max_replica": max_rep,
+        })
+
+    cap = capacity_precheck(
+        specs, pool_cpu_cores=pool_cpu_cores, pool_mem_mib=pool_mem_mib
+    )
+    return {
+        "block_count": len(specs),
+        "pool": {"name": "pyflow-workers", "cpu_m": pool_cpu_m, "mem_mib": pool_mem_mib},
+        "resident": {"cpu_m": req_cpu_m, "mem_mib": req_mem_mib},
+        "limit": {"cpu_m": lim_cpu_m, "mem_mib": lim_mib},
+        "keda_peak": {"cpu_m": peak_cpu_m, "mem_mib": peak_mem_mib},
+        "gpu": {"total": gpu_total, "block_count": gpu_blocks},
+        "usage": {
+            "cpu_pct": round(req_cpu_m / pool_cpu_m * 100, 1) if pool_cpu_m else 0,
+            "mem_pct": round(req_mem_mib / pool_mem_mib * 100, 1) if pool_mem_mib else 0,
+        },
+        "capacity_ok": cap.ok,
+        "capacity_reason": cap.reason,
+        "blocks": blocks,
+    }
+
+
 async def _resolve_images(specs: list[BlockDeploySpec]) -> None:
     """为每个 spec 解析依赖层镜像（命中缓存复用，否则触发 Cloud Build；dev 用基础镜像）。"""
     storage = get_storage()
@@ -311,7 +381,12 @@ async def build_flow_consumer_specs(
         }
         for e in edges
     ]
-    dag = {"nodes": dag_nodes, "edges": dag_edges}
+    flow_obj = await session.get(Flow, flow_id)
+    dag = {
+        "nodes": dag_nodes,
+        "edges": dag_edges,
+        "entry_node_id": flow_obj.entry_node_id if flow_obj else None,
+    }
 
     global_env = await load_global_env(session)
     consumer_env = {**global_env, **(deployment.env_vars or {})}

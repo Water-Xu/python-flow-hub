@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from app.config import Settings
 from app.core.k8s.manifest_generator import middleware_egress_rules
@@ -21,11 +22,45 @@ BLOCK_DB_ENV = "DATABASE_URL"
 BLOCK_MINIO_ENDPOINT_ENV = "MINIO_ENDPOINT"
 BLOCK_MINIO_AK_ENV = "MINIO_ACCESS_KEY"
 BLOCK_MINIO_SK_ENV = "MINIO_SECRET_KEY"
+# PostgreSQL 连接「组件」（libpq 标准变量，不固定库名 → 块可自行连任意库，决策：一账户多库）
+BLOCK_PGHOST_ENV = "PGHOST"
+BLOCK_PGPORT_ENV = "PGPORT"
+BLOCK_PGUSER_ENV = "PGUSER"
+BLOCK_PGPASSWORD_ENV = "PGPASSWORD"
+# 向量库 / 搜索 / 注册中心
+BLOCK_MILVUS_ENV = "MILVUS_URI"
+BLOCK_ES_ENV = "ELASTICSEARCH_URL"
+BLOCK_NACOS_ENV = "NACOS_SERVER_ADDR"
+
+
+def _parse_pg_components(dsn: str) -> dict[str, str]:
+    """从 SQLAlchemy DSN（postgresql+asyncpg://user:pwd@host:port/db）解出 libpq 组件。
+
+    仅取 user/password/host/port，**刻意不取库名**：块通过这些组件 + 自行指定 dbname
+    连接任意有权限的库（如 ai_outfit），而非被固定到 pyflow 库。
+    """
+    if not dsn:
+        return {}
+    parts = urlsplit(dsn)
+    out: dict[str, str] = {}
+    if parts.hostname:
+        out[BLOCK_PGHOST_ENV] = parts.hostname
+    out[BLOCK_PGPORT_ENV] = str(parts.port or 5432)
+    if parts.username:
+        out[BLOCK_PGUSER_ENV] = unquote(parts.username)
+    if parts.password:
+        out[BLOCK_PGPASSWORD_ENV] = unquote(parts.password)
+    return out
 
 
 def middleware_connection_map(settings: Settings) -> dict[str, str]:
-    """块可用的中间件连接（含敏感连接串）。"""
-    return {
+    """块可用的中间件连接（含敏感连接串）。
+
+    DATABASE_URL 仍提供（默认指向控制面 pyflow 库，便于开箱即用），但同时注入
+    PGHOST/PGPORT/PGUSER/PGPASSWORD 组件，块据此连接任意有权限的库（不固定库名）。
+    Milvus/ES/Nacos 仅在配置了对应连接时才注入。
+    """
+    conn: dict[str, str] = {
         BLOCK_REDIS_ENV: settings.effective_block_redis_url(),
         BLOCK_RABBITMQ_ENV: settings.effective_block_rabbitmq_url(),
         BLOCK_DB_ENV: settings.effective_block_db_dsn(),
@@ -33,6 +68,15 @@ def middleware_connection_map(settings: Settings) -> dict[str, str]:
         BLOCK_MINIO_AK_ENV: settings.effective_block_minio_access_key(),
         BLOCK_MINIO_SK_ENV: settings.effective_block_minio_secret_key(),
     }
+    conn.update(_parse_pg_components(settings.effective_block_db_dsn()))
+    # 可选中间件：仅在显式配置后注入
+    if settings.effective_block_milvus_uri():
+        conn[BLOCK_MILVUS_ENV] = settings.effective_block_milvus_uri()
+    if settings.effective_block_es_url():
+        conn[BLOCK_ES_ENV] = settings.effective_block_es_url()
+    if settings.effective_block_nacos_addr():
+        conn[BLOCK_NACOS_ENV] = settings.effective_block_nacos_addr()
+    return conn
 
 
 def build_middleware_secret(settings: Settings, namespace: str) -> dict[str, Any]:
@@ -100,18 +144,31 @@ def middleware_summary(settings: Settings) -> dict[str, Any]:
                 return f"{scheme}://{user}:***@{host}"
         return uri
 
+    pg = _parse_pg_components(settings.effective_block_db_dsn())
+    connections = [
+        {"env": BLOCK_REDIS_ENV, "value": mask(settings.effective_block_redis_url())},
+        {"env": BLOCK_RABBITMQ_ENV, "value": mask(settings.effective_block_rabbitmq_url())},
+        {"env": BLOCK_DB_ENV, "value": mask(settings.effective_block_db_dsn())},
+        {"env": BLOCK_PGHOST_ENV, "value": pg.get(BLOCK_PGHOST_ENV, "")},
+        {"env": BLOCK_PGPORT_ENV, "value": pg.get(BLOCK_PGPORT_ENV, "")},
+        {"env": BLOCK_PGUSER_ENV, "value": pg.get(BLOCK_PGUSER_ENV, "")},
+        {"env": BLOCK_PGPASSWORD_ENV, "value": "***" if pg.get(BLOCK_PGPASSWORD_ENV) else ""},
+        {"env": BLOCK_MINIO_ENDPOINT_ENV, "value": settings.effective_block_minio_endpoint()},
+        {"env": BLOCK_MINIO_AK_ENV, "value": settings.effective_block_minio_access_key()},
+        {"env": BLOCK_MINIO_SK_ENV, "value": "***"},
+    ]
+    # 可选中间件：配置后才展示
+    if settings.effective_block_milvus_uri():
+        connections.append({"env": BLOCK_MILVUS_ENV, "value": settings.effective_block_milvus_uri()})
+    if settings.effective_block_es_url():
+        connections.append({"env": BLOCK_ES_ENV, "value": settings.effective_block_es_url()})
+    if settings.effective_block_nacos_addr():
+        connections.append({"env": BLOCK_NACOS_ENV, "value": settings.effective_block_nacos_addr()})
     return {
         "inject_enabled": settings.block_inject_middleware,
         "secret_name": settings.block_middleware_secret,
         "middleware_namespace": settings.middleware_namespace,
         "ns_ports": parse_ns_ports(settings.middleware_ns_ports),
         "egress_cidrs": [f"{c}:{p}" for c, p in parse_egress_cidrs(settings.block_egress_cidrs)],
-        "connections": [
-            {"env": BLOCK_REDIS_ENV, "value": mask(settings.effective_block_redis_url())},
-            {"env": BLOCK_RABBITMQ_ENV, "value": mask(settings.effective_block_rabbitmq_url())},
-            {"env": BLOCK_DB_ENV, "value": mask(settings.effective_block_db_dsn())},
-            {"env": BLOCK_MINIO_ENDPOINT_ENV, "value": settings.effective_block_minio_endpoint()},
-            {"env": BLOCK_MINIO_AK_ENV, "value": settings.effective_block_minio_access_key()},
-            {"env": BLOCK_MINIO_SK_ENV, "value": "***"},
-        ],
+        "connections": connections,
     }

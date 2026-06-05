@@ -4,20 +4,25 @@ import { Handle, Position, useVueFlow } from '@vue-flow/core'
 
 const props = defineProps<{
   id: string
-  data: { label: string; mode?: string; entrypoint?: string; invalid?: boolean }
+  data: { label: string; mode?: string; entrypoint?: string; invalid?: boolean; is_entry?: boolean }
   selected?: boolean
 }>()
 const { removeNodes } = useVueFlow()
 
 // 无合法入口的脚本（如 pack.py）：置灰且禁用交互，不参与编排
 const isInvalid = computed(() => props.data?.invalid === true)
+// 流程单一 API 入口节点：高亮并展示「入口」徽标
+const isEntry = computed(() => props.data?.is_entry === true)
 </script>
 
 <template>
   <div
     class="block-node"
-    :class="{ 'is-selected': selected, 'is-invalid': isInvalid }"
+    :class="{ 'is-selected': selected, 'is-invalid': isInvalid, 'is-entry': isEntry }"
   >
+    <transition name="fn-pop">
+      <span v-if="isEntry" class="entry-badge" title="流程 API 入口节点">⇥ 入口</span>
+    </transition>
     <Handle type="target" :position="Position.Left" :connectable="!isInvalid" />
     <div class="node-icon">⬢</div>
     <div class="node-body">
@@ -68,6 +73,23 @@ const isInvalid = computed(() => props.data?.invalid === true)
 .block-node.is-selected {
   border-color: var(--pf-accent);
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25), var(--pf-shadow-md);
+}
+.block-node.is-entry {
+  border-left-color: #16a34a;
+  box-shadow: 0 0 0 2px rgba(22, 163, 74, 0.35), var(--pf-shadow-md);
+}
+.entry-badge {
+  position: absolute;
+  top: -10px;
+  left: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: #16a34a;
+  border-radius: 6px;
+  padding: 1px 7px;
+  box-shadow: var(--pf-shadow-sm);
+  letter-spacing: 0.3px;
 }
 .block-node.is-invalid {
   opacity: 0.45;

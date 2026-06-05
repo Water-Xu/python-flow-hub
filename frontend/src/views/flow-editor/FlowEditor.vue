@@ -51,6 +51,19 @@ const blocks = ref<Block[]>([])
 const running = ref(false)
 const elements = ref<any[]>([])
 
+// ─── 流程单一入口节点（指定后调用/部署/MQ 仅从该节点进入、执行其下游可达子图） ───
+const entryNodeId = ref<string | null>(null)
+
+/** 设置/取消流程入口节点，并同步刷新所有块节点的入口徽标 */
+function setEntryNode(nodeId: string | null) {
+  entryNodeId.value = nodeId
+  for (const el of elements.value) {
+    if (el?.data && (el.type === 'block')) {
+      el.data = { ...el.data, is_entry: el.id === nodeId }
+    }
+  }
+}
+
 // ─── 右键菜单（连线删除） ─────────────────────────────
 const ctxMenu = ref<{ visible: boolean; x: number; y: number; edgeId: string | null }>({
   visible: false, x: 0, y: 0, edgeId: null,
@@ -94,6 +107,7 @@ const cfgNodeLabel = ref('')
 const cfgEntrypoint = ref('run')
 const cfgEntrypoints = ref<Entrypoint[]>([])
 const cfgLoadingFns = ref(false)
+const cfgIsEntry = ref(false)
 
 // ─── 条件分支（if_else）配置抽屉 ────────────────────
 const condDrawer = ref(false)
@@ -209,6 +223,7 @@ async function openNodeConfig(node: any) {
   cfgNodeLabel.value = node.data?.label || '节点'
   cfgEntrypoint.value = node.data?.entrypoint || 'run'
   cfgEntrypoints.value = []
+  cfgIsEntry.value = entryNodeId.value === node.id
   nodeCfgDrawer.value = true
 
   const blockId = node.data?.block_id
@@ -235,6 +250,12 @@ function applyNodeConfig() {
   const node = findNode(cfgNodeId.value)
   if (node) {
     node.data = { ...node.data, entrypoint: cfgEntrypoint.value || 'run' }
+  }
+  // 流程入口节点：开启则设为本节点（互斥，自动清除其他节点）；关闭且当前为本节点则取消
+  if (cfgIsEntry.value) {
+    setEntryNode(cfgNodeId.value)
+  } else if (entryNodeId.value === cfgNodeId.value) {
+    setEntryNode(null)
   }
   nodeCfgDrawer.value = false
   ElMessage.success(`已设置入口函数：${cfgEntrypoint.value || 'run'}`)
@@ -303,9 +324,11 @@ async function load() {
         block_id:   n.block_id,
         entrypoint: n.config?.entrypoint || 'run',
         invalid:    blockInvalid,
+        is_entry:   flow.entry_node_id != null && flow.entry_node_id === n.id,
       },
     }
   })
+  entryNodeId.value = flow.entry_node_id ?? null
   const edges = (flow.edges || []).map((e: any) => ({
     id: e.id,
     source: e.source_node_id, target: e.target_node_id,
@@ -484,8 +507,11 @@ async function save() {
     source_port: e.sourceHandle || 'output',
     target_port: e.targetHandle || 'input',
   }))
-  await flowApi.saveGraph(flowId, nodes, edges)
-  ElMessage.success('已保存（DAG 无环校验通过）')
+  // 入口节点须仍存在于画布；否则置空（退化为所有根节点入口）
+  const savedIds = new Set(nodes.map((n: any) => n.id))
+  const entry = entryNodeId.value && savedIds.has(entryNodeId.value) ? entryNodeId.value : null
+  await flowApi.saveGraph(flowId, nodes, edges, entry)
+  ElMessage.success(entry ? '已保存（入口节点已记录，DAG 无环校验通过）' : '已保存（DAG 无环校验通过）')
 }
 
 async function run() {
@@ -666,6 +692,16 @@ onMounted(load)
           <p v-if="cfgEntrypoints.length" class="cfg-hint">
             共识别到 {{ cfgEntrypoints.length }} 个入口函数。同一块可在不同节点选用不同函数。
           </p>
+
+          <el-form-item label="流程入口节点" class="entry-cfg-item">
+            <div class="entry-row">
+              <el-switch v-model="cfgIsEntry" active-text="设为 API 入口" inline-prompt />
+            </div>
+            <p class="cfg-hint">
+              指定后，调用该流程的接口 / 部署 / MQ 将<strong>仅从本节点进入</strong>，
+              执行其下游可达子图；本节点上游与无关支路不参与执行。一条流程只能有一个入口（开启会自动取消其他节点）。
+            </p>
+          </el-form-item>
         </el-form>
         <div class="node-cfg-foot">
           <el-button @click="nodeCfgDrawer = false">取消</el-button>

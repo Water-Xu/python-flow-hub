@@ -21,6 +21,7 @@ from app.config import get_settings
 from app.core import crypto
 from app.core.execution_service import execute_block, execute_block_stream
 from app.core.flow.flow_runner import run_flow
+from pyflow_runtime.flow_dag import select_entry_subgraph
 from app.core.mq.invocation_doc import build_mq_invocation
 from app.db import get_session
 from app.errors import (
@@ -517,6 +518,7 @@ async def get_flow_entrypoints(
             "node_id": node.id,
             "block_id": block.id,
             "block_name": block.name,
+            "is_entry": flow.entry_node_id == node.id,
             "configured_entrypoint": (node.config or {}).get("entrypoint") or "run",
             "available_entrypoints": [
                 {"name": ep.get("name"), "description": ep.get("description", "")}
@@ -529,6 +531,7 @@ async def get_flow_entrypoints(
     return {
         "flow_id": flow_id,
         "flow_name": flow.name,
+        "entry_node_id": flow.entry_node_id,
         "nodes": nodes_info,
         "all_entrypoints": all_sorted,
         "has_multiple": len(all_names) > 1,
@@ -586,6 +589,12 @@ async def invoke_api(
          "source_port": e.source_port, "target_port": e.target_port}
         for e in edges_rows
     ]
+
+    # 指定了单一入口节点时，仅执行入口及其下游可达子图（入口独享 inputs）
+    flow_obj = await session.get(Flow, flow_id)
+    nodes, edges = select_entry_subgraph(
+        nodes, edges, flow_obj.entry_node_id if flow_obj else None
+    )
 
     # 一次 IN 查询批量装载所有块，避免按节点 N+1 逐个 session.get
     block_ids = {n["block_id"] for n in nodes if n.get("block_id")}
@@ -717,6 +726,12 @@ async def invoke_api_stream(
          "source_port": e.source_port, "target_port": e.target_port}
         for e in edges_rows
     ]
+
+    # 指定了单一入口节点时，仅执行入口及其下游可达子图（终止节点/块装载均基于裁剪后子图）
+    flow_obj = await session.get(Flow, flow_id)
+    nodes, edges = select_entry_subgraph(
+        nodes, edges, flow_obj.entry_node_id if flow_obj else None
+    )
 
     block_ids = {n["block_id"] for n in nodes if n.get("block_id")}
     block_cache: dict[str, Block] = {}

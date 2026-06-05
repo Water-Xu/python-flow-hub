@@ -26,6 +26,7 @@ async def run_flow(
     prior_outputs: dict[str, dict[str, Any]] | None = None,
     prior_active_ports: dict[str, str] | None = None,
     prior_skipped: set[str] | None = None,
+    entry_node_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """执行整流，返回 {node_id: output}（成环翻译为 PYFLOW_FLOW_DAG_INVALID）。"""
     try:
@@ -38,6 +39,7 @@ async def run_flow(
             prior_outputs=prior_outputs,
             prior_active_ports=prior_active_ports,
             prior_skipped=prior_skipped,
+            entry_node_id=entry_node_id,
         )
     except DagError as exc:
         raise BusinessException(PYFLOW_FLOW_DAG_INVALID, str(exc)) from exc

@@ -153,6 +153,17 @@ async def update_deployment_resources(
     return _dep_dict(dep)
 
 
+@router.get("/{deployment_id}/resource-summary")
+async def deployment_resource_summary(
+    deployment_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.VIEWER)),
+):
+    """Flow 维度资源汇总：各块（独立 Pod）请求/上限累加 + 节点池容量占用 + KEDA 峰值估算。"""
+    dep = await _get(session, deployment_id)
+    return await orchestrator.flow_resource_summary(session, dep)
+
+
 @router.post("/{deployment_id}/resources/precheck")
 async def precheck_deployment_resources(
     deployment_id: str,

@@ -80,6 +80,23 @@ onMounted(load)
         并按白名单放行 NetworkPolicy egress。块内 Python 代码按约定环境变量读取连接（如
         <code>os.environ["DATABASE_URL"]</code>）。
       </p>
+      <el-alert type="info" :closable="false" show-icon class="mw-db-tip">
+        <template #title>PostgreSQL 多库连接：连接串<b>不固定库名</b></template>
+        <div class="mw-db-body">
+          注入的是连接组件 <code>PGHOST</code> / <code>PGPORT</code> / <code>PGUSER</code> / <code>PGPASSWORD</code>，
+          块可连任意有权限的库（同一 <code>pyflow</code> 账户）。指定库的方式：
+          <pre class="mw-code"># 方式一：psycopg2 / asyncpg 直接读 libpq 环境变量，只传 dbname
+import os, psycopg2
+conn = psycopg2.connect(dbname="ai_outfit")   # host/user/pwd 自动取环境变量
+
+# 方式二：SQLAlchemy 自行拼 URL（把库名换成目标库）
+from sqlalchemy import create_engine
+url = f"postgresql+psycopg2://{os.environ['PGUSER']}:{os.environ['PGPASSWORD']}" \
+      f"@{os.environ['PGHOST']}:{os.environ['PGPORT']}/ai_outfit"
+engine = create_engine(url)</pre>
+          <code>DATABASE_URL</code> 仍保留（默认连控制面 <code>pyflow</code> 库），需要别的库时改用上面方式即可。
+        </div>
+      </el-alert>
 
       <div class="mw-grid">
         <div class="mw-section">
@@ -154,6 +171,20 @@ onMounted(load)
 .title-sub { font-weight: 400; font-size: 12px; }
 .mw-card { padding: 18px 22px; margin-bottom: 16px; animation: slide-up 0.35s ease both; }
 .mw-tip { margin: 0 0 14px; line-height: 1.7; }
+.mw-db-tip { margin: 0 0 14px; }
+.mw-db-body { line-height: 1.7; font-size: 12px; }
+.mw-db-body code { color: var(--pf-accent); background: var(--pf-accent-soft); padding: 1px 5px; border-radius: 3px; }
+.mw-code {
+  margin: 8px 0;
+  padding: 10px 12px;
+  background: var(--pf-code-bg, #1e1e2e);
+  color: #d4d4e8;
+  border-radius: 6px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+}
 .mw-tip code { color: var(--pf-accent); background: var(--pf-accent-soft); padding: 1px 5px; border-radius: 3px; }
 .mw-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 22px; }
 @media (max-width: 900px) { .mw-grid { grid-template-columns: 1fr; } }

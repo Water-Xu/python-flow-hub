@@ -21,7 +21,7 @@ from app.core.k8s.manifest_generator import BlockDeploySpec, DeployContext, depl
 from app.errors import PYFLOW_EXEC_SANDBOX_ERROR, BusinessException
 from app.models.block import Block
 from app.models.execution import FlowRun
-from app.models.flow import FlowEdge, FlowNode
+from app.models.flow import Flow, FlowEdge, FlowNode
 from app.observability.logging import get_logger
 
 logger = get_logger("pyflow.flow.k8s")
@@ -81,6 +81,8 @@ async def drive_flow_run(
         return {"status": run.status, "outputs": {}, "claimed": False}
 
     nodes, edges = await _load_graph(session, flow_id)
+    flow_obj = await session.get(Flow, flow_id)
+    entry_node_id = flow_obj.entry_node_id if flow_obj else None
 
     # 预取 block（resource_prefix 用于推导 service 名）
     ctx = DeployContext(namespace=namespace, resource_prefix=f"flow-{flow_id[:8]}")
@@ -143,6 +145,7 @@ async def drive_flow_run(
         outputs = await run_flow(
             nodes, edges, inputs, node_executor, checkpoint,
             prior_outputs=prior_outputs, prior_active_ports=prior_active, prior_skipped=prior_skipped,
+            entry_node_id=entry_node_id,
         )
         run.status = "succeeded"
     except Exception:

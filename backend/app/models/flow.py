@@ -18,6 +18,8 @@ class Flow(Base, UUIDMixin, TimestampMixin):
     stable_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     # 来源：blank（手工编排）| zip_import（压缩包导入）
     source: Mapped[str] = mapped_column(String(16), default="blank")
+    # 单一 API 入口节点 ID（指定后调用/部署/MQ 仅从该节点进入、执行其下游可达子图；空=所有根节点为入口）
+    entry_node_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     # 压缩包导入后的文件夹树：{name, kind: folder|block|resource, path, children?, block_id?, node_id?}
     tree: Mapped[dict] = mapped_column(JSON, default=dict)
     # 非 py 文件（资源）的文本内容：{相对路径: 文本}

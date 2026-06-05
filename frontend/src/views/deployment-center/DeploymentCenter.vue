@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watch, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deploymentApi, flowApi, type BlockResource } from '@/api'
+import { deploymentApi, flowApi, type BlockResource, type FlowResourceSummary } from '@/api'
 
 const deployments = ref<any[]>([])
 const flows = ref<any[]>([])
@@ -40,6 +40,58 @@ const gpuTypeOptions = ['nvidia-tesla-t4', 'nvidia-tesla-l4', 'nvidia-tesla-a100
 const livePrecheck = ref<any>(null)
 const livePrecheckLoading = ref(false)
 let precheckTimer: number | undefined
+
+// Flow 维度资源汇总（各块独立 Pod 累加 + 节点池占用 + KEDA 峰值）
+const resSummary = ref<FlowResourceSummary | null>(null)
+const resSummaryLoading = ref(false)
+
+// ── 资源估算小工具：按工作画像 + 数据量推荐 CPU/内存（默认值偏大，按需瘦身）──
+const estimatorOpen = ref(false)
+type EstProfile = 'io' | 'standard' | 'compute' | 'memory'
+const estProfile = ref<EstProfile>('io')
+const estDataMb = ref(10)
+const estProfiles: Record<EstProfile, { label: string; desc: string; cpuReq: number; cpuLim: number; memReq: number; memLim: number; memPerMb: number }> = {
+  // cpu 单位 m；mem 单位 Mi；memPerMb：每 MB 输入数据额外预留内存倍数（作用于 limit）
+  io:       { label: '轻量 IO', desc: '调用外部 API / 小数据转换，几乎不算', cpuReq: 50,  cpuLim: 250,  memReq: 64,  memLim: 192, memPerMb: 1.5 },
+  standard: { label: '标准',    desc: 'pandas 小表 / 一般业务计算',          cpuReq: 100, cpuLim: 500,  memReq: 128, memLim: 384, memPerMb: 2.5 },
+  compute:  { label: '计算密集', desc: '大量 CPU 运算 / 循环 / 编解码',       cpuReq: 250, cpuLim: 1000, memReq: 256, memLim: 512, memPerMb: 2.0 },
+  memory:   { label: '内存密集', desc: '大数据集 / 向量 / 模型加载',          cpuReq: 150, cpuLim: 600,  memReq: 256, memLim: 768, memPerMb: 4.0 },
+}
+
+function roundMem(mib: number): number {
+  // 向上取整到 32Mi 的倍数，避免奇怪的内存值
+  return Math.max(64, Math.ceil(mib / 32) * 32)
+}
+
+const estResult = computed(() => {
+  const p = estProfiles[estProfile.value]
+  const data = Math.max(0, Number(estDataMb.value) || 0)
+  const memLim = roundMem(p.memLim + data * p.memPerMb)
+  const memReq = roundMem(Math.min(p.memReq + data * (p.memPerMb / 2), memLim))
+  return {
+    cpu_request: `${p.cpuReq}m`,
+    cpu_limit: `${p.cpuLim}m`,
+    memory_request: `${memReq}Mi`,
+    memory_limit: `${memLim}Mi`,
+  }
+})
+
+function applyEstimate(r: ResourceRow) {
+  const e = estResult.value
+  r.cpu_request = e.cpu_request
+  r.cpu_limit = e.cpu_limit
+  r.memory_request = e.memory_request
+  r.memory_limit = e.memory_limit
+}
+
+function applyEstimateToAll() {
+  for (const r of resourceRows.value) {
+    if (r.gpu_enabled) continue
+    applyEstimate(r)
+  }
+  estimatorOpen.value = false
+  ElMessage.success(`已按「${estProfiles[estProfile.value].label}」画像应用到 ${resourceRows.value.filter((r) => !r.gpu_enabled).length} 个块`)
+}
 
 let timer: number | undefined
 
@@ -166,10 +218,23 @@ async function loadResources() {
       gpu_type: r.effective.gpu_type,
     }))
     runLivePrecheck()
+    loadResSummary()
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '加载资源配置失败')
   } finally {
     resourceLoading.value = false
+  }
+}
+
+async function loadResSummary() {
+  if (!detail.value) return
+  resSummaryLoading.value = true
+  try {
+    resSummary.value = await deploymentApi.resourceSummary(detail.value.id)
+  } catch {
+    resSummary.value = null
+  } finally {
+    resSummaryLoading.value = false
   }
 }
 
@@ -295,6 +360,7 @@ async function openDetail(row: any) {
   manifests.value = []
   resourceRows.value = []
   livePrecheck.value = null
+  resSummary.value = null
   loadEnvRows(row)
   if (row.environment === 'k8s') {
     try {
@@ -448,13 +514,93 @@ onBeforeUnmount(() => timer && clearInterval(timer))
           </div>
         </el-tab-pane>
         <el-tab-pane label="资源配置" name="resources">
+          <!-- Flow 维度资源汇总：各块独立 Pod 累加 + 节点池占用 + KEDA 峰值 -->
+          <transition name="banner-fade">
+            <div v-if="resSummary" class="flow-sum" v-loading="resSummaryLoading">
+              <div class="flow-sum-head">
+                <span class="flow-sum-title">⛁ Flow 资源汇总</span>
+                <span class="dim">{{ resSummary.block_count }} 个块 · 各自独立 Pod（{{ resSummary.pool.name }} 节点池）</span>
+                <el-tag
+                  size="small"
+                  :type="resSummary.capacity_ok ? 'success' : 'danger'"
+                  effect="dark"
+                >{{ resSummary.capacity_ok ? '容量充足' : '容量不足' }}</el-tag>
+              </div>
+              <div class="flow-sum-bars">
+                <div class="cap-metric">
+                  <div class="cap-metric-head">
+                    <span>常驻 CPU 请求</span>
+                    <span class="dim">{{ cores(resSummary.resident.cpu_m) }} / {{ cores(resSummary.pool.cpu_m) }}（{{ resSummary.usage.cpu_pct }}%）</span>
+                  </div>
+                  <el-progress
+                    :percentage="Math.min(100, Math.round(resSummary.usage.cpu_pct))"
+                    :status="resSummary.usage.cpu_pct > 100 ? 'exception' : 'success'"
+                    :stroke-width="10"
+                  />
+                </div>
+                <div class="cap-metric">
+                  <div class="cap-metric-head">
+                    <span>常驻内存 请求</span>
+                    <span class="dim">{{ mib(resSummary.resident.mem_mib) }} / {{ mib(resSummary.pool.mem_mib) }}（{{ resSummary.usage.mem_pct }}%）</span>
+                  </div>
+                  <el-progress
+                    :percentage="Math.min(100, Math.round(resSummary.usage.mem_pct))"
+                    :status="resSummary.usage.mem_pct > 100 ? 'exception' : 'success'"
+                    :stroke-width="10"
+                  />
+                </div>
+              </div>
+              <div class="flow-sum-stats">
+                <span>上限合计：<b>{{ cores(resSummary.limit.cpu_m) }} / {{ mib(resSummary.limit.mem_mib) }}</b></span>
+                <span>KEDA 峰值上界：<b>{{ cores(resSummary.keda_peak.cpu_m) }} / {{ mib(resSummary.keda_peak.mem_mib) }}</b></span>
+                <span v-if="resSummary.gpu.block_count">GPU：<b>{{ resSummary.gpu.total }} 卡 / {{ resSummary.gpu.block_count }} 块</b></span>
+              </div>
+              <p class="dim flow-sum-tip">
+                常驻请求为容量闸门（各块 min≥1 副本按 request 累加）；KEDA 仅作用于各 MQ 接口的 Flow-Consumer（0→N 按队列扩缩），峰值上界按各块 limit×maxReplica 估算，不计入常驻。
+              </p>
+            </div>
+          </transition>
+
           <div class="res-head">
             <p class="dim res-tip">
               按 Block（每个 Block 对应一个 Pod/Deployment）配置 CPU / 内存请求与上限，覆盖块默认值，仅作用于本部署，下次部署生效。
             </p>
-            <el-button size="small" :loading="resourceLoading" @click="loadResources">
-              <el-icon><Refresh /></el-icon> 刷新
-            </el-button>
+            <div class="res-head-actions">
+              <el-popover v-model:visible="estimatorOpen" placement="bottom-end" :width="340" trigger="click">
+                <template #reference>
+                  <el-button size="small" type="primary" plain>
+                    <el-icon style="margin-right:4px"><MagicStick /></el-icon> 资源估算器
+                  </el-button>
+                </template>
+                <div class="est-pop">
+                  <div class="est-title">按工作画像估算推荐资源</div>
+                  <div class="est-field">
+                    <label>工作画像</label>
+                    <el-radio-group v-model="estProfile" size="small">
+                      <el-radio-button v-for="(p, k) in estProfiles" :key="k" :value="k">{{ p.label }}</el-radio-button>
+                    </el-radio-group>
+                    <p class="est-desc">{{ estProfiles[estProfile].desc }}</p>
+                  </div>
+                  <div class="est-field">
+                    <label>单次输入数据量：{{ estDataMb }} MB</label>
+                    <el-slider v-model="estDataMb" :min="0" :max="500" :step="5" />
+                  </div>
+                  <div class="est-result">
+                    <div class="est-cell"><span>CPU 请求</span><b>{{ estResult.cpu_request }}</b></div>
+                    <div class="est-cell"><span>CPU 上限</span><b>{{ estResult.cpu_limit }}</b></div>
+                    <div class="est-cell"><span>内存 请求</span><b>{{ estResult.memory_request }}</b></div>
+                    <div class="est-cell"><span>内存 上限</span><b>{{ estResult.memory_limit }}</b></div>
+                  </div>
+                  <p class="est-hint">并发由 KEDA 横向扩副本承担，单 Pod 资源按「一次调用」估算即可。GPU 块不受影响。</p>
+                  <el-button type="primary" size="small" style="width:100%" @click="applyEstimateToAll">
+                    应用到全部块
+                  </el-button>
+                </div>
+              </el-popover>
+              <el-button size="small" :loading="resourceLoading" @click="loadResources">
+                <el-icon><Refresh /></el-icon> 刷新
+              </el-button>
+            </div>
           </div>
 
           <!-- 实时容量预检横幅 -->
@@ -510,6 +656,9 @@ onBeforeUnmount(() => timer && clearInterval(timer))
               <div class="res-card-head">
                 <span class="res-name">{{ r.name }}</span>
                 <el-tag size="small" effect="plain" type="info">invoke</el-tag>
+                <el-button v-if="!r.gpu_enabled" class="res-reset" link size="small" @click="applyEstimate(r)">
+                  <el-icon><MagicStick /></el-icon> 套用估算
+                </el-button>
                 <el-button class="res-reset" link size="small" @click="resetResourceRow(r)">
                   <el-icon><RefreshLeft /></el-icon> 恢复默认
                 </el-button>
@@ -607,6 +756,26 @@ onBeforeUnmount(() => timer && clearInterval(timer))
   margin-bottom: 12px;
 }
 .res-tip { margin: 0; line-height: 1.6; flex: 1; }
+.res-head-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
+/* ── 资源估算器 popover ── */
+.est-pop { display: flex; flex-direction: column; gap: 12px; }
+.est-title { font-weight: 600; font-size: 13px; }
+.est-field { display: flex; flex-direction: column; gap: 6px; }
+.est-field > label { font-size: 12px; color: var(--el-text-color-secondary, #909399); }
+.est-desc { margin: 0; font-size: 11px; color: var(--el-text-color-secondary, #909399); line-height: 1.4; }
+.est-result {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--el-fill-color-light, #f5f7fa);
+}
+.est-cell { display: flex; flex-direction: column; gap: 2px; }
+.est-cell > span { font-size: 11px; color: var(--el-text-color-secondary, #909399); }
+.est-cell > b { font-size: 14px; font-variant-numeric: tabular-nums; color: var(--el-color-primary, #409eff); }
+.est-hint { margin: 0; font-size: 11px; line-height: 1.5; color: var(--el-text-color-secondary, #909399); }
 .res-card {
   border: 1px solid var(--el-border-color-lighter, #ebeef5);
   border-radius: 10px;
@@ -644,6 +813,38 @@ onBeforeUnmount(() => timer && clearInterval(timer))
 }
 .res-gpu-label { font-size: 13px; color: var(--pf-text-dim, #909399); }
 .res-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+/* Flow 资源汇总卡片 */
+.flow-sum {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--el-border-color, #e4e7ed);
+  border-radius: 10px;
+  background: var(--el-fill-color-light, #f5f7fa);
+}
+.flow-sum-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.flow-sum-title { font-weight: 700; font-size: 14px; }
+.flow-sum-bars {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.flow-sum-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.flow-sum-stats b { font-weight: 700; }
+.flow-sum-tip { margin: 8px 0 0; font-size: 11px; line-height: 1.5; }
+@media (max-width: 640px) {
+  .flow-sum-bars { grid-template-columns: 1fr; }
+}
 /* 实时容量预检横幅 */
 .cap-banner { margin-bottom: 14px; }
 .cap-bars {

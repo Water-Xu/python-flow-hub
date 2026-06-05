@@ -229,6 +229,13 @@ const showEntrypointSelector = computed(
   () => flowEntrypointsInfo.value?.has_multiple === true,
 )
 
+/** 流程已指定的单一 API 入口节点（在流程编辑器中标记），用于发布对话框提示 */
+const entryNodeName = computed(() => {
+  const info = flowEntrypointsInfo.value
+  if (!info?.entry_node_id) return null
+  return info.nodes.find((n) => n.node_id === info.entry_node_id)?.block_name ?? null
+})
+
 async function load() {
   loading.value = true
   try {
@@ -610,7 +617,22 @@ onMounted(load)
           <el-form-item v-if="form.flow_id" label="入口函数">
             <div v-if="entrypointsLoading" class="ep-hint">正在读取流程函数列表…</div>
 
-            <template v-else-if="showEntrypointSelector && flowEntrypointsInfo">
+            <el-alert
+              v-else-if="entryNodeName"
+              class="ep-entry-banner"
+              type="success"
+              :closable="false"
+              show-icon
+            >
+              <template #title>
+                调用本接口将从入口节点 <strong>{{ entryNodeName }}</strong> 进入，仅执行其下游可达子图（已在流程编辑器中指定）。
+              </template>
+            </el-alert>
+            <div v-else-if="flowEntrypointsInfo" class="ep-hint ep-no-entry">
+              未指定单一入口节点：调用将从所有「无上游」的根节点同时进入。可在流程编辑器中双击某节点设为 API 入口。
+            </div>
+
+            <template v-if="showEntrypointSelector && flowEntrypointsInfo">
               <div class="ep-hint">
                 该流程含 <strong>{{ flowEntrypointsInfo.nodes.length }}</strong> 个调用块，
                 可为每个块单独指定要调用的入口函数（默认沿用节点配置）。
@@ -1148,6 +1170,14 @@ onMounted(load)
   color: var(--pf-text-dim);
   margin-top: 5px;
   line-height: 1.5;
+}
+.ep-entry-banner {
+  margin-bottom: 8px;
+}
+.ep-no-entry {
+  padding: 6px 10px;
+  background: var(--pf-panel-2);
+  border-radius: 6px;
 }
 .ep-hint code {
   background: var(--pf-panel-2);

@@ -56,6 +56,45 @@ def validate_dag(nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> No
     topological_order(nodes, edges)
 
 
+def select_entry_subgraph(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    entry_node_id: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """指定入口节点时，仅保留「从入口正向可达」的子图，使入口成为唯一根（独享 initial_inputs）。
+
+    入口为空或不在节点集合中（兼容历史数据/未配置）时原样返回：此时退化为旧行为，
+    所有无入边的根节点均视为入口、各自接收 initial_inputs。
+    """
+    if not entry_node_id:
+        return nodes, edges
+    node_ids = {n["id"] for n in nodes}
+    if entry_node_id not in node_ids:
+        return nodes, edges
+
+    adj: dict[str, list[str]] = defaultdict(list)
+    for e in edges:
+        adj[e["source_node_id"]].append(e["target_node_id"])
+
+    reachable: set[str] = set()
+    stack = [entry_node_id]
+    while stack:
+        cur = stack.pop()
+        if cur in reachable:
+            continue
+        reachable.add(cur)
+        for nxt in adj.get(cur, []):
+            if nxt not in reachable:
+                stack.append(nxt)
+
+    sub_nodes = [n for n in nodes if n["id"] in reachable]
+    sub_edges = [
+        e for e in edges
+        if e["source_node_id"] in reachable and e["target_node_id"] in reachable
+    ]
+    return sub_nodes, sub_edges
+
+
 def resolve_branch(node_config: dict[str, Any], payload: dict[str, Any]) -> str:
     """对条件分支节点求值，返回命中的输出端口名。"""
     subtype = node_config.get("subtype", "if_else")
@@ -85,12 +124,17 @@ async def run_flow(
     prior_outputs: dict[str, dict[str, Any]] | None = None,
     prior_active_ports: dict[str, str] | None = None,
     prior_skipped: set[str] | None = None,
+    entry_node_id: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """执行整流，返回 {node_id: output}。
 
     续跑（决策 10，4a 多副本）：传入 prior_* 还原已完成节点的输出 / 分支决策 / 跳过集合，
     已完成节点不重跑（其下游幂等 key 含 run_id:node_id）。
+
+    入口节点（entry_node_id）：指定后仅执行「入口及其下游可达子图」，入口独享 initial_inputs，
+    其上游与无关支路不参与执行（决策：一条 Flow 单一 API 入口）。
     """
+    nodes, edges = select_entry_subgraph(nodes, edges, entry_node_id)
     order = topological_order(nodes, edges)
     node_map = {n["id"]: n for n in nodes}
 

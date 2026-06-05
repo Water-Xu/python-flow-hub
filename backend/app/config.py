@@ -80,10 +80,14 @@ class Settings(BaseSettings):
     block_minio_endpoint: str = ""
     block_minio_access_key: str = ""
     block_minio_secret_key: str = ""
-    # 中间件（RabbitMQ/MinIO/ES/Nacos）所在命名空间（pyflow 跨 ns 访问需放行）
+    # 向量库 / 搜索 / 注册中心（空字符串表示不注入该中间件；值走 Secret，不入 git）
+    block_milvus_uri: str = ""               # 如 http://milvus.lhy-styon:19530
+    block_es_url: str = ""                    # 如 http://elasticsearch.lhy-styon:9200
+    block_nacos_addr: str = ""                # 如 nacos-registry.lhy-styon:8848
+    # 中间件（RabbitMQ/MinIO/ES/Nacos/Milvus）所在命名空间（pyflow 跨 ns 访问需放行）
     middleware_namespace: str = "lhy-styon"
-    # 命名空间内放行的中间件端口（逗号分隔）：amqp/mgmt/minio/minio-console/es/nacos
-    middleware_ns_ports: str = "5672,15672,9000,9001,9200,8848"
+    # 命名空间内放行的中间件端口（逗号分隔）：amqp/mgmt/minio/minio-console/es/nacos/milvus-grpc
+    middleware_ns_ports: str = "5672,15672,9000,9001,9200,8848,19530"
     # VPC 私网中间件 egress 白名单（Memorystore Redis / Cloud SQL 等，cidr:port 逗号分隔）
     # 例：10.0.1.0/24:6379,10.196.0.3/32:5432
     block_egress_cidrs: str = "10.0.1.0/24:6379,10.196.0.3/32:5432"
@@ -107,6 +111,15 @@ class Settings(BaseSettings):
 
     def effective_block_minio_secret_key(self) -> str:
         return self.block_minio_secret_key or self.minio_secret_key
+
+    def effective_block_milvus_uri(self) -> str:
+        return self.block_milvus_uri
+
+    def effective_block_es_url(self) -> str:
+        return self.block_es_url
+
+    def effective_block_nacos_addr(self) -> str:
+        return self.block_nacos_addr
 
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "minioadmin"

@@ -140,6 +140,7 @@ def make_flow_execute_fn(dag: dict):
 
     nodes = dag.get("nodes", [])
     edges = dag.get("edges", [])
+    entry_node_id = dag.get("entry_node_id")
 
     async def node_executor(node: dict, node_inputs: dict) -> dict:
         service = node.get("service")
@@ -149,7 +150,7 @@ def make_flow_execute_fn(dag: dict):
         return await _invoke_block_service(service, node_inputs, entrypoint)
 
     async def _execute(inputs: dict) -> dict:
-        return await run_flow(nodes, edges, inputs, node_executor)
+        return await run_flow(nodes, edges, inputs, node_executor, entry_node_id=entry_node_id)
 
     return _execute
 

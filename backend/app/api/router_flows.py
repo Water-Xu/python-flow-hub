@@ -289,6 +289,10 @@ async def save_flow_graph(
     edges_in = [e.model_dump() for e in req.edges]
     validate_dag([{"id": n["id"]} for n in nodes_in], edges_in)
 
+    # 入口节点：必须是画布上的已知节点，否则置空（退化为所有根节点入口）
+    node_ids = {n["id"] for n in nodes_in}
+    flow.entry_node_id = req.entry_node_id if req.entry_node_id in node_ids else None
+
     # 全量替换
     await session.execute(delete(FlowNode).where(FlowNode.flow_id == flow_id))
     await session.execute(delete(FlowEdge).where(FlowEdge.flow_id == flow_id))
@@ -350,6 +354,10 @@ async def copy_flow(
             target_node_id=id_map.get(e.target_node_id, e.target_node_id),
             source_port=e.source_port, target_port=e.target_port,
         ))
+
+    # 入口节点随节点 ID 重映射一并复制
+    if src_flow.entry_node_id:
+        new_flow.entry_node_id = id_map.get(src_flow.entry_node_id)
 
     await session.commit()
     return await get_flow(new_flow.id, session, login_id)
@@ -431,7 +439,10 @@ async def run_flow_endpoint(
         await session.commit()
 
     try:
-        outputs = await run_flow(nodes, edges, req.inputs, node_executor, checkpoint)
+        outputs = await run_flow(
+            nodes, edges, req.inputs, node_executor, checkpoint,
+            entry_node_id=flow.entry_node_id,
+        )
         flow_run.status = "succeeded"
     except Exception:
         flow_run.status = "failed"

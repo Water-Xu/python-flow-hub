@@ -78,8 +78,8 @@ export const flowApi = {
   get: (id: string) => client.get<any, any>(`/api/flows/${id}`),
   create: (data: { name: string; description?: string }) => client.post('/api/flows', data),
   remove: (id: string) => client.delete(`/api/flows/${id}`),
-  saveGraph: (id: string, nodes: any[], edges: any[]) =>
-    client.put(`/api/flows/${id}/graph`, { nodes, edges }),
+  saveGraph: (id: string, nodes: any[], edges: any[], entry_node_id?: string | null) =>
+    client.put(`/api/flows/${id}/graph`, { nodes, edges, entry_node_id: entry_node_id ?? null }),
   run: (id: string, inputs: Record<string, any>) => client.post(`/api/flows/${id}/run`, { inputs }),
   importZip: (file: File, name?: string) => {
     const data = new FormData()
@@ -129,6 +129,29 @@ export const deploymentApi = {
   /** 对未保存的资源覆盖做实时容量/GPU 预检（编辑时即时反馈，不落库） */
   precheckResources: (id: string, resource_overrides: Record<string, BlockResourceSpec>) =>
     client.post<any, any>(`/api/deployments/${id}/resources/precheck`, { resource_overrides }),
+  /** Flow 维度资源汇总（各块独立 Pod 请求/上限累加 + 节点池占用 + KEDA 峰值估算） */
+  resourceSummary: (id: string) =>
+    client.get<any, FlowResourceSummary>(`/api/deployments/${id}/resource-summary`),
+}
+
+export interface FlowResourceSummary {
+  block_count: number
+  pool: { name: string; cpu_m: number; mem_mib: number }
+  resident: { cpu_m: number; mem_mib: number }
+  limit: { cpu_m: number; mem_mib: number }
+  keda_peak: { cpu_m: number; mem_mib: number }
+  gpu: { total: number; block_count: number }
+  usage: { cpu_pct: number; mem_pct: number }
+  capacity_ok: boolean
+  capacity_reason: string
+  blocks: Array<{
+    block_id: string
+    name: string
+    gpu_enabled: boolean
+    request: { cpu_m: number; mem_mib: number }
+    limit: { cpu_m: number; mem_mib: number }
+    max_replica: number
+  }>
 }
 
 export interface BlockResourceSpec {
@@ -243,12 +266,14 @@ export interface ApiEncryptionKey {
 export interface FlowEntrypointsInfo {
   flow_id: string
   flow_name: string
+  entry_node_id: string | null
   all_entrypoints: string[]
   has_multiple: boolean
   nodes: Array<{
     node_id: string
     block_id: string
     block_name: string
+    is_entry: boolean
     configured_entrypoint: string
     available_entrypoints: Array<{ name: string; description: string }>
   }>

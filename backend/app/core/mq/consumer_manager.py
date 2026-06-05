@@ -344,7 +344,8 @@ class ConsumerManager:
         from app.models.api_portal import PublishedApi
         from app.models.block import Block
         from app.models.execution import FlowRun
-        from app.models.flow import FlowEdge, FlowNode
+        from app.models.flow import Flow, FlowEdge, FlowNode
+        from pyflow_runtime.flow_dag import select_entry_subgraph
         from sqlalchemy import select
 
         async with get_session_factory()() as session:
@@ -352,6 +353,7 @@ class ConsumerManager:
             if api is None:
                 raise RuntimeError(f"published api not found: {api_id}")
             flow_id = api.active_flow_id or api.flow_id
+            flow_obj = await session.get(Flow, flow_id)
 
             nodes = [
                 {"id": n.id, "node_type": n.node_type, "block_id": n.block_id,
@@ -368,6 +370,11 @@ class ConsumerManager:
                     select(FlowEdge).where(FlowEdge.flow_id == flow_id)
                 )).scalars().all()
             ]
+
+            # 指定了单一入口节点时，仅执行入口及其下游可达子图（快照亦存裁剪后图）
+            nodes, edges = select_entry_subgraph(
+                nodes, edges, flow_obj.entry_node_id if flow_obj else None
+            )
 
             flow_run = FlowRun(
                 flow_id=flow_id, status="running",
