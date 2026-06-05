@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 class FlowNodeSchema(BaseModel):
     id: str | None = None
-    node_type: Literal["block", "condition_branch", "input"] = "block"
+    node_type: Literal["block", "condition_branch", "input", "note"] = "block"
     block_id: str | None = None
     config: dict[str, Any] = {}
     position: dict[str, float] = {}

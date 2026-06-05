@@ -28,7 +28,7 @@ class FlowNode(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "pyflow_flow_node"
 
     flow_id: Mapped[str] = mapped_column(String(36), ForeignKey("pyflow_flow.id"), index=True)
-    # block | condition_branch
+    # block | condition_branch | input | note（纯视觉便签，不参与执行）
     node_type: Mapped[str] = mapped_column(String(32), default="block")
     block_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     # 画布坐标 / 分支配置等

@@ -123,6 +123,11 @@ async def run_flow(
 
         node_inputs = _gather_inputs(incoming, outputs, initial_inputs)
 
+        # 注释便签节点（纯视觉）：无连线，无输出，直接跳过不参与执行
+        if node.get("node_type") == "note":
+            skipped.add(node_id)
+            continue
+
         # 测试输入节点：不执行代码，仅把配置的键值作为输出向下游注入
         if node.get("node_type") == "input":
             outputs[node_id] = _input_payload(node.get("config", {}))
