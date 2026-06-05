@@ -37,6 +37,7 @@ const ERROR_CODE_MESSAGES: Record<number, string> = {
   51802: '沙箱执行失败',
   51803: 'K8s 部署失败',
   51804: '消息发布失败',
+  51805: '存储服务异常，请稍后重试',
 }
 
 function friendlyMessage(data: any, fallback: string): string {

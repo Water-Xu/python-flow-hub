@@ -33,6 +33,7 @@ PYFLOW_EXEC_TIMEOUT = (51801, "lang.pyflow.exec.timeout")
 PYFLOW_EXEC_SANDBOX_ERROR = (51802, "lang.pyflow.exec.sandbox_error")
 PYFLOW_K8S_DEPLOY_FAILED = (51803, "lang.pyflow.k8s.deploy_failed")
 PYFLOW_MQ_PUBLISH_FAILED = (51804, "lang.pyflow.mq.publish_failed")
+PYFLOW_STORAGE_ERROR = (51805, "lang.pyflow.storage.error")
 
 
 class BusinessException(Exception):

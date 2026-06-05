@@ -13,9 +13,16 @@ import io
 from typing import Protocol
 
 from app.config import get_settings
+from app.errors import PYFLOW_STORAGE_ERROR, BusinessException
 from app.observability.logging import get_logger
 
 logger = get_logger("pyflow.storage")
+
+
+def _wrap_s3_error(exc: Exception) -> BusinessException:
+    """将 MinIO S3Error / 网络异常包装成 BusinessException，避免裸 500。"""
+    logger.error("minio_error", error=str(exc))
+    return BusinessException(PYFLOW_STORAGE_ERROR, f"object storage error: {exc}")
 
 
 def sha256_hex(data: bytes) -> str:
@@ -47,36 +54,58 @@ class MinioStorage:
     def _ensure_client(self):
         if self._client is None:
             from minio import Minio
+            from minio.error import S3Error
 
-            self._client = Minio(
-                self._settings.minio_endpoint,
-                access_key=self._settings.minio_access_key,
-                secret_key=self._settings.minio_secret_key,
-                secure=self._settings.minio_secure,
-            )
-            if not self._client.bucket_exists(self._bucket):
-                self._client.make_bucket(self._bucket)
+            try:
+                self._client = Minio(
+                    self._settings.minio_endpoint,
+                    access_key=self._settings.minio_access_key,
+                    secret_key=self._settings.minio_secret_key,
+                    secure=self._settings.minio_secure,
+                )
+                if not self._client.bucket_exists(self._bucket):
+                    self._client.make_bucket(self._bucket)
+            except S3Error as exc:
+                self._client = None
+                raise _wrap_s3_error(exc) from exc
+            except Exception as exc:
+                self._client = None
+                raise _wrap_s3_error(exc) from exc
         return self._client
 
     async def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
         def _do() -> str:
-            client = self._ensure_client()
-            result = client.put_object(
-                self._bucket, key, io.BytesIO(data), length=len(data), content_type=content_type
-            )
-            return result.etag
+            from minio.error import S3Error
+
+            try:
+                client = self._ensure_client()
+                result = client.put_object(
+                    self._bucket, key, io.BytesIO(data), length=len(data), content_type=content_type
+                )
+                return result.etag
+            except BusinessException:
+                raise
+            except S3Error as exc:
+                raise _wrap_s3_error(exc) from exc
 
         return await asyncio.to_thread(_do)
 
     async def get(self, key: str) -> bytes:
         def _do() -> bytes:
-            client = self._ensure_client()
-            resp = client.get_object(self._bucket, key)
+            from minio.error import S3Error
+
             try:
-                return resp.read()
-            finally:
-                resp.close()
-                resp.release_conn()
+                client = self._ensure_client()
+                resp = client.get_object(self._bucket, key)
+                try:
+                    return resp.read()
+                finally:
+                    resp.close()
+                    resp.release_conn()
+            except BusinessException:
+                raise
+            except S3Error as exc:
+                raise _wrap_s3_error(exc) from exc
 
         return await asyncio.to_thread(_do)
 
@@ -95,15 +124,29 @@ class MinioStorage:
 
     async def delete(self, key: str) -> None:
         def _do() -> None:
-            client = self._ensure_client()
-            client.remove_object(self._bucket, key)
+            from minio.error import S3Error
+
+            try:
+                client = self._ensure_client()
+                client.remove_object(self._bucket, key)
+            except BusinessException:
+                raise
+            except S3Error as exc:
+                raise _wrap_s3_error(exc) from exc
 
         await asyncio.to_thread(_do)
 
     async def list_keys(self, prefix: str) -> list[str]:
         def _do() -> list[str]:
-            client = self._ensure_client()
-            return [obj.object_name for obj in client.list_objects(self._bucket, prefix=prefix, recursive=True)]
+            from minio.error import S3Error
+
+            try:
+                client = self._ensure_client()
+                return [obj.object_name for obj in client.list_objects(self._bucket, prefix=prefix, recursive=True)]
+            except BusinessException:
+                raise
+            except S3Error as exc:
+                raise _wrap_s3_error(exc) from exc
 
         return await asyncio.to_thread(_do)
 
