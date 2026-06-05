@@ -100,6 +100,9 @@ class DeployContext:
     inject_middleware: bool = False
     middleware_secret: str = ""              # 共享中间件连接 Secret 名（空=不注入 envFrom）
     middleware_egress: list[dict[str, Any]] = field(default_factory=list)
+    # MinIO 对象存储：endpoint/ak/sk 由中间件 Secret 注入，bucket/secure 随 Deployment 注入（runner 启动拉代码）
+    minio_bucket: str = "pyflow-versions"
+    minio_secure: bool = False
 
     def ksa_for(self, block_type: str) -> str:
         if block_type == "gcp_bigquery":
@@ -212,6 +215,9 @@ def build_deployment(spec: BlockDeploySpec, ctx: DeployContext, *, min_replicas:
         {"name": "PYFLOW_CODE_PATH", "value": spec.code_path},
         {"name": "PYFLOW_PROTOCOL_VERSION", "value": RUNTIME_PROTOCOL_VERSION},
         {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+        # runner 启动据此从 MinIO 拉取真实 Block 代码（endpoint/ak/sk 由中间件 Secret envFrom 注入）
+        {"name": "PYFLOW_MINIO_BUCKET", "value": ctx.minio_bucket},
+        {"name": "PYFLOW_MINIO_SECURE", "value": "true" if ctx.minio_secure else "false"},
     ]
     # 非敏感 env_vars 直接注入（已含全局/部署级合并结果，见 orchestrator）
     for k, v in (spec.env_vars or {}).items():

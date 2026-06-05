@@ -54,6 +54,8 @@ def _build_context(deployment: FlowDeployment) -> DeployContext:
         inject_middleware=settings.block_inject_middleware,
         middleware_secret=settings.block_middleware_secret if settings.block_inject_middleware else "",
         middleware_egress=middleware.build_egress_for_settings(settings) if settings.block_inject_middleware else [],
+        minio_bucket=settings.minio_bucket,
+        minio_secure=settings.minio_secure,
     )
 
 

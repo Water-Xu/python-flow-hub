@@ -25,15 +25,55 @@ NAMESPACE = os.getenv("PYFLOW_NAMESPACE", "pyflow-blocks")
 INVOKE_PORT = 8000
 
 
+def _load_code_from_minio(code_path: str) -> str | None:
+    """按对象 key 从 MinIO 拉取 Block 代码（决策 11：代码不烧进镜像，启动注入）。
+
+    连接信息由中间件 Secret 经 envFrom 注入（MINIO_ENDPOINT/ACCESS_KEY/SECRET_KEY），
+    bucket / secure 由控制面随 invoke Deployment 注入（PYFLOW_MINIO_BUCKET/PYFLOW_MINIO_SECURE）。
+    任何失败返回 None，由调用方回落 stub（仅启动期，不影响已加载实例）。
+    """
+    endpoint = os.getenv("MINIO_ENDPOINT", "")
+    if not endpoint:
+        return None
+    try:
+        from minio import Minio
+
+        client = Minio(
+            endpoint,
+            access_key=os.getenv("MINIO_ACCESS_KEY", ""),
+            secret_key=os.getenv("MINIO_SECRET_KEY", ""),
+            secure=os.getenv("PYFLOW_MINIO_SECURE", "false").lower() == "true",
+        )
+        bucket = os.getenv("PYFLOW_MINIO_BUCKET", "pyflow-versions")
+        resp = client.get_object(bucket, code_path)
+        try:
+            return resp.read().decode("utf-8")
+        finally:
+            resp.close()
+            resp.release_conn()
+    except Exception as exc:  # noqa: BLE001 - 拉取失败回落 stub，并打印可诊断信息
+        print(
+            f"[runner] load_block_code from minio failed path={code_path} err={exc}",
+            flush=True,
+        )
+        return None
+
+
 def load_block_code() -> str:
-    """从 MinIO 拉取 Block 代码（启动注入）。本地/降级用 PYFLOW_BLOCK_CODE 环境变量。"""
+    """加载 Block 代码：内联 env > 本地文件 > MinIO 对象 > stub 兜底（决策 11）。"""
     inline = os.getenv("PYFLOW_BLOCK_CODE")
     if inline:
         return inline
     code_path = os.getenv("PYFLOW_CODE_PATH", "")
-    if code_path and os.path.exists(code_path):
-        with open(code_path, encoding="utf-8") as f:
-            return f.read()
+    if code_path:
+        # 本地文件（dev / 测试挂载）优先
+        if os.path.exists(code_path):
+            with open(code_path, encoding="utf-8") as f:
+                return f.read()
+        # 否则视为 MinIO 对象 key，从对象存储拉取真实代码
+        code = _load_code_from_minio(code_path)
+        if code is not None:
+            return code
     return "def run(inputs):\n    return {'ok': True, 'inputs': inputs}\n"
 
 

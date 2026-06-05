@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 
 # 共享执行库（与控制面同 pin 版本，决策 3.1 点 5）
 COPY pyflow_runtime /opt/pyflow_runtime
-RUN pip install --no-cache-dir /opt/pyflow_runtime fastapi==0.115.0 uvicorn==0.30.6
+RUN pip install --no-cache-dir /opt/pyflow_runtime fastapi==0.115.0 uvicorn==0.30.6 minio==7.2.8
 
 # 用户依赖层占位：Cloud Build 据 requirements_hash 在此叠加 pip install -r block-requirements.txt
 
