@@ -16,7 +16,12 @@ from app.auth.rbac import Role, require_role
 from app.core.execution_service import execute_block
 from app.core.flow.dag import validate_dag
 from app.core.flow.flow_runner import run_flow
-from app.core.flow.zip_import import build_tree, parse_zip
+from app.core.flow.zip_import import (
+    _has_valid_entrypoint,
+    build_tree,
+    infer_data_flow_edges,
+    parse_zip,
+)
 from app.db import get_session
 from app.errors import (
     PYFLOW_API_LOCKED,
@@ -171,10 +176,14 @@ async def import_flow_zip(
 
     leaves: list[dict[str, Any]] = []
     cols = 4
+    # 仅合法入口脚本参与数据流推断（path -> node_id）
+    node_id_map: dict[str, str] = {}
     for idx, (path, code) in enumerate(sorted(parsed.scripts.items())):
         block_id = gen_uuid()
         node_id = gen_uuid()
         filename = posixpath.basename(path)
+        # pack.py 等无入口脚本：仍建块以保留源码，但标记 invalid 供画布置灰
+        is_valid = _has_valid_entrypoint(code)
         session.add(Block(
             id=block_id,
             name=path,
@@ -191,10 +200,27 @@ async def import_flow_zip(
             flow_id=flow.id,
             node_type="block",
             block_id=block_id,
-            config={"label": filename, "mode": "sync_http", "path": path},
+            config={
+                "label": filename,
+                "mode": "sync_http",
+                "path": path,
+                "invalid": not is_valid,
+            },
             position={"x": 120 + (idx % cols) * 240, "y": 120 + (idx // cols) * 150},
         ))
         leaves.append({"path": path, "kind": "block", "block_id": block_id, "node_id": node_id})
+        if is_valid:
+            node_id_map[path] = node_id
+
+    # AST 推断块间数据流，自动生成连线（仅合法入口脚本之间）
+    for edge in infer_data_flow_edges(parsed.scripts, node_id_map):
+        session.add(FlowEdge(
+            flow_id=flow.id,
+            source_node_id=edge["source_node_id"],
+            target_node_id=edge["target_node_id"],
+            source_port=edge["source_port"],
+            target_port=edge["target_port"],
+        ))
 
     for path in parsed.resources:
         leaves.append({"path": path, "kind": "resource"})

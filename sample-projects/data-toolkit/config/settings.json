@@ -1,0 +1,22 @@
+{
+  "_comment": "数据分析工具包全局配置，通过 inputs.settings 传入各 Block",
+  "max_rows": 10000,
+  "default_top_n": 10,
+  "currency": "CNY",
+  "date_format": "%Y-%m-%d %H:%M:%S",
+  "decimal_places": 2,
+  "chart": {
+    "default_type": "bar",
+    "color_theme": ["#5470c6", "#91cc75", "#fac858", "#ee6666", "#73c0de"],
+    "animation": true
+  },
+  "text": {
+    "min_word_len": 2,
+    "default_keywords_n": 10,
+    "sentiment_threshold": 0.2
+  },
+  "stats": {
+    "outlier_z_threshold": 3.0,
+    "correlation_min_pairs": 5
+  }
+}

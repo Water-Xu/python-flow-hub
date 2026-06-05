@@ -290,14 +290,19 @@ async function load() {
       }
     }
     // 普通块节点
+    const blockInvalid = n.config?.invalid === true
     return {
       id: n.id, type: n.node_type,
       position: n.position?.x != null ? n.position : { x: 100, y: 100 },
+      draggable: !blockInvalid,
+      selectable: !blockInvalid,
+      connectable: !blockInvalid,
       data: {
         label:      n.config?.label || n.block_id || '节点',
         mode:       n.config?.mode,
         block_id:   n.block_id,
         entrypoint: n.config?.entrypoint || 'run',
+        invalid:    blockInvalid,
       },
     }
   })
@@ -468,6 +473,7 @@ async function save() {
         label:      n.data?.label,
         mode:       n.data?.mode,
         entrypoint: n.data?.entrypoint || 'run',
+        invalid:    n.data?.invalid === true,
         ...(n.data?.config || {}),
       },
       position: n.position,

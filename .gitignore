@@ -39,3 +39,5 @@ Thumbs.db
 dist/
 build/
 *.tar.gz
+# 由 sample-projects/**/pack.py 生成的可再生压缩包，不入库
+sample-projects/**/*.zip
