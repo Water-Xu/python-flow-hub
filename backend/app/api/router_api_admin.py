@@ -15,6 +15,7 @@ from app.db import get_session
 from app.errors import PYFLOW_API_NOT_FOUND, BusinessException
 from app.models.api_portal import PublishedApi
 from app.models.block import Block
+from app.models.deployment import FlowDeployment
 from app.models.flow import Flow, FlowEdge, FlowNode
 from app.schemas.api_portal import (
     ApiInstanceInfo,
@@ -156,11 +157,39 @@ async def get_api_instances(
             instances=instances,
         )
 
-    # K8s 模式：TODO Phase 4a 接入 K8s API 查询 Block Deployment 副本
+    # K8s 模式：查询该 API 关联 flow 的最新运行部署，将 block_statuses 映射为实例信息
+    flow_id = api.active_flow_id or api.flow_id
+    deployment = (await session.execute(
+        select(FlowDeployment)
+        .where(
+            FlowDeployment.flow_id == flow_id,
+            FlowDeployment.status.in_(["running", "partially_degraded"]),
+        )
+        .order_by(FlowDeployment.updated_at.desc())
+    )).scalars().first()
+
+    if deployment is None or not deployment.block_statuses:
+        return ApiInstanceInfo(deployment_mode=mode, instance_count=0, instances=[])
+
+    instances = [
+        {
+            "pod_name": bs.get("deployment") or bs.get("name") or bs.get("block_id", "—"),
+            "status": "running" if bs.get("exists") else "stopped",
+            "ready": (bs.get("ready", 0) or 0) >= 1,
+            "restart_count": 0,
+            "cpu_usage": "—",
+            "memory_usage": "—",
+            "replicas": bs.get("replicas", 0),
+            "block_id": bs.get("block_id"),
+            "block_name": bs.get("name"),
+        }
+        for bs in deployment.block_statuses
+    ]
+    instance_count = sum(1 for inst in instances if inst["status"] == "running")
     return ApiInstanceInfo(
         deployment_mode=mode,
-        instance_count=0,
-        instances=[],
+        instance_count=instance_count,
+        instances=instances,
     )
 
 

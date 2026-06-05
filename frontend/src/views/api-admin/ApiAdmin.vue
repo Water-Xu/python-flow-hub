@@ -634,7 +634,11 @@ onMounted(load)
                   {{ inst.status }}
                 </el-tag>
               </div>
-              <div class="inst-detail" v-if="inst.cpu_usage !== '—'">
+              <div class="inst-detail" v-if="inst.block_name">
+                <span class="dim" style="font-size:12px">{{ inst.block_name }}</span>
+                <span v-if="inst.replicas != null">副本: {{ inst.replicas }}</span>
+              </div>
+              <div class="inst-detail" v-else-if="inst.cpu_usage !== '—'">
                 <span>CPU: {{ inst.cpu_usage }}</span>
                 <span>Mem: {{ inst.memory_usage }}</span>
                 <span>重启: {{ inst.restart_count }}</span>
