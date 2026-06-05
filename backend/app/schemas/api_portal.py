@@ -44,6 +44,29 @@ class LockApiRequest(BaseModel):
     lock_reason: str = ""
 
 
+class ApiEncryptionRequest(BaseModel):
+    """启用/禁用接口加密保护（AES-256-GCM）。
+
+    首次将 ``enabled`` 置为 True 时服务端自动生成密钥；置为 False 不会清空已有密钥，
+    便于重新启用时复用。``require_encrypted_request`` 控制是否拒绝明文请求。
+    """
+
+    enabled: bool
+    require_encrypted_request: bool = False
+
+
+class ApiEncryptionKeyResponse(BaseModel):
+    """加密密钥响应（仅接口创建者可见，禁止下发到公开文档）。"""
+
+    api_id: str
+    encryption_enabled: bool
+    require_encrypted_request: bool
+    # 完整密钥（64 字符 hex），用于配置到调用方（如 Java flowhub.encryption.path-keys）
+    encryption_key: str | None = None
+    # 密钥指纹（前 8 字符），用于在不暴露完整密钥的场景下核对
+    key_hint: str | None = None
+
+
 class SwitchVersionRequest(BaseModel):
     """平滑过渡：将接口的实际调用流程切换到新版本。"""
 
@@ -72,6 +95,9 @@ class ApiResponse(BaseModel):
     load_balance_strategy: str
     degradation_enabled: bool
     degradation_fallback: dict
+    # 加密保护（不含密钥本身，密钥仅通过 /encryption/key 单独获取）
+    encryption_enabled: bool
+    require_encrypted_request: bool
     total_calls: int
     success_calls: int
     error_calls: int

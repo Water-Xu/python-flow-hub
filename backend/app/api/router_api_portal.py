@@ -18,11 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.rbac import Role, require_role
 from app.config import get_settings
+from app.core import crypto
 from app.core.execution_service import execute_block, execute_block_stream
 from app.core.flow.flow_runner import run_flow
 from app.core.mq.invocation_doc import build_mq_invocation
 from app.db import get_session
 from app.errors import (
+    PYFLOW_API_DECRYPT_FAILED,
+    PYFLOW_API_ENCRYPTION_REQUIRED,
     PYFLOW_API_LOCKED,
     PYFLOW_API_NOT_FOUND,
     PYFLOW_API_PATH_EXISTS,
@@ -36,7 +39,13 @@ from app.models.api_portal import PublishedApi
 from app.models.block import Block
 from app.models.deployment import FlowDeployment
 from app.models.flow import Flow, FlowEdge, FlowNode
-from app.schemas.api_portal import ApiMqConfigRequest, ApiResponse, PublishApiRequest
+from app.schemas.api_portal import (
+    ApiEncryptionKeyResponse,
+    ApiEncryptionRequest,
+    ApiMqConfigRequest,
+    ApiResponse,
+    PublishApiRequest,
+)
 
 router = APIRouter(tags=["api-portal"])
 settings = get_settings()
@@ -60,6 +69,46 @@ def _check_rate_limit(api: PublishedApi) -> None:
     if len(window) >= api.rate_limit_per_minute:
         raise BusinessException(PYFLOW_API_RATE_LIMITED, f"限流 {api.rate_limit_per_minute} req/min")
     window.append(now)
+
+
+def _resolve_inputs(api: PublishedApi, body: dict[str, Any]) -> dict[str, Any]:
+    """根据接口加密配置，从请求体中解出明文 ``inputs``。
+
+    规则：
+    - 接口要求强制加密（``require_encrypted_request``）但请求未带 ``encrypted=true`` → 拒绝。
+    - 请求声明 ``encrypted=true`` 且接口已开启加密且配置了密钥 → 解密 ``inputs``（字符串密文）。
+    - 其它情况 → 按明文取 ``inputs``（兼容未加密调用）。
+
+    :param api: 已发布接口
+    :param body: 原始请求体
+    :return: 明文 inputs
+    :raises BusinessException: 强制加密但未加密 / 解密失败
+    """
+    is_encrypted = bool(body.get("encrypted"))
+    if api.require_encrypted_request and not is_encrypted:
+        raise BusinessException(PYFLOW_API_ENCRYPTION_REQUIRED, f"接口 {api.path} 要求加密调用")
+    if is_encrypted and api.encryption_enabled and api.encryption_key:
+        cipher = body.get("inputs")
+        if not isinstance(cipher, str):
+            raise BusinessException(PYFLOW_API_DECRYPT_FAILED, "加密请求的 inputs 必须为密文字符串")
+        try:
+            decrypted = crypto.decrypt(api.encryption_key, cipher)
+        except ValueError as exc:
+            raise BusinessException(PYFLOW_API_DECRYPT_FAILED, str(exc)) from exc
+        return decrypted if isinstance(decrypted, dict) else {}
+    return body.get("inputs", {})
+
+
+def _maybe_encrypt_outputs(api: PublishedApi, outputs: Any) -> tuple[Any, bool]:
+    """开启加密时将 ``outputs`` 加密为密文字符串。
+
+    :param api: 已发布接口
+    :param outputs: 明文输出
+    :return: (载荷, 是否已加密)；未开启加密时原样返回 (outputs, False)
+    """
+    if api.encryption_enabled and api.encryption_key:
+        return crypto.encrypt(api.encryption_key, outputs), True
+    return outputs, False
 
 
 async def _get_api(session: AsyncSession, api_id: str) -> PublishedApi:
@@ -232,6 +281,85 @@ async def update_api_mq_config(
     return api
 
 
+# ── 接口加密保护管理 ──────────────────────────────────────────────────────────
+
+@router.put("/api/portal/apis/{api_id}/encryption", response_model=ApiEncryptionKeyResponse)
+async def update_api_encryption(
+    api_id: str,
+    req: ApiEncryptionRequest,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.EDITOR)),
+):
+    """开启/关闭接口加密保护（AES-256-GCM）。
+
+    首次开启自动生成 32 字节密钥并随响应返回（请妥善保存并配置到调用方）；
+    关闭不清空密钥，便于再次启用复用。
+    """
+    api = await _get_api(session, api_id)
+    if api.is_locked:
+        raise BusinessException(PYFLOW_API_LOCKED, f"接口 {api.name} 已锁定，无法修改加密配置")
+    api.encryption_enabled = req.enabled
+    api.require_encrypted_request = req.require_encrypted_request if req.enabled else False
+    new_key_returned = False
+    if req.enabled and not api.encryption_key:
+        api.encryption_key = crypto.generate_key()
+        new_key_returned = True
+    await session.commit()
+    await session.refresh(api)
+    return ApiEncryptionKeyResponse(
+        api_id=api.id,
+        encryption_enabled=api.encryption_enabled,
+        require_encrypted_request=api.require_encrypted_request,
+        # 仅在本次新生成密钥时返回完整密钥，避免普通开关操作反复下发明文密钥
+        encryption_key=api.encryption_key if new_key_returned else None,
+        key_hint=api.encryption_key[:8] if api.encryption_key else None,
+    )
+
+
+@router.post("/api/portal/apis/{api_id}/encryption/rotate", response_model=ApiEncryptionKeyResponse)
+async def rotate_api_encryption_key(
+    api_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.EDITOR)),
+):
+    """轮转接口密钥并返回新密钥。
+
+    轮转后旧密钥立即失效，所有调用方需同步更新为新密钥，否则解密失败。
+    """
+    api = await _get_api(session, api_id)
+    if api.is_locked:
+        raise BusinessException(PYFLOW_API_LOCKED, f"接口 {api.name} 已锁定，无法轮转密钥")
+    api.encryption_key = crypto.generate_key()
+    if not api.encryption_enabled:
+        api.encryption_enabled = True
+    await session.commit()
+    await session.refresh(api)
+    return ApiEncryptionKeyResponse(
+        api_id=api.id,
+        encryption_enabled=api.encryption_enabled,
+        require_encrypted_request=api.require_encrypted_request,
+        encryption_key=api.encryption_key,
+        key_hint=api.encryption_key[:8],
+    )
+
+
+@router.get("/api/portal/apis/{api_id}/encryption/key", response_model=ApiEncryptionKeyResponse)
+async def get_api_encryption_key(
+    api_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.EDITOR)),
+):
+    """查看接口当前完整密钥（用于配置调用方；EDITOR 角色）。"""
+    api = await _get_api(session, api_id)
+    return ApiEncryptionKeyResponse(
+        api_id=api.id,
+        encryption_enabled=api.encryption_enabled,
+        require_encrypted_request=api.require_encrypted_request,
+        encryption_key=api.encryption_key,
+        key_hint=api.encryption_key[:8] if api.encryption_key else None,
+    )
+
+
 @router.get("/api/portal/apis/{api_id}/docs")
 async def get_api_docs(
     api_id: str,
@@ -286,8 +414,19 @@ async def get_api_docs(
         "node_count": len(nodes),
         "edge_count": len(edges),
         "blocks": block_docs,
-        "request_example": {"inputs": {}},
-        "response_example": {"outputs": {}, "flow_run_id": "uuid", "status": "succeeded"},
+        "request_example": (
+            {"inputs": "<base64_aes_gcm_ciphertext>", "encrypted": True}
+            if api.encryption_enabled
+            else {"inputs": {}}
+        ),
+        "response_example": (
+            {"outputs": "<base64_aes_gcm_ciphertext>", "encrypted": True, "status": "succeeded"}
+            if api.encryption_enabled
+            else {"outputs": {}, "flow_run_id": "uuid", "status": "succeeded"}
+        ),
+        # ── 加密保护（接口级）──
+        "encryption_enabled": api.encryption_enabled,
+        "require_encrypted_request": api.require_encrypted_request,
         # ── MQ 触发支持（接口级）──
         "mq_supported": mq_invocation is not None,
         "mq_invocation": mq_invocation,
@@ -402,7 +541,8 @@ async def invoke_api(
         body = await request.json()
     except Exception:
         pass
-    inputs = body.get("inputs", {})
+    # 加密保护：按接口配置解出明文 inputs（强制加密但明文 / 解密失败将抛 BusinessException）
+    inputs = _resolve_inputs(api, body)
 
     flow_id = api.active_flow_id or api.flow_id
     nodes_rows = (await session.execute(
@@ -472,7 +612,14 @@ async def invoke_api(
         api.avg_latency_ms = (api.avg_latency_ms * (n - 1) + elapsed) / n
         await session.commit()
 
-        return {"outputs": outputs, "status": "succeeded", "latency_ms": round(elapsed, 2)}
+        # 加密保护：开启时将 outputs 加密为密文字符串并标记 encrypted=true
+        payload, encrypted = _maybe_encrypt_outputs(api, outputs)
+        return {
+            "outputs": payload,
+            "encrypted": encrypted,
+            "status": "succeeded",
+            "latency_ms": round(elapsed, 2),
+        }
 
     except BusinessException:
         api.total_calls += 1
@@ -525,7 +672,8 @@ async def invoke_api_stream(
         body = await request.json()
     except Exception:
         pass
-    inputs = body.get("inputs", {})
+    # 加密保护：进入流式响应前先完成 inputs 解密，使强制加密 / 解密失败仍返回标准 HTTP 错误
+    inputs = _resolve_inputs(api, body)
 
     flow_id = api.active_flow_id or api.flow_id
     nodes_rows = (await session.execute(
@@ -661,8 +809,11 @@ async def invoke_api_stream(
         n = api.total_calls
         api.avg_latency_ms = (api.avg_latency_ms * (n - 1) + elapsed) / n
         await session.commit()
+        # 加密保护：仅最终 result 的 outputs 加密；中间 data chunk 不加密（保持实时性）
+        result_payload, encrypted = _maybe_encrypt_outputs(api, final_outputs)
         yield _sse("result", {
-            "outputs": final_outputs, "status": "succeeded", "latency_ms": round(elapsed, 2),
+            "outputs": result_payload, "encrypted": encrypted,
+            "status": "succeeded", "latency_ms": round(elapsed, 2),
         })
         yield _sse("done", {})
 

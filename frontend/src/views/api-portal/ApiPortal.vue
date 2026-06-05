@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { apiPortalApi, flowApi, type PublishedApi, type FlowEntrypointsInfo } from '@/api'
+import { apiPortalApi, flowApi, type PublishedApi, type FlowEntrypointsInfo, type ApiEncryptionKey } from '@/api'
 import MqMockTestDialog from '@/components/MqMockTestDialog.vue'
 import MqTriggerForm from '@/components/MqTriggerForm.vue'
 
@@ -90,6 +90,101 @@ async function saveTrigger() {
 const triggerTypeLabel: Record<string, string> = {
   http: 'HTTP', mq: 'MQ', both: 'HTTP+MQ',
 }
+
+// ── 加密保护（AES-256-GCM，接口级开关 + 密钥管理）──────────────────────────────
+const encryptionDialogVisible = ref(false)
+const encryptionApi = ref<PublishedApi | null>(null)
+const encryptionInfo = ref<ApiEncryptionKey | null>(null)
+const encryptionLoading = ref(false)
+const encryptionSaving = ref(false)
+// 本地开关状态（与 encryptionInfo 解耦，便于编辑后一次性保存）
+const encEnabled = ref(false)
+const encRequire = ref(false)
+
+async function openEncryption(api: PublishedApi) {
+  if (api.is_locked) return ElMessage.warning('接口已锁定，无法修改加密配置')
+  encryptionApi.value = api
+  encryptionInfo.value = null
+  encEnabled.value = api.encryption_enabled
+  encRequire.value = api.require_encrypted_request
+  encryptionDialogVisible.value = true
+  encryptionLoading.value = true
+  try {
+    encryptionInfo.value = await apiPortalApi.getEncryptionKey(api.id)
+    encEnabled.value = encryptionInfo.value.encryption_enabled
+    encRequire.value = encryptionInfo.value.require_encrypted_request
+  } catch {
+    // 读取失败不阻断，仍可开启
+  } finally {
+    encryptionLoading.value = false
+  }
+}
+
+async function saveEncryption() {
+  if (!encryptionApi.value) return
+  encryptionSaving.value = true
+  try {
+    const res = await apiPortalApi.updateEncryption(encryptionApi.value.id, {
+      enabled: encEnabled.value,
+      require_encrypted_request: encRequire.value,
+    })
+    // 合并返回（首次开启会带回完整密钥）
+    encryptionInfo.value = {
+      ...res,
+      encryption_key: res.encryption_key ?? encryptionInfo.value?.encryption_key ?? null,
+    }
+    ElMessage.success(encEnabled.value ? '加密保护已开启' : '加密保护已关闭')
+    load()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '保存失败')
+  } finally {
+    encryptionSaving.value = false
+  }
+}
+
+async function rotateKey() {
+  if (!encryptionApi.value) return
+  await ElMessageBox.confirm(
+    '轮转后旧密钥立即失效，所有调用方需同步更新为新密钥，否则解密失败。确认轮转？',
+    '轮转密钥',
+    { type: 'warning' },
+  )
+  encryptionSaving.value = true
+  try {
+    encryptionInfo.value = await apiPortalApi.rotateEncryptionKey(encryptionApi.value.id)
+    encEnabled.value = encryptionInfo.value.encryption_enabled
+    ElMessage.success('密钥已轮转，请复制并更新到调用方')
+    load()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '轮转失败')
+  } finally {
+    encryptionSaving.value = false
+  }
+}
+
+async function copyKey() {
+  const key = encryptionInfo.value?.encryption_key
+  if (!key) return ElMessage.warning('当前无可复制的完整密钥，请轮转或重新开启以获取')
+  try {
+    await navigator.clipboard.writeText(key)
+    ElMessage.success('密钥已复制到剪贴板')
+  } catch {
+    ElMessage.warning('复制失败，请手动选择复制')
+  }
+}
+
+/** Java 调用方配置示例（按当前接口 path 与密钥渲染） */
+const javaConfigSnippet = computed(() => {
+  const path = encryptionApi.value?.path || 'your-api-path'
+  const key = encryptionInfo.value?.encryption_key || '（在此填入上方完整密钥）'
+  return [
+    'flowhub:',
+    '  encryption:',
+    '    enabled: true',
+    '    path-keys:',
+    `      ${path}: "${key}"`,
+  ].join('\n')
+})
 
 const form = ref({
   name: '',
@@ -387,6 +482,9 @@ onMounted(load)
             <el-tag v-if="api.rate_limit_enabled" size="small" type="warning" effect="plain">
               限流 {{ api.rate_limit_per_minute }}/min
             </el-tag>
+            <el-tag v-if="api.encryption_enabled" size="small" type="success" effect="plain">
+              <el-icon style="margin-right:3px"><Lock /></el-icon>加密
+            </el-tag>
           </div>
         </div>
 
@@ -436,6 +534,15 @@ onMounted(load)
             @click="openTriggerConfig(api)"
           >
             <el-icon><Setting /></el-icon> 触发配置
+          </el-button>
+          <el-button
+            size="small"
+            :type="api.encryption_enabled ? 'success' : 'info'"
+            plain
+            :disabled="api.is_locked"
+            @click="openEncryption(api)"
+          >
+            <el-icon><Lock /></el-icon> 加密{{ api.encryption_enabled ? '（已开启）' : '' }}
           </el-button>
           <el-button
             size="small"
@@ -811,6 +918,81 @@ onMounted(load)
       :api-name="mqTestApi.name"
       :preset-payload="mqTestApi.preset"
     />
+
+    <!-- 加密保护 Dialog（AES-256-GCM，接口级） -->
+    <el-dialog
+      v-model="encryptionDialogVisible"
+      :title="`加密保护 - ${encryptionApi?.name || ''}`"
+      width="640px"
+      destroy-on-close
+    >
+      <div v-loading="encryptionLoading" class="enc-body">
+        <div class="enc-row">
+          <div class="enc-label">
+            <span class="enc-title">启用加密保护</span>
+            <span class="enc-sub">AES-256-GCM 端到端加密：请求 inputs 加密传输、响应 outputs 加密返回</span>
+          </div>
+          <el-switch v-model="encEnabled" />
+        </div>
+
+        <transition name="enc-fade">
+          <div v-if="encEnabled" class="enc-row">
+            <div class="enc-label">
+              <span class="enc-title">强制加密调用</span>
+              <span class="enc-sub">开启后拒绝明文请求（返回加密要求错误）；关闭则兼容明文与密文，便于灰度</span>
+            </div>
+            <el-switch v-model="encRequire" />
+          </div>
+        </transition>
+
+        <!-- 密钥展示 -->
+        <transition name="enc-fade">
+          <div v-if="encEnabled" class="enc-key-block">
+            <div class="enc-key-head">
+              <span class="enc-title">接口密钥（64 位 hex）</span>
+              <div class="enc-key-ops">
+                <el-button size="small" text type="primary" @click="copyKey">
+                  <el-icon style="margin-right:4px"><CopyDocument /></el-icon>复制完整密钥
+                </el-button>
+                <el-button size="small" text type="warning" :loading="encryptionSaving" @click="rotateKey">
+                  <el-icon style="margin-right:4px"><RefreshRight /></el-icon>轮转密钥
+                </el-button>
+              </div>
+            </div>
+            <pre class="enc-key-value">{{ encryptionInfo?.encryption_key || (encryptionInfo?.key_hint ? encryptionInfo.key_hint + '… （完整密钥仅在新生成/轮转时显示，可点轮转重新获取）' : '保存以生成密钥') }}</pre>
+            <p class="enc-warn">
+              <el-icon><WarningFilled /></el-icon>
+              密钥等同访问凭据，请妥善保管；轮转后旧密钥立即失效，需同步更新所有调用方。
+            </p>
+          </div>
+        </transition>
+
+        <!-- 使用说明 -->
+        <transition name="enc-fade">
+          <div v-if="encEnabled" class="enc-usage">
+            <h4>调用方接入说明</h4>
+            <ol class="enc-steps">
+              <li>复制上方完整密钥（若已隐藏，点击「轮转密钥」重新获取）。</li>
+              <li>
+                <strong>Java（lhy-styon common）</strong>：在 Nacos / application.yml 配置，业务调用
+                <code>flowHubHttpClient.invoke(path, inputs)</code> 无需改动，加解密自动透明：
+                <pre class="code-block enc-snippet">{{ javaConfigSnippet }}</pre>
+              </li>
+              <li>
+                <strong>其它语言</strong>：请求体改为
+                <code>{ "inputs": "&lt;base64密文&gt;", "encrypted": true }</code>，
+                密文为 <code>base64(iv[12B] + ciphertext + tag[16B])</code>；
+                响应 <code>encrypted=true</code> 时 <code>outputs</code> 同为密文，用同一密钥解密。
+              </li>
+            </ol>
+          </div>
+        </transition>
+      </div>
+      <template #footer>
+        <el-button @click="encryptionDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="encryptionSaving" @click="saveEncryption">保存</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 触发配置 Dialog（http/mq/both，Flow 级） -->
     <el-dialog
@@ -1260,5 +1442,101 @@ onMounted(load)
 .resp-fade-enter-from {
   opacity: 0;
   transform: translateY(12px);
+}
+
+/* ── 加密保护 Dialog ── */
+.enc-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-height: 60px;
+}
+.enc-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  background: var(--pf-panel-2);
+  border-radius: 8px;
+}
+.enc-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.enc-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+.enc-sub {
+  font-size: 12px;
+  color: var(--pf-text-dim);
+  line-height: 1.5;
+}
+.enc-key-block {
+  border: 1px solid var(--pf-accent-soft);
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: var(--pf-accent-soft);
+}
+.enc-key-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.enc-key-ops {
+  display: flex;
+  gap: 4px;
+}
+.enc-key-value {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--pf-code-bg);
+  color: var(--pf-code-text);
+  border-radius: 6px;
+  font-size: 12px;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+.enc-warn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: #e6a23c;
+}
+.enc-usage h4 {
+  margin: 0 0 8px;
+}
+.enc-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--pf-text);
+}
+.enc-steps code {
+  background: var(--pf-panel-2);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+.enc-snippet {
+  margin: 8px 0 0;
+}
+.enc-fade-enter-active,
+.enc-fade-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.enc-fade-enter-from,
+.enc-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
 }
 </style>

@@ -63,6 +63,15 @@ class PublishedApi(Base, UUIDMixin, TimestampMixin):
     # 降级时返回的 fallback JSON
     degradation_fallback: Mapped[dict] = mapped_column(JSON, default=dict)
 
+    # ── 加密保护（AES-256-GCM；每个接口独立开关与密钥） ──
+    # 总开关：开启后服务端解密请求 inputs、加密响应 outputs
+    encryption_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 32 字节密钥的 hex 字符串（64 chars），首次开启时自动生成；密钥仅创建者可查看，禁止下发到公开文档
+    encryption_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 是否强制要求调用方加密：为 True 时拒绝明文请求（PYFLOW_API_ENCRYPTION_REQUIRED）；
+    # 为 False 时兼容明文与密文（密文按 encryption_key 解密，明文直接执行），便于灰度迁移
+    require_encrypted_request: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # ── 流量统计（累计值；每次调用更新） ──
     total_calls: Mapped[int] = mapped_column(BigInteger, default=0)
     success_calls: Mapped[int] = mapped_column(BigInteger, default=0)

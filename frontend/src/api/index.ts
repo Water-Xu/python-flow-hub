@@ -219,12 +219,24 @@ export interface PublishedApi {
   load_balance_strategy: string
   degradation_enabled: boolean
   degradation_fallback: Record<string, any>
+  encryption_enabled: boolean
+  require_encrypted_request: boolean
   total_calls: number
   success_calls: number
   error_calls: number
   avg_latency_ms: number
   created_at: string
   updated_at: string
+}
+
+export interface ApiEncryptionKey {
+  api_id: string
+  encryption_enabled: boolean
+  require_encrypted_request: boolean
+  /** 完整密钥（64 位 hex），仅新生成/轮转/主动查看时返回 */
+  encryption_key: string | null
+  /** 密钥指纹（前 8 位），用于核对而不暴露完整密钥 */
+  key_hint: string | null
 }
 
 export interface FlowEntrypointsInfo {
@@ -262,6 +274,17 @@ export const apiPortalApi = {
   /** 配置接口触发方式（http/mq/both）+ MQ 触发参数（队列/条件/映射/回复/重试，决策 3.1 Flow 级） */
   updateMq: (id: string, data: { trigger_type: string; mq_config: Record<string, any> }) =>
     client.put<any, PublishedApi>(`/api/portal/apis/${id}/mq`, data),
+  /** 开启/关闭接口加密保护（AES-256-GCM）；首次开启返回新生成的密钥 */
+  updateEncryption: (
+    id: string,
+    data: { enabled: boolean; require_encrypted_request?: boolean },
+  ) => client.put<any, ApiEncryptionKey>(`/api/portal/apis/${id}/encryption`, data),
+  /** 轮转接口密钥（旧密钥立即失效），返回新密钥 */
+  rotateEncryptionKey: (id: string) =>
+    client.post<any, ApiEncryptionKey>(`/api/portal/apis/${id}/encryption/rotate`),
+  /** 查看接口当前完整密钥（用于配置调用方） */
+  getEncryptionKey: (id: string) =>
+    client.get<any, ApiEncryptionKey>(`/api/portal/apis/${id}/encryption/key`),
   copyFlow: (flowId: string) => client.post<any, any>(`/api/flows/${flowId}/copy`),
   /**
    * 在线测试：直接调用公开入口 POST /api/public/{path}，返回完整 AxiosResponse，
