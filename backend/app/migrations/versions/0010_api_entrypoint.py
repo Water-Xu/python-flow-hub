@@ -15,12 +15,20 @@ branch_labels = None
 depends_on = None
 
 
+def _has_column(table: str, column: str) -> bool:
+    """探测列是否已存在，使迁移可重入（历史环境可能已手工/部分执行过本变更）。"""
+    inspector = sa.inspect(op.get_bind())
+    return any(col["name"] == column for col in inspector.get_columns(table))
+
+
 def upgrade() -> None:
-    op.add_column(
-        "pyflow_published_api",
-        sa.Column("entrypoint", sa.String(128), nullable=True),
-    )
+    if not _has_column("pyflow_published_api", "entrypoint"):
+        op.add_column(
+            "pyflow_published_api",
+            sa.Column("entrypoint", sa.String(128), nullable=True),
+        )
 
 
 def downgrade() -> None:
-    op.drop_column("pyflow_published_api", "entrypoint")
+    if _has_column("pyflow_published_api", "entrypoint"):
+        op.drop_column("pyflow_published_api", "entrypoint")
