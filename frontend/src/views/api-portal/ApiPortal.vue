@@ -26,6 +26,13 @@ const testResult = ref<{
   data: any
 } | null>(null)
 
+// ── 流式测试（SSE，真流式：终止节点 yield 实时回显）─────────────────────────
+const testStreamMode = ref(false)
+const streaming = ref(false)
+const streamText = ref('')
+const streamError = ref('')
+let streamCtrl: AbortController | null = null
+
 // ── MQ Mock 测试（接口/Flow 级）────────────────────────────────────────────
 const mqTestVisible = ref(false)
 const mqTestApi = ref<{ id: string; name: string; preset: Record<string, any> | null }>({
@@ -197,6 +204,9 @@ async function viewDocs(api: PublishedApi) {
 function openTest(api: PublishedApi, presetBody?: any) {
   testApi.value = api
   testResult.value = null
+  streamText.value = ''
+  streamError.value = ''
+  stopStream()
   if (presetBody) {
     testBody.value = JSON.stringify(presetBody, null, 2)
   } else {
@@ -248,6 +258,66 @@ async function sendTest() {
   } finally {
     testSending.value = false
   }
+}
+
+function parseTestPayload(): any | null {
+  try {
+    return testBody.value.trim() ? JSON.parse(testBody.value) : {}
+  } catch {
+    ElMessage.error('请求体不是合法 JSON，请检查后重试')
+    return null
+  }
+}
+
+function stopStream() {
+  if (streamCtrl) {
+    streamCtrl.abort()
+    streamCtrl = null
+  }
+  streaming.value = false
+}
+
+function sendStreamTest() {
+  if (!testApi.value) return
+  if (testApi.value.status !== 'active') {
+    return ElMessage.warning(`接口当前为「${testApi.value.status}」状态，请先激活后再测试`)
+  }
+  const payload = parseTestPayload()
+  if (payload === null) return
+
+  testResult.value = null
+  streamText.value = ''
+  streamError.value = ''
+  streaming.value = true
+  const start = performance.now()
+
+  streamCtrl = apiPortalApi.invokeStream(testApi.value.path, payload, {
+    onChunk: (chunk) => {
+      streamText.value += typeof chunk === 'string' ? chunk : JSON.stringify(chunk)
+    },
+    onResult: (result) => {
+      testResult.value = {
+        ok: !result?.error,
+        httpStatus: 200,
+        latencyMs: result?.latency_ms ?? performance.now() - start,
+        data: result,
+      }
+    },
+    onError: (err) => {
+      streamError.value = err
+      testResult.value = {
+        ok: false,
+        httpStatus: 0,
+        latencyMs: performance.now() - start,
+        data: { error: err },
+      }
+    },
+    onDone: () => {
+      streaming.value = false
+      streamCtrl = null
+      load()
+    },
+  })
 }
 
 async function copyUrl(api: PublishedApi) {
@@ -659,15 +729,49 @@ onMounted(load)
 
         <div class="test-actions">
           <el-button
+            v-if="!streaming"
             type="primary"
             :loading="testSending"
-            @click="sendTest"
+            @click="testStreamMode ? sendStreamTest() : sendTest()"
           >
-            <el-icon v-if="!testSending" style="margin-right:6px"><Promotion /></el-icon>
-            {{ testSending ? '请求中…' : '发送测试请求' }}
+            <el-icon v-if="!testSending" style="margin-right:6px">
+              <VideoPlay v-if="testStreamMode" />
+              <Promotion v-else />
+            </el-icon>
+            {{ testSending ? '请求中…' : testStreamMode ? '发送流式请求' : '发送测试请求' }}
           </el-button>
-          <span class="dim" style="margin-left:12px">将真实调用接口，结果计入调用统计</span>
+          <el-button v-else type="danger" plain @click="stopStream">
+            <el-icon style="margin-right:6px"><CircleClose /></el-icon>中止流式
+          </el-button>
+
+          <div class="stream-switch">
+            <span class="dim">流式输出</span>
+            <el-switch v-model="testStreamMode" :disabled="streaming || testSending" />
+            <el-tooltip
+              content="SSE 真流式：终止节点 Python 代码 yield 的内容会实时回传"
+              placement="top"
+            >
+              <el-icon class="stream-hint"><InfoFilled /></el-icon>
+            </el-tooltip>
+          </div>
+          <span class="dim" style="margin-left:auto">将真实调用接口，结果计入统计</span>
         </div>
+
+        <!-- 流式实时输出区 -->
+        <transition name="resp-fade">
+          <div v-if="testStreamMode && (streaming || streamText || streamError)" class="test-section stream-block">
+            <div class="resp-head">
+              <h4>实时输出</h4>
+              <el-tag v-if="streaming" type="primary" size="small" effect="plain" class="streaming-tag">
+                <span class="live-dot" /> 接收中
+              </el-tag>
+            </div>
+            <pre class="code-block stream-output">{{ streamText || (streaming ? '' : '（无流式内容）') }}<span v-if="streaming" class="stream-cursor">▍</span></pre>
+            <p v-if="streamError" class="stream-err">
+              <el-icon><CircleClose /></el-icon> {{ streamError }}
+            </p>
+          </div>
+        </transition>
 
         <transition name="resp-fade">
           <div v-if="testResult" class="test-section resp-block">
@@ -696,7 +800,7 @@ onMounted(load)
         </transition>
       </template>
       <template #footer>
-        <el-button @click="testDialogVisible = false">关闭</el-button>
+        <el-button @click="stopStream(); testDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1057,7 +1161,71 @@ onMounted(load)
 .test-actions {
   display: flex;
   align-items: center;
+  gap: 12px;
   margin-bottom: 4px;
+}
+.stream-switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.stream-hint {
+  color: var(--pf-text-dim);
+  cursor: help;
+  transition: color 0.18s ease;
+}
+.stream-hint:hover {
+  color: var(--pf-accent);
+}
+.stream-block {
+  margin-top: 16px;
+  animation: stream-in 0.3s ease;
+}
+@keyframes stream-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.streaming-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--pf-accent);
+  animation: live-pulse 1s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.3; transform: scale(0.7); }
+}
+.stream-output {
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 48px;
+}
+.stream-cursor {
+  display: inline-block;
+  color: var(--pf-accent);
+  animation: cursor-blink 1s step-end infinite;
+}
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+.stream-err {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 0 0;
+  color: #f56c6c;
+  font-size: 13px;
 }
 .resp-block {
   margin-top: 18px;

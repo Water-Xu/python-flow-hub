@@ -8,10 +8,12 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import io
 import json
 import sys
 import traceback
+from collections.abc import Iterator
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 
@@ -65,6 +67,128 @@ def execute_user_code(
 
     return {
         "output": output,
+        "stdout": stdout_buf.getvalue(),
+        "stderr": stderr_buf.getvalue(),
+        "error": None,
+    }
+
+
+def execute_user_code_stream(
+    code: str,
+    inputs: dict[str, Any],
+    entrypoint: str = DEFAULT_ENTRYPOINT,
+) -> Iterator[dict[str, Any]]:
+    """流式执行用户代码：入口函数为生成器（``yield``）时实时产出每个 chunk。
+
+    与 :func:`execute_user_code` 的区别：入口函数用 ``yield`` 逐段返回（如 LLM token 流）时，
+    本生成器逐个产出 ``{"type": "chunk", "data": <yield 值>}``；非生成器入口则等价于一次性执行。
+    无论哪种情形，最后都产出一个 ``{"type": "result", ...}`` 终止事件（结构同 ``execute_user_code`` 返回值）。
+
+    捕获 stdout/stderr 仅在用户代码推进期间生效（每次 ``next`` 进出 redirect 上下文），
+    确保事件之间控制权回到调用方时不会误吞调用方写入真实 stdout 的协议行。
+
+    :param code: 用户 Block 脚本源码
+    :param inputs: 注入入口函数的输入字典
+    :param entrypoint: 要调用的入口函数名（默认 ``run``）
+    :return: 事件迭代器：``{"type": "chunk", "data": ...}`` 若干 + 末尾 ``{"type": "result", ...}``
+    """
+    entrypoint = entrypoint or DEFAULT_ENTRYPOINT
+    namespace: dict[str, Any] = {}
+    stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
+
+    try:
+        compiled = compile(code, "<block>", "exec")
+    except SyntaxError as exc:
+        yield {
+            "type": "result",
+            "output": None,
+            "stdout": "",
+            "stderr": "",
+            "error": f"block code syntax error: {exc}",
+        }
+        return
+
+    # 编译执行模块体 + 取入口函数（此阶段 stdout 全程重定向到缓冲）
+    try:
+        with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+            exec(compiled, namespace)  # noqa: S102 - 隔离沙箱内执行
+            entry_fn = namespace.get(entrypoint)
+            if not callable(entry_fn):
+                raise BlockExecutionError(
+                    f"block code must define `def {entrypoint}(inputs): ...`"
+                )
+    except Exception as exc:  # noqa: BLE001
+        yield {
+            "type": "result",
+            "output": None,
+            "stdout": stdout_buf.getvalue(),
+            "stderr": stderr_buf.getvalue() + traceback.format_exc(),
+            "error": str(exc),
+        }
+        return
+
+    # 生成器入口：逐 yield 产出 chunk；普通入口：一次执行，若返回生成器同样按流处理
+    if inspect.isgeneratorfunction(entry_fn):
+        with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+            gen = entry_fn(inputs)
+        yield from _stream_from_generator(gen, stdout_buf, stderr_buf)
+        return
+
+    try:
+        with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+            output = entry_fn(inputs)
+    except Exception as exc:  # noqa: BLE001
+        yield {
+            "type": "result",
+            "output": None,
+            "stdout": stdout_buf.getvalue(),
+            "stderr": stderr_buf.getvalue() + traceback.format_exc(),
+            "error": str(exc),
+        }
+        return
+
+    if inspect.isgenerator(output):
+        yield from _stream_from_generator(output, stdout_buf, stderr_buf)
+        return
+
+    yield {
+        "type": "result",
+        "output": output,
+        "stdout": stdout_buf.getvalue(),
+        "stderr": stderr_buf.getvalue(),
+        "error": None,
+    }
+
+
+def _stream_from_generator(
+    gen: Iterator[Any], stdout_buf: io.StringIO, stderr_buf: io.StringIO
+) -> Iterator[dict[str, Any]]:
+    """驱动用户生成器：每次 ``next`` 在 redirect 上下文内推进，逐 chunk 产出；末尾产出 result。
+
+    生成器的 ``return`` 值（``StopIteration.value``）作为最终 output（多数纯流场景为 None）。
+    """
+    final_output: Any = None
+    while True:
+        try:
+            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+                chunk = next(gen)
+        except StopIteration as stop:
+            final_output = stop.value
+            break
+        except Exception as exc:  # noqa: BLE001
+            yield {
+                "type": "result",
+                "output": None,
+                "stdout": stdout_buf.getvalue(),
+                "stderr": stderr_buf.getvalue() + traceback.format_exc(),
+                "error": str(exc),
+            }
+            return
+        yield {"type": "chunk", "data": chunk}
+
+    yield {
+        "type": "result",
+        "output": final_output,
         "stdout": stdout_buf.getvalue(),
         "stderr": stderr_buf.getvalue(),
         "error": None,

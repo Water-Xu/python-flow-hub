@@ -12,15 +12,26 @@ import time
 import uuid
 from typing import Any
 
+from typing import AsyncIterator
+
 from pyflow_runtime.sandbox_config import POD_SECURITY_CONTEXT
 
 from app.config import get_settings
-from app.core.sandbox.docker_executor import ExecutionOutput, _RESULT_MARKER, _parse_logs
+from app.core.sandbox.docker_executor import (
+    ExecutionOutput,
+    _RESULT_MARKER,
+    _STREAMING_BOOTSTRAP,
+    _parse_logs,
+    parse_stream_line,
+)
 from app.errors import PYFLOW_EXEC_SANDBOX_ERROR, PYFLOW_EXEC_TIMEOUT, BusinessException
 from app.observability.logging import get_logger
 
 settings = get_settings()
 logger = get_logger()
+
+# 常驻 invoke Service 端口（与 manifest_generator.build_service 暴露端口一致）
+INVOKE_PORT = 8000
 
 _EXEC_BOOTSTRAP = (
     "import os,sys,json,base64\n"
@@ -47,8 +58,21 @@ def _k8s_clients():
     return client.BatchV1Api(), client.CoreV1Api()
 
 
-def _build_job_manifest(job_name: str, payload_b64: str) -> dict[str, Any]:
+def _build_job_manifest(
+    job_name: str,
+    payload_b64: str,
+    *,
+    bootstrap: str = _EXEC_BOOTSTRAP,
+    extra_env: list[dict[str, str]] | None = None,
+) -> dict[str, Any]:
     sec = POD_SECURITY_CONTEXT
+    env = [
+        {"name": "PYFLOW_EXEC_PAYLOAD_B64", "value": payload_b64},
+        # 只读根文件系统下禁止写 .pyc，避免无谓写盘失败
+        {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+    ]
+    if extra_env:
+        env.extend(extra_env)
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
@@ -77,12 +101,8 @@ def _build_job_manifest(job_name: str, payload_b64: str) -> dict[str, Any]:
                             "name": "exec",
                             "image": settings.runner_image,
                             "imagePullPolicy": "IfNotPresent",
-                            "command": ["python", "-c", _EXEC_BOOTSTRAP],
-                            "env": [
-                                {"name": "PYFLOW_EXEC_PAYLOAD_B64", "value": payload_b64},
-                                # 只读根文件系统下禁止写 .pyc，避免无谓写盘失败
-                                {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
-                            ],
+                            "command": ["python", "-c", bootstrap],
+                            "env": env,
                             "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}],
                             # 显式 resources：避免命名空间 LimitRange/ResourceQuota 拒绝创建
                             "resources": {
@@ -240,6 +260,46 @@ def _collect_pod_logs(core_api: Any, namespace: str, job_name: str) -> Execution
     return _parse_logs(logs, 0)
 
 
+async def execute_via_invoke_service(
+    service: str,
+    inputs: dict[str, Any],
+    *,
+    entrypoint: str = "run",
+    timeout: int | None = None,
+) -> ExecutionOutput:
+    """复用块的常驻 invoke Service 执行（消除一次性 Job 冷启动）。
+
+    invoke 服务（runner invoke 角色，min≥1 常驻）启动时已从 MinIO 注入该块稳定版本代码，
+    故此处仅传 inputs + entrypoint，不再传 code；返回 ``execute_user_code`` 的 result 形态，
+    与一次性 Job 路径的 :class:`ExecutionOutput` 契约保持一致。
+
+    跨命名空间经 ClusterIP DNS ``{service}.{namespace}:8000/invoke`` 直达（块 NetworkPolicy 仅限 Egress，
+    不限制 Ingress）。调用失败抛 ``PYFLOW_EXEC_SANDBOX_ERROR``，由上层 :func:`run_block` 回退一次性 Job。
+    """
+    import httpx
+
+    timeout = timeout or settings.execution_timeout
+    url = f"http://{service}.{settings.k8s_namespace}:{INVOKE_PORT}/invoke"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                url, json={"inputs": inputs, "entrypoint": entrypoint}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as exc:
+        raise BusinessException(
+            PYFLOW_EXEC_SANDBOX_ERROR,
+            f"invoke service call failed: {str(exc)[:200]}",
+        ) from exc
+    return ExecutionOutput(
+        output=data.get("output"),
+        stdout=data.get("stdout") or "",
+        stderr=data.get("stderr") or "",
+        error=data.get("error"),
+    )
+
+
 async def execute_in_k8s_job(
     code: str,
     inputs: dict[str, Any],
@@ -256,3 +316,123 @@ async def execute_in_k8s_job(
         )
     except asyncio.TimeoutError as exc:
         raise BusinessException(PYFLOW_EXEC_TIMEOUT, "k8s job wait timeout") from exc
+
+
+# ── 流式执行（真流式：Job + pod 日志 follow，逐 chunk 穿透）──────────────────────
+
+async def execute_in_k8s_job_stream(
+    code: str,
+    inputs: dict[str, Any],
+    *,
+    entrypoint: str = "run",
+    timeout: int | None = None,
+) -> AsyncIterator[dict[str, Any]]:
+    """在 GKE 上流式执行：创建 Job，等待 Pod 进入 Running，``follow`` 跟随日志逐行解析 chunk/result。
+
+    K8s SDK 为同步阻塞，全部 I/O 在线程内进行，经 ``asyncio.Queue`` 回送事件循环。
+    """
+    timeout = timeout or settings.execution_timeout
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+    def _worker() -> None:
+        try:
+            batch_api, core_api = _k8s_clients()
+        except BusinessException as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, ("error", exc.detail or "k8s client init failed"))
+            loop.call_soon_threadsafe(queue.put_nowait, ("end", None))
+            return
+
+        payload = json.dumps(
+            {"code": code, "inputs": inputs, "entrypoint": entrypoint}, default=str
+        )
+        payload_b64 = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+        if len(payload_b64) > 900_000:
+            loop.call_soon_threadsafe(
+                queue.put_nowait, ("error", "block payload too large for k8s job env")
+            )
+            loop.call_soon_threadsafe(queue.put_nowait, ("end", None))
+            return
+
+        job_name = f"pyflow-exec-{uuid.uuid4().hex[:12]}"
+        manifest = _build_job_manifest(
+            job_name,
+            payload_b64,
+            bootstrap=_STREAMING_BOOTSTRAP,
+            extra_env=[{"name": "PYTHONUNBUFFERED", "value": "1"}],
+        )
+        ns = settings.k8s_namespace
+        created = False
+        try:
+            batch_api.create_namespaced_job(namespace=ns, body=manifest)
+            created = True
+
+            # 等待 Pod 就绪（Running/Succeeded/Failed 任一即可开始跟随日志）
+            deadline = time.monotonic() + timeout
+            pod_name: str | None = None
+            while time.monotonic() < deadline and pod_name is None:
+                pods = core_api.list_namespaced_pod(
+                    namespace=ns, label_selector=f"job-name={job_name}"
+                ).items
+                if pods and getattr(pods[0].status, "phase", None) in (
+                    "Running", "Succeeded", "Failed",
+                ):
+                    pod_name = pods[0].metadata.name
+                    break
+                time.sleep(0.5)
+
+            if pod_name is None:
+                loop.call_soon_threadsafe(queue.put_nowait, ("error", "k8s pod did not start in time"))
+                return
+
+            resp = core_api.read_namespaced_pod_log(
+                name=pod_name,
+                namespace=ns,
+                container="exec",
+                follow=True,
+                _preload_content=False,
+            )
+            buf = b""
+            for raw in resp.stream():
+                buf += raw
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    loop.call_soon_threadsafe(
+                        queue.put_nowait, ("line", line.decode("utf-8", "replace"))
+                    )
+            if buf.strip():
+                loop.call_soon_threadsafe(
+                    queue.put_nowait, ("line", buf.decode("utf-8", "replace"))
+                )
+        except Exception as exc:  # noqa: BLE001
+            loop.call_soon_threadsafe(queue.put_nowait, ("error", str(exc)[:300]))
+        finally:
+            if created:
+                try:
+                    batch_api.delete_namespaced_job(
+                        name=job_name, namespace=ns, propagation_policy="Background"
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.warning("k8s_job_cleanup_failed", job=job_name)
+            loop.call_soon_threadsafe(queue.put_nowait, ("end", None))
+
+    worker = asyncio.create_task(asyncio.to_thread(_worker))
+    deadline = loop.time() + timeout + 30
+    try:
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise BusinessException(PYFLOW_EXEC_TIMEOUT, "k8s job stream timeout")
+            try:
+                kind, val = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError as exc:
+                raise BusinessException(PYFLOW_EXEC_TIMEOUT, "k8s job stream timeout") from exc
+            if kind == "end":
+                break
+            if kind == "error":
+                raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, str(val))
+            event = parse_stream_line(val)
+            if event is not None:
+                yield event
+    finally:
+        worker.cancel()

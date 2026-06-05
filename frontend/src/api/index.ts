@@ -272,6 +272,84 @@ export const apiPortalApi = {
       headers: { 'Content-Type': 'application/json' },
       validateStatus: () => true,
     }),
+  /**
+   * 流式调用：POST /api/public/{path}/stream，SSE 逐 chunk 实时回调。
+   * 用 fetch + ReadableStream 逐行解析（需 POST，不能用 EventSource）；返回 AbortController 供中止。
+   * @param onChunk 每个 `event: data` 的 chunk 内容（用户代码 yield 的值）
+   * @param onResult 终止 `event: result`（含 outputs / latency / degraded）
+   * @param onError `event: error` 或网络异常
+   * @param onDone 流结束（无论成功失败）
+   */
+  invokeStream: (
+    path: string,
+    payload: any,
+    handlers: {
+      onChunk?: (chunk: any) => void
+      onResult?: (result: any) => void
+      onError?: (err: string) => void
+      onDone?: () => void
+    },
+  ): AbortController => {
+    const ctrl = new AbortController()
+    ;(async () => {
+      try {
+        const resp = await fetch(`${baseURL}/api/public/${path}/stream`, {
+          method: 'POST',
+          signal: ctrl.signal,
+          headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+          body: JSON.stringify(payload),
+        })
+        if (!resp.ok || !resp.body) {
+          let detail = `HTTP ${resp.status}`
+          try {
+            const j = await resp.json()
+            detail = j?.detail || j?.msgKey || detail
+          } catch {
+            /* 非 JSON 错误体忽略 */
+          }
+          handlers.onError?.(detail)
+          handlers.onDone?.()
+          return
+        }
+        const reader = resp.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        // 逐块读取，按 SSE 帧（空行分隔）切分，解析 event/data
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          let sep: number
+          while ((sep = buffer.indexOf('\n\n')) !== -1) {
+            const frame = buffer.slice(0, sep)
+            buffer = buffer.slice(sep + 2)
+            let event = 'message'
+            const dataLines: string[] = []
+            for (const line of frame.split('\n')) {
+              if (line.startsWith('event:')) event = line.slice(6).trim()
+              else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+            }
+            if (!dataLines.length) continue
+            let data: any = {}
+            try {
+              data = JSON.parse(dataLines.join('\n'))
+            } catch {
+              data = { raw: dataLines.join('\n') }
+            }
+            if (event === 'data') handlers.onChunk?.(data.chunk)
+            else if (event === 'result') handlers.onResult?.(data)
+            else if (event === 'error') handlers.onError?.(data.error || '执行失败')
+            else if (event === 'done') handlers.onDone?.()
+          }
+        }
+        handlers.onDone?.()
+      } catch (e: any) {
+        if (e?.name !== 'AbortError') handlers.onError?.(e?.message || '网络错误')
+        handlers.onDone?.()
+      }
+    })()
+    return ctrl
+  },
 }
 
 /** MQ 消费者管理（接口/Flow 级，决策 3.1 重写为 Flow 级模型 A，全部按 api_id 维度）。 */

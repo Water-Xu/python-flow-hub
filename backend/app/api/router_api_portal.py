@@ -5,17 +5,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from collections import defaultdict, deque
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.rbac import Role, require_role
 from app.config import get_settings
-from app.core.execution_service import execute_block
+from app.core.execution_service import execute_block, execute_block_stream
 from app.core.flow.flow_runner import run_flow
 from app.core.mq.invocation_doc import build_mq_invocation
 from app.db import get_session
@@ -31,6 +34,7 @@ from app.errors import (
 from app.core.mq.validation import validate_mq_config
 from app.models.api_portal import PublishedApi
 from app.models.block import Block
+from app.models.deployment import FlowDeployment
 from app.models.flow import Flow, FlowEdge, FlowNode
 from app.schemas.api_portal import ApiMqConfigRequest, ApiResponse, PublishApiRequest
 
@@ -73,6 +77,33 @@ async def _get_api_by_path(session: AsyncSession, path: str) -> PublishedApi:
     if api is None:
         raise BusinessException(PYFLOW_API_NOT_FOUND, path)
     return api
+
+
+async def _resolve_block_services(session: AsyncSession, flow_id: str) -> dict[str, str]:
+    """k8s 模式下，若该流程存在运行中的部署，返回 ``block_id -> 常驻 invoke Service 名`` 映射。
+
+    命中后公开调用直接复用常驻 invoke Pod（稳定版本代码，无冷启动），免去每个块的一次性 Job；
+    无运行部署 / 非 k8s 时返回空映射，调用回退到原一次性 Job 执行 draft 代码（行为不变）。
+    Service 名与一键部署 :mod:`orchestrator` 完全一致，避免命名分叉。
+    """
+    if settings.deployment_mode != "k8s":
+        return {}
+    deployment = (await session.execute(
+        select(FlowDeployment)
+        .where(
+            FlowDeployment.flow_id == flow_id,
+            FlowDeployment.status.in_(["running", "partially_degraded"]),
+        )
+        .order_by(FlowDeployment.updated_at.desc())
+    )).scalars().first()
+    if deployment is None:
+        return {}
+    from app.core.k8s.manifest_generator import deployment_name
+    from app.core.k8s.orchestrator import _build_context, build_specs
+
+    specs = await build_specs(session, flow_id)
+    ctx = _build_context(deployment)
+    return {bs.block_id: deployment_name(ctx, bs) for bs in specs}
 
 
 # ── 用户接口管理 ──────────────────────────────────────────────────────────────
@@ -405,6 +436,9 @@ async def invoke_api(
         if missing:
             raise BusinessException(PYFLOW_BLOCK_NOT_FOUND, next(iter(missing)))
 
+    # k8s 模式且该流程已部署时，复用常驻 invoke Service（warm Pod），消除每块 Job 冷启动
+    block_service = await _resolve_block_services(session, flow_id)
+
     start_ts = time.time()
     try:
         async def node_executor(node: dict, node_inputs: dict) -> dict:
@@ -418,6 +452,7 @@ async def invoke_api(
                 session, block_id=block.id, code=block.draft_code or "",
                 inputs=node_inputs, login_id=api.owner_login_id,
                 entrypoint=entrypoint,
+                invoke_service=block_service.get(block.id),
             )
             if record.status != "success":
                 detail = (record.stderr or "block execution failed").strip()[:500]
@@ -449,5 +484,197 @@ async def invoke_api(
         api.error_calls += 1
         await session.commit()
         raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, str(exc)[:500]) from exc
+
+
+# ── 公开调用入口（流式 SSE）─────────────────────────────────────────────────────
+
+def _terminal_node_ids(
+    nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
+) -> set[str]:
+    """终止节点（无出边的 sink 节点）id 集合，其输出即流程"最终输出"，按流式推送。"""
+    sources = {e["source_node_id"] for e in edges}
+    return {n["id"] for n in nodes if n["id"] not in sources}
+
+
+def _sse(event: str, data: dict[str, Any]) -> str:
+    """格式化一个 SSE 帧（``event:`` + ``data:`` 两行 + 空行分隔）。"""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+@router.post("/api/public/{path}/stream")
+async def invoke_api_stream(
+    path: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """流式调用接口（SSE）：终止节点用户代码 ``yield`` 的内容实时穿透为 ``event: data``。
+
+    前置校验（状态/降级/限流/装载流程）与 :func:`invoke_api` 一致，且在进入流式响应前完成，
+    以便仍能返回标准 HTTP 错误；进入流后统一以 ``event: error`` 反馈异常。
+    """
+    api = await _get_api_by_path(session, path)
+
+    if api.status != "active":
+        raise BusinessException(PYFLOW_API_NOT_FOUND, f"接口 {path} 当前状态为 {api.status}")
+
+    # 限流检查（降级在流内处理：降级直接产出单个 result 事件）
+    _check_rate_limit(api)
+
+    body: dict[str, Any] = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    inputs = body.get("inputs", {})
+
+    flow_id = api.active_flow_id or api.flow_id
+    nodes_rows = (await session.execute(
+        select(FlowNode).where(FlowNode.flow_id == flow_id)
+    )).scalars().all()
+    edges_rows = (await session.execute(
+        select(FlowEdge).where(FlowEdge.flow_id == flow_id)
+    )).scalars().all()
+
+    nodes = [
+        {"id": n.id, "node_type": n.node_type, "block_id": n.block_id,
+         "config": n.config, "position": n.position}
+        for n in nodes_rows
+    ]
+    edges = [
+        {"id": e.id, "source_node_id": e.source_node_id,
+         "target_node_id": e.target_node_id,
+         "source_port": e.source_port, "target_port": e.target_port}
+        for e in edges_rows
+    ]
+
+    block_ids = {n["block_id"] for n in nodes if n.get("block_id")}
+    block_cache: dict[str, Block] = {}
+    if block_ids:
+        rows = (await session.execute(
+            select(Block).where(Block.id.in_(block_ids))
+        )).scalars().all()
+        block_cache = {b.id: b for b in rows}
+        missing = block_ids - block_cache.keys()
+        if missing:
+            raise BusinessException(PYFLOW_BLOCK_NOT_FOUND, next(iter(missing)))
+
+    terminal_ids = _terminal_node_ids(nodes, edges)
+    # 非终止节点可复用常驻 invoke Service（终止节点需流式，仍走 Job 流式路径）
+    block_service = await _resolve_block_services(session, flow_id)
+
+    async def _event_stream() -> Any:
+        yield _sse("running", {"status": "running"})
+
+        # 降级：不执行流程，直接产出 fallback（前置已完成，无并发，安全操作 session）
+        if api.degradation_enabled and api.degradation_fallback:
+            api.total_calls += 1
+            api.success_calls += 1
+            await session.commit()
+            yield _sse("result", {
+                "degraded": True, "data": api.degradation_fallback, "status": "succeeded",
+            })
+            yield _sse("done", {})
+            return
+
+        # run_flow 在独立任务内执行整个 DAG；终止节点的 chunk 经 event_queue 实时回送本生成器。
+        # 注意：流式期间本生成器不触碰 session（仅 run_task 内顺序使用），避免 AsyncSession 并发冲突。
+        event_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        start_ts = time.time()
+
+        async def node_executor(node: dict, node_inputs: dict) -> dict:
+            block_id = node.get("block_id")
+            if not block_id:
+                return {}
+            block = block_cache[block_id]
+            entrypoint = api.entrypoint or (node.get("config") or {}).get("entrypoint") or "run"
+
+            # 非终止节点：常规一次性执行（命中部署时复用常驻 invoke Service）
+            if node["id"] not in terminal_ids:
+                record = await execute_block(
+                    session, block_id=block.id, code=block.draft_code or "",
+                    inputs=node_inputs, login_id=api.owner_login_id, entrypoint=entrypoint,
+                    invoke_service=block_service.get(block.id),
+                )
+                if record.status != "success":
+                    detail = (record.stderr or "block execution failed").strip()[:500]
+                    raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, detail)
+                return record.output if isinstance(record.output, dict) else {"value": record.output}
+
+            # 终止节点：流式执行，chunk 实时入队，末尾 result 作为节点输出
+            final_output: dict[str, Any] = {}
+            async for event in execute_block_stream(
+                session, block_id=block.id, code=block.draft_code or "",
+                inputs=node_inputs, login_id=api.owner_login_id, entrypoint=entrypoint,
+            ):
+                if event.get("type") == "chunk":
+                    await event_queue.put(("data", event.get("data")))
+                else:
+                    if event.get("error"):
+                        detail = str(event.get("error")).strip()[:500]
+                        raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, detail)
+                    out = event.get("output")
+                    final_output = out if isinstance(out, dict) else {"value": out}
+            return final_output
+
+        async def checkpoint(node_id: str, status: str, output: dict) -> None:
+            pass
+
+        async def _run() -> None:
+            try:
+                outputs = await run_flow(nodes, edges, inputs, node_executor, checkpoint)
+                await event_queue.put(("outputs", outputs))
+            except BusinessException as exc:
+                await event_queue.put(("error", exc.detail or f"{exc.code}:{exc.msg_key}"))
+            except Exception as exc:  # noqa: BLE001
+                await event_queue.put(("error", str(exc)[:500]))
+            finally:
+                await event_queue.put(("__end__", None))
+
+        run_task = asyncio.create_task(_run())
+        final_outputs: dict[str, Any] | None = None
+        error_detail: str | None = None
+        try:
+            while True:
+                kind, val = await event_queue.get()
+                if kind == "__end__":
+                    break
+                if kind == "data":
+                    yield _sse("data", {"chunk": val})
+                elif kind == "outputs":
+                    final_outputs = val
+                elif kind == "error":
+                    error_detail = val
+        finally:
+            await run_task
+
+        elapsed = (time.time() - start_ts) * 1000
+        if error_detail is not None:
+            api.total_calls += 1
+            api.error_calls += 1
+            await session.commit()
+            yield _sse("error", {"error": error_detail})
+            yield _sse("done", {})
+            return
+
+        api.total_calls += 1
+        api.success_calls += 1
+        n = api.total_calls
+        api.avg_latency_ms = (api.avg_latency_ms * (n - 1) + elapsed) / n
+        await session.commit()
+        yield _sse("result", {
+            "outputs": final_outputs, "status": "succeeded", "latency_ms": round(elapsed, 2),
+        })
+        yield _sse("done", {})
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # 关闭反代缓冲（nginx），确保 chunk 即时下发
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 

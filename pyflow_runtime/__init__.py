@@ -16,6 +16,7 @@ from pyflow_runtime.executor import (  # noqa: E402
     DEFAULT_ENTRYPOINT,
     discover_entrypoints,
     execute_user_code,
+    execute_user_code_stream,
 )
 from pyflow_runtime.input_mapper import map_inputs  # noqa: E402
 from pyflow_runtime.reply_builder import build_reply, render_reply_routing_key  # noqa: E402
@@ -26,6 +27,7 @@ __all__ = [
     "DEFAULT_ENTRYPOINT",
     "discover_entrypoints",
     "execute_user_code",
+    "execute_user_code_stream",
     "evaluate_condition",
     "map_inputs",
     "build_reply",
