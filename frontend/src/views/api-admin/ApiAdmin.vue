@@ -616,7 +616,8 @@ onMounted(load)
           />
 
           <div class="instance-header">
-            <span>实例数量：<strong>{{ instanceData.instance_count }}</strong></span>
+            <span>实例数量（Ready）：<strong>{{ instanceData.instance_count }}</strong></span>
+            <span class="dim" style="font-size:12px;margin-left:8px">共 {{ instanceData.instances.length }} 个 Deployment</span>
           </div>
 
           <transition-group name="list" tag="div">
@@ -624,27 +625,29 @@ onMounted(load)
               v-for="inst in instanceData.instances"
               :key="inst.pod_name"
               class="instance-card pf-card"
+              :class="`inst-kind-${inst.kind || 'block'}`"
             >
               <div class="inst-row">
-                <el-icon :color="inst.ready ? '#22c55e' : '#ef4444'">
-                  <component :is="inst.ready ? 'CircleCheck' : 'CircleClose'" />
+                <el-icon :color="inst.ready ? '#22c55e' : (inst.status === 'degraded' ? '#e6a23c' : '#909399')">
+                  <CircleCheck v-if="inst.ready" />
+                  <Warning v-else-if="inst.status === 'degraded'" />
+                  <Remove v-else />
                 </el-icon>
                 <span class="inst-name">{{ inst.pod_name }}</span>
-                <el-tag :type="inst.status === 'running' ? 'success' : 'danger'" size="small">
-                  {{ inst.status }}
+                <el-tag
+                  :type="inst.status === 'running' ? 'success' : inst.status === 'degraded' ? 'warning' : inst.status === 'stopped' ? 'danger' : 'info'"
+                  size="small"
+                >
+                  {{ inst.status === 'scaled_down' ? '已缩零' : inst.status === 'degraded' ? '降级' : inst.status === 'stopped' ? '已停止' : inst.status }}
+                </el-tag>
+                <el-tag v-if="inst.kind === 'flow_consumer'" size="small" type="primary" effect="plain" style="margin-left:2px">
+                  MQ消费者
                 </el-tag>
               </div>
-              <div class="inst-detail" v-if="inst.block_name">
-                <span class="dim" style="font-size:12px">{{ inst.block_name }}</span>
-                <span v-if="inst.replicas != null">副本: {{ inst.replicas }}</span>
-              </div>
-              <div class="inst-detail" v-else-if="inst.cpu_usage !== '—'">
-                <span>CPU: {{ inst.cpu_usage }}</span>
-                <span>Mem: {{ inst.memory_usage }}</span>
-                <span>重启: {{ inst.restart_count }}</span>
-              </div>
-              <div class="inst-detail dim" v-else>
-                Dev 本地模式 — 无 Pod 指标
+              <div class="inst-detail">
+                <span class="dim">{{ inst.label || inst.block_name || '—' }}</span>
+                <span>副本: {{ inst.replicas }}</span>
+                <span v-if="inst.kind !== 'flow_consumer' && inst.cpu_usage !== '—'">CPU: {{ inst.cpu_usage }}</span>
               </div>
             </div>
           </transition-group>
@@ -867,6 +870,10 @@ onMounted(load)
   gap: 14px;
   font-size: 12px;
   color: var(--pf-text-dim);
+}
+.inst-kind-flow_consumer {
+  border-left: 3px solid var(--pf-accent);
+  opacity: 0.85;
 }
 
 /* 端口列表 */

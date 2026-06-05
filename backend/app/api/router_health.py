@@ -80,16 +80,44 @@ async def _check_redis() -> bool:
 
 
 async def _check_rabbitmq() -> bool:
+    """两级探针：
+    1. Management HTTP API（15672）aliveness-test，用配置的 vhost 和凭据。
+       返回 200/204 → UP；其余状态（401/403/404 等）或任何异常 → 进入 fallback。
+    2. AMQP 协议直连（5672）：建立真实连接后立即关闭，验证端口可达且凭据有效。
+    """
+    if await _check_rabbitmq_mgmt():
+        return True
+    return await _check_rabbitmq_amqp()
+
+
+async def _check_rabbitmq_mgmt() -> bool:
+    """通过 RabbitMQ Management HTTP API 探测。"""
     try:
         import httpx
 
-        from app.core.mq.consumer_manager import _amqp_to_mgmt, _extract_auth
+        from app.core.mq.consumer_manager import _amqp_to_mgmt, _extract_auth, _extract_vhost
         mgmt = _amqp_to_mgmt(settings.rabbitmq_url)
         if not mgmt:
             return False
+        vhost = _extract_vhost(settings.rabbitmq_url)
+        auth = _extract_auth(settings.rabbitmq_url)
         async with httpx.AsyncClient(timeout=2) as client:
-            resp = await client.get(f"{mgmt}/api/aliveness-test/%2F", auth=_extract_auth(settings.rabbitmq_url))
-            return resp.status_code in (200, 404)  # 404=vhost 名不同，但服务可达
+            resp = await client.get(f"{mgmt}/api/aliveness-test/{vhost}", auth=auth)
+            return resp.status_code in (200, 204)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _check_rabbitmq_amqp() -> bool:
+    """Fallback：通过 AMQP 协议（5672）直连验证 RabbitMQ 可达且凭据有效。"""
+    try:
+        import aio_pika
+        conn = await asyncio.wait_for(
+            aio_pika.connect(settings.rabbitmq_url),
+            timeout=3,
+        )
+        await conn.close()
+        return True
     except Exception:  # noqa: BLE001
         return False
 

@@ -171,21 +171,35 @@ async def get_api_instances(
     if deployment is None or not deployment.block_statuses:
         return ApiInstanceInfo(deployment_mode=mode, instance_count=0, instances=[])
 
+    def _bs_status(bs: dict) -> str:
+        if not bs.get("exists"):
+            return "stopped"
+        replicas = bs.get("replicas", 0) or 0
+        ready = bs.get("ready", 0) or 0
+        if ready >= 1:
+            return "running"
+        if replicas > 0:
+            return "degraded"
+        return "scaled_down"
+
     instances = [
         {
-            "pod_name": bs.get("deployment") or bs.get("name") or bs.get("block_id", "—"),
-            "status": "running" if bs.get("exists") else "stopped",
+            "pod_name": bs.get("deployment") or bs.get("name") or bs.get("block_id") or "—",
+            "status": _bs_status(bs),
             "ready": (bs.get("ready", 0) or 0) >= 1,
             "restart_count": 0,
             "cpu_usage": "—",
             "memory_usage": "—",
-            "replicas": bs.get("replicas", 0),
+            "replicas": bs.get("replicas", 0) or 0,
+            "kind": bs.get("kind", "block"),
             "block_id": bs.get("block_id"),
-            "block_name": bs.get("name"),
+            "block_name": bs.get("name") if bs.get("kind") != "flow_consumer" else None,
+            "api_id": bs.get("api_id"),
+            "label": bs.get("name"),
         }
         for bs in deployment.block_statuses
     ]
-    instance_count = sum(1 for inst in instances if inst["status"] == "running")
+    instance_count = sum(1 for inst in instances if inst["ready"])
     return ApiInstanceInfo(
         deployment_mode=mode,
         instance_count=instance_count,
