@@ -111,6 +111,27 @@ def _maybe_encrypt_outputs(api: PublishedApi, outputs: Any) -> tuple[Any, bool]:
     return outputs, False
 
 
+def _resolve_node_entrypoint(api: PublishedApi, node: dict[str, Any]) -> str:
+    """解析某节点本次调用的入口函数。
+
+    优先级：节点级 ``entrypoint_map[node_id]`` > API 级全局 ``entrypoint``
+    > 节点 ``config.entrypoint`` > 默认 ``run``。
+
+    节点级映射解决多个调用块含同名内置函数（如都含 ``run``）时需分别指定入口的场景。
+
+    :param api: 已发布接口
+    :param node: 流程节点 dict（含 id / config）
+    :return: 入口函数名
+    """
+    node_id = node.get("id")
+    return (
+        (api.entrypoint_map or {}).get(node_id)
+        or api.entrypoint
+        or (node.get("config") or {}).get("entrypoint")
+        or "run"
+    )
+
+
 async def _get_api(session: AsyncSession, api_id: str) -> PublishedApi:
     api = await session.get(PublishedApi, api_id)
     if api is None:
@@ -200,6 +221,7 @@ async def publish_flow_as_api(
         owner_login_id=login_id,
         status="active",
         entrypoint=req.entrypoint or None,
+        entrypoint_map=req.entrypoint_map or {},
     )
     session.add(api)
     await session.commit()
@@ -409,6 +431,7 @@ async def get_api_docs(
         "status": api.status,
         "trigger_type": api.trigger_type,
         "entrypoint": api.entrypoint,
+        "entrypoint_map": api.entrypoint_map or {},
         "flow_id": flow_id,
         "flow_name": flow.name if flow else "未知",
         "node_count": len(nodes),
@@ -586,8 +609,8 @@ async def invoke_api(
             if not block_id:
                 return {}
             block = block_cache[block_id]
-            # api.entrypoint 优先（API 级绑定），其次节点配置，最后默认 run
-            entrypoint = api.entrypoint or (node.get("config") or {}).get("entrypoint") or "run"
+            # 节点级 entrypoint_map 优先，其次 API 级全局，再次节点配置，最后默认 run
+            entrypoint = _resolve_node_entrypoint(api, node)
             record = await execute_block(
                 session, block_id=block.id, code=block.draft_code or "",
                 inputs=node_inputs, login_id=api.owner_login_id,
@@ -734,7 +757,7 @@ async def invoke_api_stream(
             if not block_id:
                 return {}
             block = block_cache[block_id]
-            entrypoint = api.entrypoint or (node.get("config") or {}).get("entrypoint") or "run"
+            entrypoint = _resolve_node_entrypoint(api, node)
 
             # 非终止节点：常规一次性执行（命中部署时复用常驻 invoke Service）
             if node["id"] not in terminal_ids:

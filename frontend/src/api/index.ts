@@ -210,6 +210,7 @@ export interface PublishedApi {
   trigger_type: string
   mq_config: Record<string, any>
   entrypoint: string | null
+  entrypoint_map: Record<string, string>
   is_locked: boolean
   lock_reason: string | null
   locked_by: string | null
@@ -262,6 +263,7 @@ export const apiPortalApi = {
     tags?: string
     flow_id: string
     entrypoint?: string | null
+    entrypoint_map?: Record<string, string>
   }) => client.post<any, PublishedApi>('/api/portal/apis', data),
   /** 获取流程所有节点的可用入口函数（用于发布/MQ 配置时选择绑定函数） */
   getFlowEntrypoints: (flowId: string) =>

@@ -18,8 +18,11 @@ class PublishApiRequest(BaseModel):
     path: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
     tags: str = ""
     flow_id: str
-    # API 级入口函数；None = 各节点保持自己的 config.entrypoint（或默认 run）
+    # API 级全局入口函数；None = 各节点保持自己的 config.entrypoint（或默认 run）
     entrypoint: str | None = None
+    # 节点级入口函数映射 {node_id: entrypoint_name}，优先级高于全局 entrypoint。
+    # 用于多个调用块含同名函数时分别指定各块入口。
+    entrypoint_map: dict[str, str] = {}
 
 
 class ApiMqConfigRequest(BaseModel):
@@ -86,6 +89,7 @@ class ApiResponse(BaseModel):
     trigger_type: str
     mq_config: dict
     entrypoint: str | None
+    entrypoint_map: dict
     is_locked: bool
     lock_reason: str | None
     locked_by: str | None

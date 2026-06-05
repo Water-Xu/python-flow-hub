@@ -30,8 +30,11 @@ class PublishedApi(Base, UUIDMixin, TimestampMixin):
     # active_flow_id: 当前实际调用的流程（可与 flow_id 不同，用于平滑过渡）
     active_flow_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # API 级入口函数名称（None = 使用各节点 config.entrypoint 或默认 run）
-    # 设置后会覆盖流程内所有节点的 entrypoint，适用于多函数 block 发布为独立接口的场景
+    # 全局覆盖（保留向后兼容）：设置后覆盖流程内所有未在 entrypoint_map 指定的节点。
     entrypoint: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # 节点级入口函数映射 {node_id: entrypoint_name}：优先级高于全局 entrypoint。
+    # 解决多个调用块含同名内置函数（如都含 run）时，需对每个块分别指定入口的场景。
+    entrypoint_map: Mapped[dict] = mapped_column(JSON, default=dict)
 
     owner_login_id: Mapped[str] = mapped_column(String(64), index=True)
     # active | paused | deprecated

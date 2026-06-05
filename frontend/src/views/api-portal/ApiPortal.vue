@@ -192,7 +192,8 @@ const form = ref({
   path: '',
   tags: '',
   flow_id: '',
-  entrypoint: '' as string,
+  // 节点级入口函数映射 {node_id: entrypoint}，每个调用块分别指定
+  entrypoint_map: {} as Record<string, string>,
 })
 
 // ── 发布对话框：入口函数选择 ────────────────────────────────────────────────
@@ -203,11 +204,18 @@ watch(
   () => form.value.flow_id,
   async (fid) => {
     flowEntrypointsInfo.value = null
-    form.value.entrypoint = ''
+    form.value.entrypoint_map = {}
     if (!fid) return
     entrypointsLoading.value = true
     try {
-      flowEntrypointsInfo.value = await apiPortalApi.getFlowEntrypoints(fid)
+      const info = await apiPortalApi.getFlowEntrypoints(fid)
+      flowEntrypointsInfo.value = info
+      // 默认沿用各节点画布中已配置的入口函数
+      const map: Record<string, string> = {}
+      for (const n of info.nodes) {
+        map[n.node_id] = n.configured_entrypoint || 'run'
+      }
+      form.value.entrypoint_map = map
     } catch {
       // 获取失败不阻断发布，保持默认
     } finally {
@@ -236,8 +244,13 @@ async function publish() {
   }
   try {
     await apiPortalApi.publish({
-      ...form.value,
-      entrypoint: form.value.entrypoint || null,
+      name: form.value.name,
+      description: form.value.description,
+      path: form.value.path,
+      tags: form.value.tags,
+      flow_id: form.value.flow_id,
+      entrypoint: null,
+      entrypoint_map: { ...form.value.entrypoint_map },
     })
     publishDialogVisible.value = false
     ElMessage.success('接口发布成功')
@@ -426,7 +439,7 @@ async function copyUrl(api: PublishedApi) {
 }
 
 function resetForm() {
-  form.value = { name: '', description: '', path: '', tags: '', flow_id: '', entrypoint: '' }
+  form.value = { name: '', description: '', path: '', tags: '', flow_id: '', entrypoint_map: {} }
   flowEntrypointsInfo.value = null
 }
 
@@ -592,60 +605,46 @@ onMounted(load)
           </el-select>
         </el-form-item>
 
-        <!-- 入口函数选择：仅在流程含多个可用函数时显示 -->
+        <!-- 入口函数选择：逐个调用块分别指定（解决多块含同名函数如 run 的歧义） -->
         <transition name="ep-fade">
           <el-form-item v-if="form.flow_id" label="入口函数">
-            <el-select
-              v-model="form.entrypoint"
-              style="width:100%"
-              :loading="entrypointsLoading"
-              clearable
-              placeholder="默认（run / 节点已配置函数）"
-            >
-              <el-option
-                v-for="ep in (flowEntrypointsInfo?.all_entrypoints ?? [])"
-                :key="ep"
-                :label="ep"
-                :value="ep"
-              />
-            </el-select>
-            <div class="ep-hint">
-              <template v-if="entrypointsLoading">
-                正在读取流程函数列表…
-              </template>
-              <template v-else-if="showEntrypointSelector">
-                该流程包含 <strong>{{ flowEntrypointsInfo!.all_entrypoints.length }}</strong> 个入口函数，
-                绑定后此 API 始终调用所选函数（覆盖节点配置）；
-                留空则保持各节点默认。
-              </template>
-              <template v-else-if="flowEntrypointsInfo">
-                流程仅有默认入口函数 <code>run</code>，无需指定。
-              </template>
-            </div>
+            <div v-if="entrypointsLoading" class="ep-hint">正在读取流程函数列表…</div>
 
-            <!-- 多节点函数分布展示 -->
-            <transition name="ep-fade">
-              <div v-if="showEntrypointSelector && flowEntrypointsInfo" class="ep-nodes">
+            <template v-else-if="showEntrypointSelector && flowEntrypointsInfo">
+              <div class="ep-hint">
+                该流程含 <strong>{{ flowEntrypointsInfo.nodes.length }}</strong> 个调用块，
+                可为每个块单独指定要调用的入口函数（默认沿用节点配置）。
+              </div>
+              <div class="ep-nodes">
                 <div
                   v-for="n in flowEntrypointsInfo.nodes"
                   :key="n.node_id"
                   class="ep-node-row"
                 >
-                  <span class="ep-block-name">{{ n.block_name }}</span>
-                  <div class="ep-tags">
-                    <el-tag
+                  <span class="ep-block-name" :title="n.block_name">{{ n.block_name }}</span>
+                  <el-select
+                    v-model="form.entrypoint_map[n.node_id]"
+                    size="small"
+                    class="ep-node-select"
+                    placeholder="run"
+                  >
+                    <el-option
                       v-for="ep in n.available_entrypoints"
                       :key="ep.name"
-                      size="small"
-                      :type="ep.name === form.entrypoint ? 'primary' : 'info'"
-                      effect="plain"
-                      class="ep-tag"
-                      :title="ep.description"
-                    >{{ ep.name }}</el-tag>
-                  </div>
+                      :label="ep.name"
+                      :value="ep.name"
+                    >
+                      <span>{{ ep.name }}</span>
+                      <span v-if="ep.description" class="ep-opt-desc">{{ ep.description }}</span>
+                    </el-option>
+                  </el-select>
                 </div>
               </div>
-            </transition>
+            </template>
+
+            <div v-else-if="flowEntrypointsInfo" class="ep-hint">
+              流程仅有默认入口函数 <code>run</code>，无需指定。
+            </div>
           </el-form-item>
         </transition>
       </el-form>
@@ -1172,12 +1171,21 @@ onMounted(load)
 }
 .ep-block-name {
   font-size: 12px;
-  color: var(--pf-text-dim);
-  min-width: 80px;
-  max-width: 120px;
+  color: var(--pf-text);
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-family: 'JetBrains Mono', monospace;
+}
+.ep-node-select {
+  flex: 0 0 180px;
+}
+.ep-opt-desc {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--pf-text-dim);
 }
 .ep-tags {
   display: flex;
