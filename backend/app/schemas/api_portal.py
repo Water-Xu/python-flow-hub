@@ -18,6 +18,8 @@ class PublishApiRequest(BaseModel):
     path: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
     tags: str = ""
     flow_id: str
+    # API 级入口函数；None = 各节点保持自己的 config.entrypoint（或默认 run）
+    entrypoint: str | None = None
 
 
 class ApiMqConfigRequest(BaseModel):
@@ -60,6 +62,7 @@ class ApiResponse(BaseModel):
     status: str
     trigger_type: str
     mq_config: dict
+    entrypoint: str | None
     is_locked: bool
     lock_reason: str | None
     locked_by: str | None

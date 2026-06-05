@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, ref, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { apiPortalApi, flowApi, type PublishedApi } from '@/api'
+import { apiPortalApi, flowApi, type PublishedApi, type FlowEntrypointsInfo } from '@/api'
 import MqMockTestDialog from '@/components/MqMockTestDialog.vue'
 import MqTriggerForm from '@/components/MqTriggerForm.vue'
 
@@ -44,11 +44,21 @@ const triggerDialogVisible = ref(false)
 const triggerApi = ref<PublishedApi | null>(null)
 const triggerFormRef = ref<InstanceType<typeof MqTriggerForm> | null>(null)
 const triggerSaving = ref(false)
+const triggerFlowEntrypoints = ref<FlowEntrypointsInfo | null>(null)
 
-function openTriggerConfig(api: PublishedApi) {
+async function openTriggerConfig(api: PublishedApi) {
   if (api.is_locked) return ElMessage.warning('接口已锁定，无法修改触发配置')
   triggerApi.value = api
   triggerDialogVisible.value = true
+  triggerFlowEntrypoints.value = null
+  const fid = api.active_flow_id || api.flow_id
+  if (fid) {
+    try {
+      triggerFlowEntrypoints.value = await apiPortalApi.getFlowEntrypoints(fid)
+    } catch {
+      // 获取失败不阻断配置
+    }
+  }
 }
 
 async function saveTrigger() {
@@ -80,7 +90,34 @@ const form = ref({
   path: '',
   tags: '',
   flow_id: '',
+  entrypoint: '' as string,
 })
+
+// ── 发布对话框：入口函数选择 ────────────────────────────────────────────────
+const flowEntrypointsInfo = ref<FlowEntrypointsInfo | null>(null)
+const entrypointsLoading = ref(false)
+
+watch(
+  () => form.value.flow_id,
+  async (fid) => {
+    flowEntrypointsInfo.value = null
+    form.value.entrypoint = ''
+    if (!fid) return
+    entrypointsLoading.value = true
+    try {
+      flowEntrypointsInfo.value = await apiPortalApi.getFlowEntrypoints(fid)
+    } catch {
+      // 获取失败不阻断发布，保持默认
+    } finally {
+      entrypointsLoading.value = false
+    }
+  },
+)
+
+/** 当前选中的 flow 是否有多个可用入口函数 */
+const showEntrypointSelector = computed(
+  () => flowEntrypointsInfo.value?.has_multiple === true,
+)
 
 async function load() {
   loading.value = true
@@ -96,7 +133,10 @@ async function publish() {
     return ElMessage.warning('请填写接口名称、路径和关联流程')
   }
   try {
-    await apiPortalApi.publish(form.value)
+    await apiPortalApi.publish({
+      ...form.value,
+      entrypoint: form.value.entrypoint || null,
+    })
     publishDialogVisible.value = false
     ElMessage.success('接口发布成功')
     resetForm()
@@ -221,7 +261,8 @@ async function copyUrl(api: PublishedApi) {
 }
 
 function resetForm() {
-  form.value = { name: '', description: '', path: '', tags: '', flow_id: '' }
+  form.value = { name: '', description: '', path: '', tags: '', flow_id: '', entrypoint: '' }
+  flowEntrypointsInfo.value = null
 }
 
 const statusType: Record<string, string> = {
@@ -352,7 +393,7 @@ onMounted(load)
     <el-empty v-if="!loading && apis.length === 0" description="暂无已发布接口，点击「发布接口」开始" />
 
     <!-- 发布接口 Dialog -->
-    <el-dialog v-model="publishDialogVisible" title="发布流程为接口" width="520px" :close-on-click-modal="false">
+    <el-dialog v-model="publishDialogVisible" title="发布流程为接口" width="560px" :close-on-click-modal="false">
       <el-form label-width="90px" class="publish-form">
         <el-form-item label="接口名称" required>
           <el-input v-model="form.name" placeholder="如：图像识别服务" />
@@ -373,6 +414,63 @@ onMounted(load)
             <el-option v-for="f in flows" :key="f.id" :label="f.name" :value="f.id" />
           </el-select>
         </el-form-item>
+
+        <!-- 入口函数选择：仅在流程含多个可用函数时显示 -->
+        <transition name="ep-fade">
+          <el-form-item v-if="form.flow_id" label="入口函数">
+            <el-select
+              v-model="form.entrypoint"
+              style="width:100%"
+              :loading="entrypointsLoading"
+              clearable
+              placeholder="默认（run / 节点已配置函数）"
+            >
+              <el-option
+                v-for="ep in (flowEntrypointsInfo?.all_entrypoints ?? [])"
+                :key="ep"
+                :label="ep"
+                :value="ep"
+              />
+            </el-select>
+            <div class="ep-hint">
+              <template v-if="entrypointsLoading">
+                正在读取流程函数列表…
+              </template>
+              <template v-else-if="showEntrypointSelector">
+                该流程包含 <strong>{{ flowEntrypointsInfo!.all_entrypoints.length }}</strong> 个入口函数，
+                绑定后此 API 始终调用所选函数（覆盖节点配置）；
+                留空则保持各节点默认。
+              </template>
+              <template v-else-if="flowEntrypointsInfo">
+                流程仅有默认入口函数 <code>run</code>，无需指定。
+              </template>
+            </div>
+
+            <!-- 多节点函数分布展示 -->
+            <transition name="ep-fade">
+              <div v-if="showEntrypointSelector && flowEntrypointsInfo" class="ep-nodes">
+                <div
+                  v-for="n in flowEntrypointsInfo.nodes"
+                  :key="n.node_id"
+                  class="ep-node-row"
+                >
+                  <span class="ep-block-name">{{ n.block_name }}</span>
+                  <div class="ep-tags">
+                    <el-tag
+                      v-for="ep in n.available_entrypoints"
+                      :key="ep.name"
+                      size="small"
+                      :type="ep.name === form.entrypoint ? 'primary' : 'info'"
+                      effect="plain"
+                      class="ep-tag"
+                      :title="ep.description"
+                    >{{ ep.name }}</el-tag>
+                  </div>
+                </div>
+              </div>
+            </transition>
+          </el-form-item>
+        </transition>
       </el-form>
       <template #footer>
         <el-button @click="publishDialogVisible = false; resetForm()">取消</el-button>
@@ -623,6 +721,8 @@ onMounted(load)
         :api-id="triggerApi.id"
         :trigger-type="triggerApi.trigger_type"
         :mq-config="triggerApi.mq_config"
+        :available-entrypoints="triggerFlowEntrypoints?.all_entrypoints"
+        :api-entrypoint="triggerApi.entrypoint"
       />
       <template #footer>
         <el-button @click="triggerDialogVisible = false">取消</el-button>
@@ -757,6 +857,59 @@ onMounted(load)
 }
 .publish-form .el-form-item {
   margin-bottom: 18px;
+}
+.ep-hint {
+  font-size: 12px;
+  color: var(--pf-text-dim);
+  margin-top: 5px;
+  line-height: 1.5;
+}
+.ep-hint code {
+  background: var(--pf-panel-2);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.ep-nodes {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  animation: slide-up 0.25s ease;
+}
+.ep-node-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--pf-panel-2);
+  border-radius: 6px;
+}
+.ep-block-name {
+  font-size: 12px;
+  color: var(--pf-text-dim);
+  min-width: 80px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ep-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.ep-tag {
+  cursor: default;
+  transition: all 0.2s;
+}
+.ep-fade-enter-active,
+.ep-fade-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.ep-fade-enter-from,
+.ep-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 .docs-section {
   margin-bottom: 16px;

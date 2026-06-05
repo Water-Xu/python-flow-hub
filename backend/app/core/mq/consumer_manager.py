@@ -389,6 +389,9 @@ class ConsumerManager:
                 if missing:
                     raise BusinessException(PYFLOW_BLOCK_NOT_FOUND, next(iter(missing)))
 
+            # MQ 触发的入口函数优先级：mq_config.entrypoint > api.entrypoint > 节点配置 > "run"
+            mq_entrypoint_override = (api.mq_config or {}).get("entrypoint") or api.entrypoint
+
             async def node_executor(node: dict, node_inputs: dict) -> dict:
                 bid = node.get("block_id")
                 if not bid:
@@ -396,7 +399,7 @@ class ConsumerManager:
                         PYFLOW_EXEC_INPUT_INVALID, f"node {node.get('id')} missing block_id"
                     )
                 block = block_cache[bid]
-                entrypoint = (node.get("config") or {}).get("entrypoint") or "run"
+                entrypoint = mq_entrypoint_override or (node.get("config") or {}).get("entrypoint") or "run"
                 record = await execute_block(
                     session, block_id=block.id, code=block.draft_code or "",
                     inputs=node_inputs, login_id=api.owner_login_id,

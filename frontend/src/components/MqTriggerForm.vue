@@ -12,6 +12,10 @@ const props = defineProps<{
   apiId: string
   triggerType?: string
   mqConfig?: Record<string, any>
+  /** 当前 API 关联 flow 的可用入口函数列表（由父组件传入，空则不展示选择器） */
+  availableEntrypoints?: string[]
+  /** API 级 entrypoint（只读展示，用于提示用户当前 API 绑定的函数） */
+  apiEntrypoint?: string | null
 }>()
 
 interface CarryField {
@@ -35,6 +39,8 @@ const form = ref({
   max_retry: 3,
   retry_delay_ms: 5000,
   carry_fields: [] as CarryField[],
+  // MQ 专属入口函数覆盖（优先级高于 API 级 entrypoint）
+  entrypoint: '' as string,
 })
 
 function reset() {
@@ -54,8 +60,14 @@ function reset() {
     max_retry: cfg.max_retry ?? 3,
     retry_delay_ms: cfg.retry_delay_ms ?? 5000,
     carry_fields: (cfg.carry_fields || []).map((f: any) => ({ ...f })),
+    entrypoint: cfg.entrypoint || '',
   }
 }
+
+/** MQ 配置中是否有多入口可选 */
+const hasMqEntrypointChoice = computed(
+  () => (props.availableEntrypoints?.length ?? 0) > 1,
+)
 
 // 父组件每次打开不同接口会整体替换 mqConfig（引用变化即可触发），无需 deep 深度遍历
 watch(() => [props.apiId, props.triggerType, props.mqConfig], reset, { immediate: true })
@@ -116,25 +128,26 @@ function collect(): { trigger_type: string; mq_config: Record<string, any> } {
   } catch {
     input_mapping = {}
   }
-  return {
-    trigger_type: form.value.trigger_type,
-    mq_config: {
-      enabled: true,
-      exchange: form.value.exchange,
-      queue: form.value.queue || `flow.${props.apiId}.queue`,
-      routing_key: form.value.routing_key,
-      prefetch_count: form.value.prefetch_count,
-      condition_expression: form.value.condition_expression,
-      condition_language: form.value.condition_language,
-      input_mapping,
-      reply_enabled: form.value.reply_enabled,
-      reply_exchange: form.value.reply_exchange,
-      reply_routing_key_template: form.value.reply_routing_key_template,
-      max_retry: form.value.max_retry,
-      retry_delay_ms: form.value.retry_delay_ms,
-      carry_fields: form.value.carry_fields,
-    },
+  const mq_config: Record<string, any> = {
+    enabled: true,
+    exchange: form.value.exchange,
+    queue: form.value.queue || `flow.${props.apiId}.queue`,
+    routing_key: form.value.routing_key,
+    prefetch_count: form.value.prefetch_count,
+    condition_expression: form.value.condition_expression,
+    condition_language: form.value.condition_language,
+    input_mapping,
+    reply_enabled: form.value.reply_enabled,
+    reply_exchange: form.value.reply_exchange,
+    reply_routing_key_template: form.value.reply_routing_key_template,
+    max_retry: form.value.max_retry,
+    retry_delay_ms: form.value.retry_delay_ms,
+    carry_fields: form.value.carry_fields,
   }
+  if (form.value.entrypoint) {
+    mq_config.entrypoint = form.value.entrypoint
+  }
+  return { trigger_type: form.value.trigger_type, mq_config }
 }
 
 defineExpose({ collect, errors, reset })
@@ -166,6 +179,31 @@ defineExpose({ collect, errors, reset })
         <el-form-item label="Prefetch">
           <el-input-number v-model="form.prefetch_count" :min="1" :max="100" />
           <span class="dim" style="margin-left:8px">防 KEDA 误扩，建议保持 1</span>
+        </el-form-item>
+
+        <!-- MQ 专属入口函数：优先级高于 API 级 entrypoint -->
+        <el-form-item label="入口函数">
+          <el-select
+            v-model="form.entrypoint"
+            style="width:100%"
+            clearable
+            placeholder="继承 API 级设置（或节点默认）"
+          >
+            <el-option
+              v-for="ep in (availableEntrypoints ?? [])"
+              :key="ep"
+              :label="ep"
+              :value="ep"
+            />
+          </el-select>
+          <p class="dim">
+            <template v-if="apiEntrypoint">
+              API 级已绑定 <code>{{ apiEntrypoint }}</code>；此处设置仅覆盖本 MQ 触发，留空则沿用 API 级。
+            </template>
+            <template v-else>
+              留空则使用节点配置（默认 <code>run</code>）；不同 MQ 触发可绑定不同函数。
+            </template>
+          </p>
         </el-form-item>
 
         <el-divider content-position="left">条件过滤（仅 jmespath / jsonpath）</el-divider>

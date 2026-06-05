@@ -119,6 +119,7 @@ async def publish_flow_as_api(
         active_flow_id=req.flow_id,
         owner_login_id=login_id,
         status="active",
+        entrypoint=req.entrypoint or None,
     )
     session.add(api)
     await session.commit()
@@ -248,6 +249,7 @@ async def get_api_docs(
         "method": "POST",
         "status": api.status,
         "trigger_type": api.trigger_type,
+        "entrypoint": api.entrypoint,
         "flow_id": flow_id,
         "flow_name": flow.name if flow else "未知",
         "node_count": len(nodes),
@@ -274,6 +276,70 @@ def _entry_input_ports(
         if doc["block_id"] in entry_block_ids:
             ports.extend(doc.get("input_ports") or [])
     return ports
+
+
+# ── 流程入口函数查询 ──────────────────────────────────────────────────────────
+
+@router.get("/api/portal/flows/{flow_id}/entrypoints")
+async def get_flow_entrypoints(
+    flow_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.VIEWER)),
+):
+    """查询指定流程中所有块的可用入口函数，用于发布对话框/MQ 配置时选择绑定函数。
+
+    返回：
+    - nodes: 每个节点当前配置的入口函数及所在块可用函数列表
+    - all_entrypoints: 全流程所有块入口函数的去重并集（含 "run"）
+    """
+    flow = await session.get(Flow, flow_id)
+    if flow is None:
+        raise BusinessException(PYFLOW_BLOCK_NOT_FOUND, flow_id)
+
+    nodes_rows = (await session.execute(
+        select(FlowNode).where(FlowNode.flow_id == flow_id)
+    )).scalars().all()
+
+    block_ids = {n.block_id for n in nodes_rows if n.block_id}
+    block_map: dict[str, Block] = {}
+    if block_ids:
+        rows = (await session.execute(
+            select(Block).where(Block.id.in_(block_ids))
+        )).scalars().all()
+        block_map = {b.id: b for b in rows}
+
+    nodes_info = []
+    all_names: set[str] = {"run"}
+    for node in nodes_rows:
+        if not node.block_id:
+            continue
+        block = block_map.get(node.block_id)
+        if not block:
+            continue
+        eps = [ep.get("name") for ep in (block.entrypoints or []) if ep.get("name")]
+        if not eps:
+            eps = ["run"]
+        all_names.update(eps)
+        nodes_info.append({
+            "node_id": node.id,
+            "block_id": block.id,
+            "block_name": block.name,
+            "configured_entrypoint": (node.config or {}).get("entrypoint") or "run",
+            "available_entrypoints": [
+                {"name": ep.get("name"), "description": ep.get("description", "")}
+                for ep in (block.entrypoints or [])
+            ] if block.entrypoints else [{"name": "run", "description": ""}],
+        })
+
+    # 保持 run 始终排第一
+    all_sorted = ["run"] + sorted(all_names - {"run"})
+    return {
+        "flow_id": flow_id,
+        "flow_name": flow.name,
+        "nodes": nodes_info,
+        "all_entrypoints": all_sorted,
+        "has_multiple": len(all_names) > 1,
+    }
 
 
 # ── 公开调用入口 ───────────────────────────────────────────────────────────────
@@ -346,7 +412,8 @@ async def invoke_api(
             if not block_id:
                 return {}
             block = block_cache[block_id]
-            entrypoint = (node.get("config") or {}).get("entrypoint") or "run"
+            # api.entrypoint 优先（API 级绑定），其次节点配置，最后默认 run
+            entrypoint = api.entrypoint or (node.get("config") or {}).get("entrypoint") or "run"
             record = await execute_block(
                 session, block_id=block.id, code=block.draft_code or "",
                 inputs=node_inputs, login_id=api.owner_login_id,

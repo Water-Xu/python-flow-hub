@@ -209,6 +209,7 @@ export interface PublishedApi {
   status: string
   trigger_type: string
   mq_config: Record<string, any>
+  entrypoint: string | null
   is_locked: boolean
   lock_reason: string | null
   locked_by: string | null
@@ -226,6 +227,20 @@ export interface PublishedApi {
   updated_at: string
 }
 
+export interface FlowEntrypointsInfo {
+  flow_id: string
+  flow_name: string
+  all_entrypoints: string[]
+  has_multiple: boolean
+  nodes: Array<{
+    node_id: string
+    block_id: string
+    block_name: string
+    configured_entrypoint: string
+    available_entrypoints: Array<{ name: string; description: string }>
+  }>
+}
+
 export const apiPortalApi = {
   list: () => client.get<any, PublishedApi[]>('/api/portal/apis').then(ensureArray<PublishedApi>),
   publish: (data: {
@@ -234,7 +249,11 @@ export const apiPortalApi = {
     path: string
     tags?: string
     flow_id: string
+    entrypoint?: string | null
   }) => client.post<any, PublishedApi>('/api/portal/apis', data),
+  /** 获取流程所有节点的可用入口函数（用于发布/MQ 配置时选择绑定函数） */
+  getFlowEntrypoints: (flowId: string) =>
+    client.get<any, FlowEntrypointsInfo>(`/api/portal/flows/${flowId}/entrypoints`),
   get: (id: string) => client.get<any, PublishedApi>(`/api/portal/apis/${id}`),
   unpublish: (id: string) => client.delete(`/api/portal/apis/${id}`),
   pause: (id: string) => client.post(`/api/portal/apis/${id}/pause`),
