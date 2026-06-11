@@ -48,6 +48,17 @@ logger = get_logger("pyflow.k8s.orchestrator")
 settings = get_settings()
 
 
+FLOW_RUNNER_RESOURCE_KEY = "__flow__"
+
+# flow_mode 整流 Pod 的默认资源（单 Pod 承载所有块，默认比单块要大）
+_FLOW_RUNNER_DEFAULT_COMPUTE: dict[str, Any] = {
+    "cpu_request": "200m",
+    "memory_request": "512Mi",
+    "cpu_limit": "2000m",
+    "memory_limit": "4Gi",
+}
+
+
 def _build_context(deployment: FlowDeployment) -> DeployContext:
     return DeployContext(
         namespace=settings.k8s_namespace,
@@ -183,6 +194,84 @@ def effective_resources(compute_config: dict[str, Any]) -> dict[str, Any]:
         "gpu_enabled": bool(compute_config.get("gpu_enabled", False)),
         "gpu_count": int(compute_config.get("gpu_count", 1)),
         "gpu_type": compute_config.get("gpu_type", "nvidia-tesla-t4"),
+    }
+
+
+def list_flow_runner_resource(deployment: FlowDeployment) -> list[dict[str, Any]]:
+    """flow_mode：返回整流 Pod 的单一资源配置行（与 list_block_resources 结构一致）。
+
+    resource_overrides 中使用键 "__flow__" 存储整流 Pod 的资源配置，与 block_mode 的
+    block_id 键对称，由前端统一的 PUT /resources 接口保存，下次部署生效。
+    """
+    overrides = deployment.resource_overrides or {}
+    override = overrides.get(FLOW_RUNNER_RESOURCE_KEY, {})
+    default_config = dict(_FLOW_RUNNER_DEFAULT_COMPUTE)
+    merged = dict(default_config)
+    for key in RESOURCE_OVERRIDE_KEYS:
+        if key in override and override[key] not in (None, ""):
+            merged[key] = override[key]
+    return [{
+        "block_id": FLOW_RUNNER_RESOURCE_KEY,
+        "name": "Flow 整体 Pod（FlowRunner）",
+        "default": effective_resources(default_config),
+        "override": override,
+        "effective": effective_resources(merged),
+    }]
+
+
+def flow_runner_resource_summary(deployment: FlowDeployment) -> dict[str, Any]:
+    """flow_mode 的 Flow 资源汇总：整流单 Pod 请求/上限 + 节点池占用 + KEDA 峰值。
+
+    与 flow_resource_summary（block_mode）结构完全一致，前端同一套模板渲染。
+    is_flow_mode=True 供前端调整描述文案。
+    """
+    overrides = deployment.resource_overrides or {}
+    override = overrides.get(FLOW_RUNNER_RESOURCE_KEY, {})
+    merged = dict(_FLOW_RUNNER_DEFAULT_COMPUTE)
+    for key in RESOURCE_OVERRIDE_KEYS:
+        if key in override and override[key] not in (None, ""):
+            merged[key] = override[key]
+
+    pool_cpu_cores = settings.workers_pool_cpu_cores
+    pool_mem_mib = settings.workers_pool_mem_mib
+    pool_cpu_m = int(pool_cpu_cores * 1000)
+
+    req_cpu_m = parse_cpu_millicores(merged.get("cpu_request", "200m"), 200)
+    req_mem_mib = parse_mem_mib(merged.get("memory_request", "512Mi"), 512)
+    lim_cpu_m = parse_cpu_millicores(merged.get("cpu_limit", "2000m"), 2000)
+    lim_mem_mib = parse_mem_mib(merged.get("memory_limit", "4Gi"), 4096)
+    max_rep = max(1, min(
+        int((pool_cpu_cores * 1000) // max(lim_cpu_m, 1)),
+        settings.keda_max_replica_cap,
+    ))
+    gpu_enabled = bool(merged.get("gpu_enabled", False))
+    capacity_ok = req_cpu_m <= pool_cpu_m and req_mem_mib <= pool_mem_mib
+
+    return {
+        "block_count": 1,
+        "is_flow_mode": True,
+        "pool": {"name": "pyflow-workers", "cpu_m": pool_cpu_m, "mem_mib": pool_mem_mib},
+        "resident": {"cpu_m": req_cpu_m, "mem_mib": req_mem_mib},
+        "limit": {"cpu_m": lim_cpu_m, "mem_mib": lim_mem_mib},
+        "keda_peak": {"cpu_m": lim_cpu_m * max_rep, "mem_mib": lim_mem_mib * max_rep},
+        "gpu": {
+            "total": int(merged.get("gpu_count", 1)) if gpu_enabled else 0,
+            "block_count": 1 if gpu_enabled else 0,
+        },
+        "usage": {
+            "cpu_pct": round(req_cpu_m / pool_cpu_m * 100, 1) if pool_cpu_m else 0,
+            "mem_pct": round(req_mem_mib / pool_mem_mib * 100, 1) if pool_mem_mib else 0,
+        },
+        "capacity_ok": capacity_ok,
+        "capacity_reason": "" if capacity_ok else "FlowRunner 资源请求超出 pyflow-workers 节点池可分配容量",
+        "blocks": [{
+            "block_id": FLOW_RUNNER_RESOURCE_KEY,
+            "name": "Flow 整体 Pod（FlowRunner）",
+            "gpu_enabled": gpu_enabled,
+            "request": {"cpu_m": req_cpu_m, "mem_mib": req_mem_mib},
+            "limit": {"cpu_m": lim_cpu_m, "mem_mib": lim_mem_mib},
+            "max_replica": max_rep,
+        }],
     }
 
 
@@ -498,13 +587,20 @@ async def build_flow_runner_spec(
     global_env = await load_global_env(session)
     runner_env = {**global_env, **(deployment.env_vars or {})}
 
+    # 应用部署级 Pod 资源覆盖（保存在 resource_overrides["__flow__"]，与 block_mode 逻辑对称）
+    flow_override = (deployment.resource_overrides or {}).get(FLOW_RUNNER_RESOURCE_KEY, {})
+    compute_config = dict(_FLOW_RUNNER_DEFAULT_COMPUTE)
+    for key in RESOURCE_OVERRIDE_KEYS:
+        if key in flow_override and flow_override[key] not in (None, ""):
+            compute_config[key] = flow_override[key]
+
     return FlowRunnerSpec(
         flow_id=flow_id,
         flow_name=flow_obj.name if flow_obj else flow_id,
         blocks=blocks,
         dag=dag,
         mq_apis=mq_apis,
-        compute_config={},
+        compute_config=compute_config,
         env_vars=runner_env,
         image=ctx.runner_image,
     )

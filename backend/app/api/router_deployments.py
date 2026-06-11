@@ -56,6 +56,7 @@ def _dep_dict(d: FlowDeployment) -> dict:
     return {
         "id": d.id, "flow_id": d.flow_id, "flow_version_id": d.flow_version_id,
         "name": d.name, "environment": d.environment, "status": d.status,
+        "deployment_type": getattr(d, "deployment_type", "block_mode"),
         "resource_prefix": d.resource_prefix, "entry_endpoint": d.entry_endpoint,
         "block_statuses": d.block_statuses or [], "created_at": d.created_at,
         "env_vars": d.env_vars or {}, "secret_refs": d.secret_refs or {},
@@ -130,8 +131,10 @@ async def list_deployment_resources(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(require_role(Role.VIEWER)),
 ):
-    """列出该部署各 Block 的 Pod 资源（块默认值 / 部署级覆盖 / 生效值）。"""
+    """列出该部署的 Pod 资源（flow_mode: 整流单 Pod；block_mode: 各块独立 Pod）。"""
     dep = await _get(session, deployment_id)
+    if getattr(dep, "deployment_type", "block_mode") == "flow_mode":
+        return orchestrator.list_flow_runner_resource(dep)
     return await orchestrator.list_block_resources(session, dep)
 
 
@@ -161,8 +164,10 @@ async def deployment_resource_summary(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(require_role(Role.VIEWER)),
 ):
-    """Flow 维度资源汇总：各块（独立 Pod）请求/上限累加 + 节点池容量占用 + KEDA 峰值估算。"""
+    """Flow 维度资源汇总（flow_mode: 整流单 Pod；block_mode: 各块独立 Pod 累加）。"""
     dep = await _get(session, deployment_id)
+    if getattr(dep, "deployment_type", "block_mode") == "flow_mode":
+        return orchestrator.flow_runner_resource_summary(dep)
     return await orchestrator.flow_resource_summary(session, dep)
 
 
@@ -175,6 +180,20 @@ async def precheck_deployment_resources(
 ):
     """对“尚未保存”的资源覆盖做实时容量/GPU/scope 预检（编辑时即时反馈，不落库）。"""
     dep = await _get(session, deployment_id)
+    is_flow_mode = getattr(dep, "deployment_type", "block_mode") == "flow_mode"
+
+    if is_flow_mode:
+        from app.core.k8s.manifest_generator import BlockDeploySpec
+        flow_spec_data = (req.resource_overrides or {}).get(orchestrator.FLOW_RUNNER_RESOURCE_KEY)
+        override = {k: v for k, v in (flow_spec_data.model_dump() if flow_spec_data else {}).items() if v is not None}
+        compute = {**orchestrator._FLOW_RUNNER_DEFAULT_COMPUTE, **override}
+        synthetic = BlockDeploySpec(
+            block_id=orchestrator.FLOW_RUNNER_RESOURCE_KEY,
+            name="FlowRunner",
+            compute_config=compute,
+        )
+        return orchestrator.run_prechecks([synthetic])
+
     specs = await orchestrator.build_specs(session, dep.flow_id)
     overrides: dict[str, dict] = {}
     for block_id, spec in (req.resource_overrides or {}).items():

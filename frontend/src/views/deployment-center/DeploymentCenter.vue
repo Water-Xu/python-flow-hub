@@ -93,7 +93,21 @@ function applyEstimateToAll() {
   ElMessage.success(`已按「${estProfiles[estProfile.value].label}」画像应用到 ${resourceRows.value.filter((r) => !r.gpu_enabled).length} 个块`)
 }
 
-let timer: number | undefined
+// 判断当前部署是否为整流单 Pod 模式
+const isFlowMode = computed(() => detail.value?.deployment_type === 'flow_mode')
+
+// 资源汇总摘要描述（按模式切换文案）
+const resSummaryDesc = computed(() => {
+  if (!resSummary.value) return ''
+  if (resSummary.value.is_flow_mode) return `整流单 Pod · 所有块 in-process（${resSummary.value.pool.name} 节点池）`
+  return `${resSummary.value.block_count} 个块 · 各自独立 Pod（${resSummary.value.pool.name} 节点池）`
+})
+
+const resSummaryTip = computed(() =>
+  resSummary.value?.is_flow_mode
+    ? 'FlowRunner 为整流单 Pod，所有块在同一进程内执行。常驻请求为容量闸门（min≥1 副本）；KEDA 对整个 Flow 级扩缩（0→N），峰值上界按 limit×maxReplica 估算，不计入常驻。'
+    : '常驻请求为容量闸门（各块 min≥1 副本按 request 累加）；KEDA 仅作用于各 MQ 接口的 Flow-Consumer（0→N 按队列扩缩），峰值上界按各块 limit×maxReplica 估算，不计入常驻。'
+)
 
 let _loadInFlight = false
 
@@ -423,7 +437,10 @@ onBeforeUnmount(() => timer && clearInterval(timer))
       </el-table-column>
       <el-table-column label="副本" width="100">
         <template #default="{ row }">
-          <span class="dim">{{ (row.block_statuses || []).length }} 块</span>
+          <span class="dim">
+            <template v-if="row.deployment_type === 'flow_mode'">Flow Runner</template>
+            <template v-else>{{ (row.block_statuses || []).length }} 块</template>
+          </span>
         </template>
       </el-table-column>
       <el-table-column label="操作" width="280">
@@ -539,7 +556,7 @@ onBeforeUnmount(() => timer && clearInterval(timer))
             <div v-if="resSummary" class="flow-sum" v-loading="resSummaryLoading">
               <div class="flow-sum-head">
                 <span class="flow-sum-title">⛁ Flow 资源汇总</span>
-                <span class="dim">{{ resSummary.block_count }} 个块 · 各自独立 Pod（{{ resSummary.pool.name }} 节点池）</span>
+                <span class="dim">{{ resSummaryDesc }}</span>
                 <el-tag
                   size="small"
                   :type="resSummary.capacity_ok ? 'success' : 'danger'"
@@ -575,15 +592,18 @@ onBeforeUnmount(() => timer && clearInterval(timer))
                 <span>KEDA 峰值上界：<b>{{ cores(resSummary.keda_peak.cpu_m) }} / {{ mib(resSummary.keda_peak.mem_mib) }}</b></span>
                 <span v-if="resSummary.gpu.block_count">GPU：<b>{{ resSummary.gpu.total }} 卡 / {{ resSummary.gpu.block_count }} 块</b></span>
               </div>
-              <p class="dim flow-sum-tip">
-                常驻请求为容量闸门（各块 min≥1 副本按 request 累加）；KEDA 仅作用于各 MQ 接口的 Flow-Consumer（0→N 按队列扩缩），峰值上界按各块 limit×maxReplica 估算，不计入常驻。
-              </p>
+              <p class="dim flow-sum-tip">{{ resSummaryTip }}</p>
             </div>
           </transition>
 
           <div class="res-head">
             <p class="dim res-tip">
-              按 Block（每个 Block 对应一个 Pod/Deployment）配置 CPU / 内存请求与上限，覆盖块默认值，仅作用于本部署，下次部署生效。
+              <template v-if="isFlowMode">
+                配置整流 Pod 的 CPU / 内存资源（整条 Flow 在单 Pod 内 in-process 执行），覆盖默认值，仅作用于本部署，下次部署生效。
+              </template>
+              <template v-else>
+                按 Block（每个 Block 对应一个 Pod/Deployment）配置 CPU / 内存请求与上限，覆盖块默认值，仅作用于本部署，下次部署生效。
+              </template>
             </p>
             <div class="res-head-actions">
               <el-popover v-model:visible="estimatorOpen" placement="bottom-end" :width="340" trigger="click">
@@ -611,9 +631,12 @@ onBeforeUnmount(() => timer && clearInterval(timer))
                     <div class="est-cell"><span>内存 请求</span><b>{{ estResult.memory_request }}</b></div>
                     <div class="est-cell"><span>内存 上限</span><b>{{ estResult.memory_limit }}</b></div>
                   </div>
-                  <p class="est-hint">并发由 KEDA 横向扩副本承担，单 Pod 资源按「一次调用」估算即可。GPU 块不受影响。</p>
+                  <p class="est-hint">
+                    <template v-if="isFlowMode">并发由 KEDA 横向扩 FlowRunner 副本承担，单 Pod 资源按「一次 Flow 完整调用」估算即可。</template>
+                    <template v-else>并发由 KEDA 横向扩副本承担，单 Pod 资源按「一次调用」估算即可。GPU 块不受影响。</template>
+                  </p>
                   <el-button type="primary" size="small" style="width:100%" @click="applyEstimateToAll">
-                    应用到全部块
+                    {{ isFlowMode ? '应用到 Flow 整体 Pod' : '应用到全部块' }}
                   </el-button>
                 </div>
               </el-popover>
@@ -675,7 +698,9 @@ onBeforeUnmount(() => timer && clearInterval(timer))
             <div v-for="r in resourceRows" :key="r.block_id" class="res-card">
               <div class="res-card-head">
                 <span class="res-name">{{ r.name }}</span>
-                <el-tag size="small" effect="plain" type="info">invoke</el-tag>
+                <el-tag size="small" effect="plain" :type="r.block_id === '__flow__' ? 'success' : 'info'">
+                  {{ r.block_id === '__flow__' ? 'flow_runner' : 'invoke' }}
+                </el-tag>
                 <el-button v-if="!r.gpu_enabled" class="res-reset" link size="small" @click="applyEstimate(r)">
                   <el-icon><MagicStick /></el-icon> 套用估算
                 </el-button>

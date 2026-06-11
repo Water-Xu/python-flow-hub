@@ -138,6 +138,7 @@ export const deploymentApi = {
 
 export interface FlowResourceSummary {
   block_count: number
+  is_flow_mode?: boolean
   pool: { name: string; cpu_m: number; mem_mib: number }
   resident: { cpu_m: number; mem_mib: number }
   limit: { cpu_m: number; mem_mib: number }
