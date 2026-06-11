@@ -79,7 +79,7 @@ def build_cloudbuild_config(
     staging_object = f"deps/{image_tag.rsplit(':', 1)[-1]}/context.tar.gz"
     bucket = settings.effective_cloudbuild_staging_bucket()
 
-    return {
+    result = {
         "source": {
             "storageSource": {
                 "bucket": bucket,
@@ -109,9 +109,6 @@ def build_cloudbuild_config(
             },
         ],
         "images": [image_tag],
-        "serviceAccount": (
-            f"projects/{settings.gcp_project}/serviceAccounts/{settings.cloudbuild_builder_sa}"
-        ),
         "options": {"logging": "CLOUD_LOGGING_ONLY"},
         "_dockerfile": dockerfile,
         "_install_sh": install_sh,
@@ -119,6 +116,12 @@ def build_cloudbuild_config(
         "_staging_bucket": bucket,
         "_staging_object": staging_object,
     }
+    # 只有明确配置了 builder SA 才传 serviceAccount（空值让 Cloud Build 用默认 SA）
+    if settings.cloudbuild_builder_sa.strip():
+        result["serviceAccount"] = (
+            f"projects/{settings.gcp_project}/serviceAccounts/{settings.cloudbuild_builder_sa}"
+        )
+    return result
 
 
 async def ensure_dependency_image(

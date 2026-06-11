@@ -28,6 +28,8 @@ data:
   PYFLOW_BLOCK_MILVUS_URI: "http://milvus.lhy-styon.svc.cluster.local:19530"
   PYFLOW_CLOUD_BUILD_STAGING_BUCKET: "lhy-styon-dev-4832-pyflow-build"
   PYFLOW_CLOUDBUILD_ENABLED: "true"
+  # builder SA 留空 → Cloud Build 使用项目默认 SA（300556495050@cloudbuild.gserviceaccount.com）
+  PYFLOW_CLOUDBUILD_BUILDER_SA: ""
   PYFLOW_BLOCK_ARTIFACTS_BUCKET: "pyflow-artifacts"
   PYFLOW_PIP_REQUIRE_WHITELIST: "true"
   # VPC 私网中间件 egress 白名单（Cloud SQL 私网 IP）

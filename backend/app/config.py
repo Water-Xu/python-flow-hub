@@ -55,7 +55,7 @@ class Settings(BaseSettings):
 
     # ── Cloud Build 镜像构建（Phase 4b 供应链加固）────────────────────────────
     cloudbuild_enabled: bool = False
-    cloudbuild_builder_sa: str = "pyflow-builder@lhy-styon-dev-4832.iam.gserviceaccount.com"
+    cloudbuild_builder_sa: str = ""  # 空 = 用 Cloud Build 默认 SA
     pip_index_url: str = ""                   # 私有 PyPI 镜像；空则用默认（dev）
     pip_require_hashes: bool = False
     # 依赖白名单（与 pyflowhub_pack 方案对齐；空列表且 require_whitelist=true 时拒绝所有 PyPI 包）
