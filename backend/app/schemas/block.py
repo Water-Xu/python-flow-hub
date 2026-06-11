@@ -40,6 +40,7 @@ class BlockCreateRequest(BaseModel):
     description: str = ""
     type: Literal["script", "notebook", "gcp_bigquery", "gcp_storage"] = "script"
     draft_code: str = ""
+    draft_requirements: str = ""
     input_ports: list[Port] = []
     output_ports: list[Port] = []
     env_vars: dict[str, str] = {}
@@ -50,6 +51,7 @@ class BlockUpdateRequest(BaseModel):
     name: str | None = Field(default=None, max_length=128)
     description: str | None = None
     draft_code: str | None = None
+    draft_requirements: str | None = None
     input_ports: list[Port] | None = None
     output_ports: list[Port] | None = None
     env_vars: dict[str, str] | None = None
@@ -63,6 +65,8 @@ class BlockResponse(BaseModel):
     owner_login_id: str
     type: str
     draft_code: str
+    draft_requirements: str = ""
+    requirements_hash: str = ""
     input_ports: list[Any]
     output_ports: list[Any]
     entrypoints: list[Any] = []

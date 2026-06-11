@@ -1,0 +1,4 @@
+# 自研 wheel（先 build_wheel.py + upload_artifacts.py 上传到 GCS/MinIO）
+@gcs:pyflow/wheels/pyflow_vector_ingest-0.2.0-py3-none-any.whl
+fastembed>=0.4.0,<0.7
+onnxruntime>=1.16.0

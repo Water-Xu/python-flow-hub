@@ -144,25 +144,25 @@ def test_network_policy_gcp_egress_whitelist():
 def test_middleware_egress_rules_ns_and_cidr():
     rules = middleware_egress_rules(
         middleware_namespace="lhy-styon",
-        ns_ports=[5672, 15672, 9000],
-        cidr_ports=[("10.0.1.0/24", 6379), ("10.196.0.3/32", 5432)],
+        ns_ports=[5672, 15672, 9000, 6379],
+        cidr_ports=[("10.196.0.3/32", 5432)],
     )
     # 命名空间规则按 metadata.name 选中 lhy-styon
     ns_rule = rules[0]
     assert ns_rule["to"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] == "lhy-styon"
     ns_ports = [p["port"] for p in ns_rule["ports"]]
-    assert ns_ports == [5672, 15672, 9000]
+    assert ns_ports == [5672, 15672, 9000, 6379]
     # VPC 私网 ipBlock 规则
     cidrs = [r["to"][0]["ipBlock"]["cidr"] for r in rules[1:]]
-    assert "10.0.1.0/24" in cidrs and "10.196.0.3/32" in cidrs
-    redis_rule = next(r for r in rules if r["to"][0].get("ipBlock", {}).get("cidr") == "10.0.1.0/24")
-    assert redis_rule["ports"][0]["port"] == 6379
+    assert "10.196.0.3/32" in cidrs
+    pg_rule = next(r for r in rules if r["to"][0].get("ipBlock", {}).get("cidr") == "10.196.0.3/32")
+    assert pg_rule["ports"][0]["port"] == 5432
 
 
 def test_network_policy_injects_middleware_egress():
     spec = BlockDeploySpec("b1", "n")
     egress = middleware_egress_rules(
-        middleware_namespace="lhy-styon", ns_ports=[5672], cidr_ports=[("10.0.1.0/24", 6379)]
+        middleware_namespace="lhy-styon", ns_ports=[5672, 6379], cidr_ports=[("10.196.0.3/32", 5432)]
     )
     ctx = DeployContext(inject_middleware=True, middleware_egress=egress)
     np = build_network_policy(spec, ctx)

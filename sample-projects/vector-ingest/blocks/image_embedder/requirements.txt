@@ -1,0 +1,5 @@
+@gcs:pyflow/wheels/pyflow_vector_ingest-0.2.0-py3-none-any.whl
+fastembed>=0.4.0,<0.7
+onnxruntime>=1.16.0
+httpx>=0.27.0
+pillow>=10.0.0

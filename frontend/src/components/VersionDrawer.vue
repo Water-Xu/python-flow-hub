@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { versionApi } from '../api'
+import { blockApi, versionApi } from '../api'
 import DiffEditor from './DiffEditor.vue'
 
 const props = defineProps<{
@@ -22,6 +22,7 @@ const loading = ref(false)
 const creating = ref(false)
 const newTag = ref('')
 const newMessage = ref('')
+const requirementsText = ref('')
 
 // diff
 const fromVersion = ref('')
@@ -37,6 +38,12 @@ async function load() {
       props.resourceType === 'block'
         ? await versionApi.listBlockVersions(props.resourceId)
         : await versionApi.listFlowVersions(props.resourceId)
+    if (props.resourceType === 'block') {
+      const block = await blockApi.get(props.resourceId)
+      requirementsText.value = block.draft_requirements || ''
+    } else {
+      requirementsText.value = ''
+    }
   } finally {
     loading.value = false
   }
@@ -60,7 +67,11 @@ async function createVersion() {
       await versionApi.createBlockVersion(props.resourceId, {
         version_tag: newTag.value.trim(),
         commit_message: newMessage.value.trim(),
+        requirements_text: requirementsText.value.trim(),
         set_stable: true,
+      })
+      await blockApi.update(props.resourceId, {
+        draft_requirements: requirementsText.value.trim(),
       })
     } else {
       await versionApi.createFlowVersion(props.resourceId, {
@@ -116,6 +127,20 @@ async function runDiff() {
       <el-button type="primary" :loading="creating" @click="createVersion">发布版本</el-button>
     </div>
 
+    <div v-if="resourceType === 'block'" class="ver-req">
+      <div class="ver-req-label">
+        pip 依赖（requirements.txt）
+        <span class="ver-req-hint">发布时写入 MinIO 并触发 Cloud Build 依赖层镜像；K8s 部署必需</span>
+      </div>
+      <el-input
+        v-model="requirementsText"
+        type="textarea"
+        :rows="4"
+        placeholder="fastembed>=0.4.0,<0.7"
+        spellcheck="false"
+      />
+    </div>
+
     <el-table v-loading="loading" :data="versions" size="small" class="ver-table">
       <el-table-column prop="version_tag" label="标签" width="140">
         <template #default="{ row }">
@@ -126,6 +151,11 @@ async function runDiff() {
       <el-table-column prop="commit_message" label="说明" show-overflow-tooltip />
       <el-table-column prop="created_by" label="作者" width="120" />
       <el-table-column prop="created_at" label="时间" width="180" />
+      <el-table-column v-if="resourceType === 'block'" prop="requirements_hash" label="依赖 hash" width="120">
+        <template #default="{ row }">
+          <span class="req-hash">{{ row.requirements_hash ? row.requirements_hash.slice(0, 8) : '—' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="操作" width="120">
         <template #default="{ row }">
           <el-button
@@ -164,6 +194,24 @@ async function runDiff() {
   display: flex;
   gap: 8px;
   margin-bottom: 14px;
+}
+.ver-req {
+  margin-bottom: 14px;
+  animation: slide-up 0.25s ease;
+}
+.ver-req-label {
+  font-size: 13px;
+  color: var(--pf-text-dim, #909399);
+  margin-bottom: 6px;
+}
+.ver-req-hint {
+  margin-left: 8px;
+  font-size: 12px;
+  opacity: 0.85;
+}
+.req-hash {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
 }
 .ver-table {
   margin-bottom: 16px;

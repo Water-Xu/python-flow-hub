@@ -1,0 +1,13 @@
+{
+  "texts": [
+    "Spring Cloud 微服务通过网关统一鉴权",
+    "Milvus 向量数据库支持语义检索与推荐",
+    "FlowHub 将 Python 算法编排为可调用接口"
+  ],
+  "collection_name": "demo_flowhub_kb",
+  "source": "sample-projects/vector-ingest",
+  "metadata": {
+    "biz": "demo",
+    "lang": "zh"
+  }
+}

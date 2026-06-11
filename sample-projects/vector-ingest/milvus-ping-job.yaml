@@ -1,0 +1,24 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: milvus-ping
+  namespace: pyflow-blocks
+spec:
+  ttlSecondsAfterFinished: 120
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ping
+          image: python:3.11-slim
+          command:
+            - sh
+            - -c
+            - |
+              pip install -q 'pymilvus>=2.4.9,<2.7'
+              python <<'PY'
+              from pymilvus import connections, utility
+              uri = "http://milvus.lhy-styon.svc.cluster.local:19530"
+              connections.connect(uri=uri)
+              print("milvus_ok", utility.get_server_version())
+              PY

@@ -189,6 +189,7 @@ async def copy_block(
         owner_login_id=login_id,
         type=src.type,
         draft_code=src.draft_code,
+        draft_requirements=src.draft_requirements or "",
         draft_notebook=src.draft_notebook,
         input_ports=list(src.input_ports),
         output_ports=list(src.output_ports),

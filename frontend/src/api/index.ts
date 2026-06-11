@@ -54,6 +54,8 @@ export interface Block {
   description: string
   type: string
   draft_code: string
+  draft_requirements?: string
+  requirements_hash?: string
   input_ports: any[]
   output_ports: any[]
   entrypoints: Entrypoint[]

@@ -20,6 +20,7 @@ from app.core.flow.zip_import import (
     _has_valid_entrypoint,
     build_tree,
     infer_data_flow_edges,
+    lookup_requirements_text,
     parse_zip,
 )
 from app.db import get_session
@@ -191,6 +192,7 @@ async def import_flow_zip(
             owner_login_id=login_id,
             type="script",
             draft_code=code,
+            draft_requirements=lookup_requirements_text(path, parsed.resources),
             input_ports=[{"name": "inputs", "type": "any", "required": False}],
             output_ports=[{"name": "output", "type": "any", "required": False}],
             entrypoints=_discover_script_entrypoints(code),

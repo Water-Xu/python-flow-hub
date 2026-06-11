@@ -23,10 +23,16 @@ data:
   PYFLOW_BLOCK_MIDDLEWARE_SECRET: "pyflow-block-middleware"
   # 中间件所在命名空间（RabbitMQ/MinIO/ES/Nacos 均在 lhy-styon）+ 放行端口
   PYFLOW_MIDDLEWARE_NAMESPACE: "lhy-styon"
-  PYFLOW_MIDDLEWARE_NS_PORTS: "5672,15672,9000,9001,9200,8848"
-  # VPC 私网中间件 egress 白名单（Memorystore Redis Cluster 子网 / Cloud SQL 私网 IP）
-  # Redis discovery endpoint 10.0.1.0/24:6379；Cloud SQL 私网 IP 10.196.0.3/32:5432
-  PYFLOW_BLOCK_EGRESS_CIDRS: "10.0.1.0/24:6379,10.196.0.3/32:5432"
+  PYFLOW_MIDDLEWARE_NS_PORTS: "5672,15672,9000,9001,9200,8848,19530,6379"
+  # Milvus Standalone（lhy-styon 命名空间，gRPC 19530）
+  PYFLOW_BLOCK_MILVUS_URI: "http://milvus.lhy-styon.svc.cluster.local:19530"
+  PYFLOW_CLOUD_BUILD_STAGING_BUCKET: "lhy-styon-dev-4832-pyflow-build"
+  PYFLOW_CLOUDBUILD_ENABLED: "true"
+  PYFLOW_BLOCK_ARTIFACTS_BUCKET: "pyflow-artifacts"
+  PYFLOW_PIP_REQUIRE_WHITELIST: "true"
+  # VPC 私网中间件 egress 白名单（Cloud SQL 私网 IP）
+  # Cloud SQL 私网 IP 10.196.0.3/32:5432
+  PYFLOW_BLOCK_EGRESS_CIDRS: "10.196.0.3/32:5432"
   # 默认块连接复用控制面同一套（block_* 留空时回退 redis_url/rabbitmq_url/db_dsn/minio_*）。
   # 如需块连业务库/独立 redis，可在此覆盖（敏感串放 pyflow-hub-secret）：
   # PYFLOW_BLOCK_DB_DSN / PYFLOW_BLOCK_REDIS_URL / PYFLOW_BLOCK_RABBITMQ_URL
@@ -37,7 +43,7 @@ data:
 # ── GCP / GKE 中间件连接速查（lhy-styon-dev 集群，us-central1-a）──────────────
 # 中间件        | 集群内地址 (FQDN) / VPC IP                          | 端口   | 凭据来源
 # PostgreSQL    | <CLOUD_SQL_PRIVATE_IP>  (实例 lhy-styon-pg)        | 5432  | pyflow-hub-secret(PYFLOW_DB_DSN, 库 pyflow)
-# Redis Cluster | 10.0.1.x  (Memorystore discovery endpoint)        | 6379  | 无密码(VPC 私网)
+# Redis Cluster | redis.lhy-styon.svc.cluster.local                  | 6379  | 无密码(K8s 自部署)
 # RabbitMQ      | rabbitmq.lhy-styon.svc.cluster.local              | 5672  | rabbitmq-secret(user lhy-styon, vhost /lhy-styon)
 # RabbitMQ Mgmt | rabbitmq.lhy-styon.svc.cluster.local              | 15672 | 同上(KEDA 读队列深度)
 # MinIO         | minio.lhy-styon.svc.cluster.local                 | 9000  | minio-secret(user minioadmin)

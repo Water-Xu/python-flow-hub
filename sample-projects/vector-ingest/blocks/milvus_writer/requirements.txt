@@ -1,0 +1,2 @@
+@gcs:pyflow/wheels/pyflow_vector_ingest-0.2.0-py3-none-any.whl
+pymilvus>=2.4.9,<2.7

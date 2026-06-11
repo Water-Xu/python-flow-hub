@@ -21,6 +21,8 @@ class Block(Base, UUIDMixin, TimestampMixin):
 
     # 草稿（DB 内，未发布，不超过 100KB）
     draft_code: Mapped[str] = mapped_column(Text, default="")
+    # pip 依赖清单草稿；发布版本时写入 MinIO requirements.txt 并触发依赖层镜像构建（决策 11）
+    draft_requirements: Mapped[str] = mapped_column(Text, default="")
     draft_notebook: Mapped[dict] = mapped_column(JSON, default=dict)
 
     stable_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

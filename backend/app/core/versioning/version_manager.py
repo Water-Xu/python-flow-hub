@@ -71,6 +71,10 @@ async def create_block_version(
     req_key: str | None = None
     req_hash = block.requirements_hash or ""
     if requirements_text.strip():
+        from app.config import get_settings
+        from app.core.k8s.requirements_policy import validate_requirements
+
+        validate_requirements(requirements_text, get_settings())
         req_key = _block_key(block.id, version_id, "requirements.txt")
         await storage.put(req_key, requirements_text.encode("utf-8"), "text/plain")
         req_hash = requirements_hash(requirements_text)

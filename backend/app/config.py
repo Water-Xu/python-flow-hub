@@ -58,6 +58,18 @@ class Settings(BaseSettings):
     cloudbuild_builder_sa: str = "pyflow-builder@lhy-styon-dev-4832.iam.gserviceaccount.com"
     pip_index_url: str = ""                   # 私有 PyPI 镜像；空则用默认（dev）
     pip_require_hashes: bool = False
+    # 依赖白名单（与 pyflowhub_pack 方案对齐；空列表且 require_whitelist=true 时拒绝所有 PyPI 包）
+    pip_require_whitelist: bool = True
+    pip_allowed_packages: str = (
+        "fastembed,pymilvus,onnxruntime,numpy,httpx,pillow,torch,faiss-cpu,open-clip-torch,"
+        "pyflow-vector-ingest,pyflow_vector_ingest,pyflow_vector,sentence-transformers"
+    )
+    # 允许源码安装（不用 --only-binary）的重型包
+    pip_allow_sdist_packages: str = "fastembed"
+    # 块大文件 / wheel 所在 MinIO bucket（不含 pyflow-versions 版本代码）
+    block_artifacts_bucket: str = "pyflow-artifacts"
+    # Cloud Build 拉取 @gcs: wheel 的 staging bucket（默认可推导）
+    cloudbuild_staging_bucket: str = ""
     artifact_registry: str = (
         "us-central1-docker.pkg.dev/lhy-styon-dev-4832/lhy-styon"
     )
@@ -86,11 +98,11 @@ class Settings(BaseSettings):
     block_nacos_addr: str = ""                # 如 nacos-registry.lhy-styon:8848
     # 中间件（RabbitMQ/MinIO/ES/Nacos/Milvus）所在命名空间（pyflow 跨 ns 访问需放行）
     middleware_namespace: str = "lhy-styon"
-    # 命名空间内放行的中间件端口（逗号分隔）：amqp/mgmt/minio/minio-console/es/nacos/milvus-grpc
-    middleware_ns_ports: str = "5672,15672,9000,9001,9200,8848,19530"
-    # VPC 私网中间件 egress 白名单（Memorystore Redis / Cloud SQL 等，cidr:port 逗号分隔）
-    # 例：10.0.1.0/24:6379,10.196.0.3/32:5432
-    block_egress_cidrs: str = "10.0.1.0/24:6379,10.196.0.3/32:5432"
+    # 命名空间内放行的中间件端口（逗号分隔）：amqp/mgmt/minio/minio-console/es/nacos/milvus-grpc/redis
+    middleware_ns_ports: str = "5672,15672,9000,9001,9200,8848,19530,6379"
+    # VPC 私网中间件 egress 白名单（Cloud SQL 等，cidr:port 逗号分隔）
+    # 例：10.196.0.3/32:5432
+    block_egress_cidrs: str = "10.196.0.3/32:5432"
     # 块连接中间件的共享 Secret 名（运行时由 orchestrator 从 block_* 渲染到 pyflow-blocks）
     block_middleware_secret: str = "pyflow-block-middleware"
 
@@ -120,6 +132,11 @@ class Settings(BaseSettings):
 
     def effective_block_nacos_addr(self) -> str:
         return self.block_nacos_addr
+
+    def effective_cloudbuild_staging_bucket(self) -> str:
+        if self.cloudbuild_staging_bucket.strip():
+            return self.cloudbuild_staging_bucket.strip()
+        return f"{self.gcp_project}-pyflow-build"
 
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = "minioadmin"

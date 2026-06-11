@@ -1,0 +1,13 @@
+{
+  "modality": "image",
+  "image_urls": [
+    "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"
+  ],
+  "captions": ["透明 PNG 示例图"],
+  "collection_name": "demo_flowhub_images",
+  "source": "sample-projects/vector-ingest",
+  "metadata": {
+    "biz": "demo",
+    "type": "product_image"
+  }
+}

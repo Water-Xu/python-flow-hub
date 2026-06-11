@@ -83,7 +83,7 @@ def test_merge_env_priority_global_lt_deployment_lt_block():
 
 def test_build_egress_for_settings():
     s = _settings(middleware_namespace="lhy-styon",
-                  middleware_ns_ports="5672,15672", block_egress_cidrs="10.0.1.0/24:6379")
+                  middleware_ns_ports="5672,15672,6379", block_egress_cidrs="10.196.0.3/32:5432")
     rules = middleware.build_egress_for_settings(s)
     ports = [p["port"] for r in rules for p in r["ports"]]
-    assert 5672 in ports and 6379 in ports
+    assert 5672 in ports and 6379 in ports and 5432 in ports

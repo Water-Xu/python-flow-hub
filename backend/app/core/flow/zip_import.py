@@ -201,6 +201,29 @@ def infer_data_flow_edges(
     return edges
 
 
+def requirements_path_for_script(script_path: str) -> list[str]:
+    """脚本可能对应的 requirements.txt 路径（优先 nested：blocks/foo.py → blocks/foo/requirements.txt）。"""
+    dir_name = posixpath.dirname(script_path)
+    base = posixpath.splitext(posixpath.basename(script_path))[0]
+    candidates: list[str] = []
+    if dir_name:
+        candidates.append(f"{dir_name}/{base}/requirements.txt")
+        candidates.append(f"{dir_name}/requirements.txt")
+    else:
+        candidates.append(f"{base}/requirements.txt")
+    candidates.append("requirements.txt")
+    return candidates
+
+
+def lookup_requirements_text(script_path: str, resources: dict[str, str]) -> str:
+    """从 zip 资源中读取与脚本配套的 requirements.txt。"""
+    for key in requirements_path_for_script(script_path):
+        text = resources.get(key, "")
+        if text and text != _BINARY_PLACEHOLDER:
+            return text
+    return ""
+
+
 def _is_safe_path(name: str) -> bool:
     if not name or name.endswith("/"):
         return False

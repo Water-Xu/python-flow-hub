@@ -45,6 +45,7 @@ class BlockDeploySpec:
     secret_refs: dict[str, str] = field(default_factory=dict)
     gcp_resource_scope: list[str] = field(default_factory=list)
     requirements_hash: str = ""
+    requirements_path: str = ""
     version_id: str = ""
     code_path: str = ""                        # MinIO key（runner 启动注入）
     image: str = ""                            # 依赖层镜像（决策 11；空则用 ctx 默认 runner 镜像）
@@ -304,7 +305,7 @@ def middleware_egress_rules(
     """中间件 egress 白名单（决策 1/14）：让块连到集群内/VPC 中间件。
 
     - middleware_namespace（如 lhy-styon）内的 RabbitMQ/MinIO/ES/Nacos：按 namespaceSelector + 端口放行；
-    - VPC 私网中间件（Memorystore Redis / Cloud SQL）：按 ipBlock CIDR + 端口放行。
+    - VPC 私网中间件（Cloud SQL）：按 ipBlock CIDR + 端口放行。
     """
     rules: list[dict[str, Any]] = []
     if middleware_namespace and ns_ports:

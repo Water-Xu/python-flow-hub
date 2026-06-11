@@ -131,11 +131,13 @@ async def build_specs(session: AsyncSession, flow_id: str) -> list[BlockDeploySp
         if block is None:
             continue
         code_path = ""
+        requirements_path = ""
         version_id = block.stable_version_id or ""
         if version_id:
             bv = await session.get(BlockVersion, version_id)
             if bv is not None:
                 code_path = bv.code_path
+                requirements_path = bv.requirements_path or ""
         specs.append(BlockDeploySpec(
             block_id=block.id,
             name=block.name,
@@ -145,6 +147,7 @@ async def build_specs(session: AsyncSession, flow_id: str) -> list[BlockDeploySp
             secret_refs=block.secret_refs or {},
             gcp_resource_scope=block.gcp_resource_scope or [],
             requirements_hash=block.requirements_hash or "",
+            requirements_path=requirements_path or "",
             version_id=version_id,
             code_path=code_path,
         ))
@@ -283,14 +286,20 @@ async def _resolve_images(specs: list[BlockDeploySpec]) -> None:
             spec.image = cache[cache_key]
             continue
         req_text = ""
-        # 依赖清单存于版本对象（requirements_path）；缺失则空（构建用 base）
+        req_key = spec.requirements_path
+        if not req_key and spec.code_path:
+            req_key = spec.code_path.rsplit("/", 1)[0] + "/requirements.txt"
         try:
-            if spec.code_path:
-                req_key = spec.code_path.rsplit("/", 1)[0] + "/requirements.txt"
-                if await storage.exists(req_key):
-                    req_text = (await storage.get(req_key)).decode("utf-8")
+            if req_key and await storage.exists(req_key):
+                req_text = (await storage.get(req_key)).decode("utf-8")
         except Exception as exc:  # noqa: BLE001 拉取依赖清单失败不阻断（用 base 镜像）
             logger.warning("requirements_fetch_failed", block_id=spec.block_id, error=str(exc))
+        if not req_text.strip():
+            logger.warning(
+                "requirements_empty_for_hash",
+                block_id=spec.block_id,
+                requirements_hash=spec.requirements_hash,
+            )
         try:
             spec.image = await image_builder.ensure_dependency_image(
                 req_text, spec.requirements_hash, gpu=spec.gpu_enabled, cuda_version=cuda

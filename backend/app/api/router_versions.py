@@ -66,10 +66,13 @@ async def create_block_version(
     block = await session.get(Block, block_id)
     if block is None:
         raise BusinessException(PYFLOW_BLOCK_NOT_FOUND, block_id)
+    req_text = req.requirements_text.strip()
+    if not req_text and (block.draft_requirements or "").strip():
+        req_text = block.draft_requirements.strip()
     version = await version_manager.create_block_version(
         session, block,
         version_tag=req.version_tag, commit_message=req.commit_message,
-        login_id=login_id, requirements_text=req.requirements_text,
+        login_id=login_id, requirements_text=req_text,
         set_stable=req.set_stable,
     )
     return _bv_dict(version)

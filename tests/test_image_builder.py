@@ -13,12 +13,10 @@ def test_dependency_image_tag_cpu_and_gpu():
 
 
 def test_cloudbuild_config_supplychain():
-    cfg = image_builder.build_cloudbuild_config("requests==2.0\n", "img:dep-x")
-    # 含依赖审计步骤（pip-audit）
+    cfg = image_builder.build_cloudbuild_config("fastembed>=0.4\n", "img:dep-x")
     audit = any("pip-audit" in " ".join(s.get("args", [])) for s in cfg["steps"])
     assert audit
-    # 显式专用构建 SA
     assert "pyflow-builder@" in cfg["serviceAccount"]
-    # Dockerfile 优先 wheel
-    assert "--only-binary :all:" in cfg["_dockerfile"]
+    assert "install_deps.sh" in cfg["_dockerfile"]
+    assert "storageSource" in cfg["source"]
     assert cfg["images"] == ["img:dep-x"]
