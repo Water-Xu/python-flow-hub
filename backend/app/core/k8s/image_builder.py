@@ -146,27 +146,20 @@ async def ensure_dependency_image(
     return image_tag
 
 
-def _credentials_token() -> str:
-    try:
-        import google.auth  # type: ignore
-        from google.auth.transport.requests import Request  # type: ignore
-    except ImportError as exc:
-        raise BusinessException(PYFLOW_K8S_DEPLOY_FAILED, "google-auth not available") from exc
-    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-    creds.refresh(Request())
-    return creds.token
 
 
 async def _upload_build_context(config: dict[str, Any]) -> None:
     """打包 Dockerfile + install 脚本 + pyflow_runtime/runner 上传到 GCS staging。"""
 
     def _do() -> None:
-        import os
         from pathlib import Path
 
-        import httpx
+        try:
+            from google.cloud import storage as gcs  # type: ignore
+        except ImportError as exc:
+            raise BusinessException(PYFLOW_K8S_DEPLOY_FAILED, "google-cloud-storage not available") from exc
 
-        root = Path(__file__).resolve().parents[4]  # repo root（含 pyflow_runtime/ runner/）
+        root = Path(__file__).resolve().parents[4]
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
             def add_text(name: str, text: str) -> None:
@@ -188,30 +181,27 @@ async def _upload_build_context(config: dict[str, Any]) -> None:
                         arc = f"{folder}/{path.relative_to(base).as_posix()}"
                         tar.add(path, arcname=arc)
 
-        bucket = config["_staging_bucket"]
-        obj = config["_staging_object"]
-        token = _credentials_token()
-        url = (
-            f"https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o"
-            f"?uploadType=media&name={obj.replace('/', '%2F')}"
-        )
-        with httpx.Client(timeout=120) as cli:
-            resp = cli.post(
-                url,
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/gzip"},
-                content=buf.getvalue(),
-            )
-            if resp.status_code >= 300:
-                raise BusinessException(
-                    PYFLOW_K8S_DEPLOY_FAILED,
-                    f"upload build context failed: {resp.text[:300]}",
-                )
+        bucket_name = config["_staging_bucket"]
+        obj_name = config["_staging_object"]
+        client = gcs.Client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(obj_name)
+        buf.seek(0)
+        try:
+            blob.upload_from_file(buf, content_type="application/gzip", timeout=120)
+        except Exception as exc:
+            raise BusinessException(
+                PYFLOW_K8S_DEPLOY_FAILED,
+                f"upload build context failed: {exc}",
+            ) from exc
 
     await asyncio.to_thread(_do)
 
 
 async def _image_exists(image_tag: str) -> bool:
     def _do() -> bool:
+        import google.auth  # type: ignore
+        from google.auth.transport.requests import Request  # type: ignore
         import httpx
 
         try:
@@ -225,9 +215,10 @@ async def _image_exists(image_tag: str) -> bool:
             f"https://artifactregistry.googleapis.com/v1/projects/{project}/locations/"
             f"{location}/repositories/{repo}/dockerImages"
         )
-        token = _credentials_token()
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        creds.refresh(Request())
         with httpx.Client(timeout=20) as cli:
-            resp = cli.get(url, headers={"Authorization": f"Bearer {token}"})
+            resp = cli.get(url, headers={"Authorization": f"Bearer {creds.token}"})
             if resp.status_code != 200:
                 return False
             for img in resp.json().get("dockerImages", []):
@@ -244,9 +235,14 @@ async def _image_exists(image_tag: str) -> bool:
 
 async def _submit_build(config: dict[str, Any]) -> None:
     def _do() -> None:
+        import google.auth  # type: ignore
+        from google.auth.transport.requests import Request  # type: ignore
         import httpx
 
-        token = _credentials_token()
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        creds.refresh(Request())
+        token = creds.token
+
         url = _CLOUDBUILD_API.format(project=settings.gcp_project)
         body = {k: v for k, v in config.items() if not k.startswith("_")}
         with httpx.Client(timeout=60) as cli:

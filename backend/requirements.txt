@@ -17,6 +17,8 @@ jmespath==1.0.1
 jsonpath-ng==1.6.1
 docker==7.1.0
 kubernetes==31.0.0
+google-cloud-storage==2.18.0
+google-auth==2.29.0
 python-multipart==0.0.9
 websockets==13.0.1
 # Jupyter 开发态内核（仅 local 模式，与生产执行链路隔离，决策 9）
