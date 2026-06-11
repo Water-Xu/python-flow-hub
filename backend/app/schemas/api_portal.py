@@ -110,6 +110,11 @@ class ApiResponse(BaseModel):
     success_calls: int
     error_calls: int
     avg_latency_ms: float
+    # 开发者文档字段
+    remarks: str = ""
+    sample_request: str = ""
+    sample_response: str = ""
+    changelog: str = ""
     created_at: datetime
     updated_at: datetime
 
@@ -120,6 +125,15 @@ class ApiResponse(BaseModel):
     def invoke_path(self) -> str:
         """对外完整可调路径（含网关前缀），供门户卡片/复制直接使用。"""
         return f"{get_settings().public_api_prefix}/api/public/{self.path}"
+
+
+class ApiRemarksRequest(BaseModel):
+    """更新接口开发者文档（备注、示例、变更日志）。"""
+
+    remarks: str | None = None
+    sample_request: str | None = None
+    sample_response: str | None = None
+    changelog: str | None = None
 
 
 class ApiInstanceInfo(BaseModel):

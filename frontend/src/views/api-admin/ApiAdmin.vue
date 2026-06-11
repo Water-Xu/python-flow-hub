@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue'
+import { onMounted, ref, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { apiAdminApi, apiPortalApi, flowApi, type PublishedApi } from '@/api'
+import { apiAdminApi, apiPortalApi, flowApi, type PublishedApi, type FlowEntrypointsInfo, type ApiEncryptionKey } from '@/api'
 import MqMockTestDialog from '@/components/MqMockTestDialog.vue'
 import MqTriggerForm from '@/components/MqTriggerForm.vue'
 
@@ -213,6 +213,151 @@ const successRate = (api: PublishedApi) =>
 const errorRate = (api: PublishedApi) =>
   api.total_calls > 0 ? ((api.error_calls / api.total_calls) * 100).toFixed(1) + '%' : '—'
 
+// ── 发布接口（从接口门户迁移来）──────────────────────────────────────────────
+const publishDialogVisible = ref(false)
+const publishForm = ref({
+  name: '', description: '', path: '', tags: '',
+  flow_id: '', entry_node_id: null as string | null, entrypoint_map: {} as Record<string, string>,
+})
+const flowEntrypointsInfo = ref<FlowEntrypointsInfo | null>(null)
+const entrypointsLoading = ref(false)
+  } catch { /* ignore */ } finally {
+      entrypointsLoading.value = false
+    }
+  },
+)
+async function publish() {
+  if (!publishForm.value.name || !publishForm.value.path || !publishForm.value.flow_id)
+    return ElMessage.warning('请填写接口名称、路径和关联流程')
+  try {
+    await apiPortalApi.publish({
+      name: publishForm.value.name, description: publishForm.value.description,
+      path: publishForm.value.path, tags: publishForm.value.tags,
+      flow_id: publishForm.value.flow_id, entry_node_id: publishForm.value.entry_node_id || null,
+      entrypoint: null, entrypoint_map: { ...publishForm.value.entrypoint_map },
+    })
+    publishDialogVisible.value = false
+    ElMessage.success('接口发布成功')
+    publishForm.value = { name: '', description: '', path: '', tags: '', flow_id: '', entry_node_id: null, entrypoint_map: {} }
+    load()
+  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '发布失败') }
+}
+
+// ── 加密（从接口门户迁移来）──────────────────────────────────────────────────
+const encryptionDialogVisible = ref(false)
+const encryptionApi = ref<PublishedApi | null>(null)
+const encryptionInfo = ref<ApiEncryptionKey | null>(null)
+const encryptionLoading = ref(false)
+const encryptionSaving = ref(false)
+const encEnabled = ref(false)
+const encRequire = ref(false)
+async function openEncryption(api: PublishedApi) {
+  if (api.is_locked) return ElMessage.warning('接口已锁定，无法修改加密配置')
+  encryptionApi.value = api
+  encryptionInfo.value = null
+  encEnabled.value = api.encryption_enabled
+  encRequire.value = api.require_encrypted_request
+  encryptionDialogVisible.value = true
+  encryptionLoading.value = true
+  try {
+    encryptionInfo.value = await apiPortalApi.getEncryptionKey(api.id)
+    encEnabled.value = encryptionInfo.value.encryption_enabled
+    encRequire.value = encryptionInfo.value.require_encrypted_request
+  } catch { /* 读取失败不阻断 */ } finally {
+    encryptionLoading.value = false
+  }
+}
+async function saveEncryption() {
+  if (!encryptionApi.value) return
+  encryptionSaving.value = true
+  try {
+    const res = await apiPortalApi.updateEncryption(encryptionApi.value.id, {
+      enabled: encEnabled.value, require_encrypted_request: encRequire.value,
+    })
+    encryptionInfo.value = { ...res, encryption_key: res.encryption_key ?? encryptionInfo.value?.encryption_key ?? null }
+    ElMessage.success(encEnabled.value ? '加密保护已开启' : '加密保护已关闭')
+    encryptionDialogVisible.value = false
+    load()
+  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '保存失败') }
+  finally { encryptionSaving.value = false }
+}
+async function rotateKey() {
+  if (!encryptionApi.value) return
+  await ElMessageBox.confirm('轮转后旧密钥立即失效，调用方需同步更新为新密钥。确认轮转？', '轮转密钥', { type: 'warning' })
+  encryptionSaving.value = true
+  try {
+    encryptionInfo.value = await apiPortalApi.rotateEncryptionKey(encryptionApi.value.id)
+    ElMessage.success('密钥已轮转，请复制并更新到调用方')
+    load()
+  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '轮转失败') }
+  finally { encryptionSaving.value = false }
+}
+async function copyKey() {
+  const key = encryptionInfo.value?.encryption_key
+  if (!key) return ElMessage.warning('当前无可复制的完整密钥，请轮转或重新开启以获取')
+  try { await navigator.clipboard.writeText(key); ElMessage.success('密钥已复制') }
+  catch { ElMessage.warning('复制失败，请手动选择复制') }
+}
+const javaConfigSnippet = computed(() => {
+  const path = encryptionApi.value?.path || 'your-api-path'
+  const key = encryptionInfo.value?.encryption_key || '（在此填入上方完整密钥）'
+  return `flowhub:\n  encryption:\n    enabled: true\n    path-keys:\n      ${path}: "${key}"`
+})
+
+// ── 暂停 / 激活 ───────────────────────────────────────────────────────────────
+async function toggleStatus(api: PublishedApi) {
+  if (api.is_locked) return ElMessage.warning('接口已锁定，无法操作')
+  try {
+    if (api.status === 'active') { await apiPortalApi.pause(api.id); ElMessage.success('已暂停') }
+    else { await apiPortalApi.activate(api.id); ElMessage.success('已激活') }
+    load()
+  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '操作失败') }
+}
+
+// ── 复制流程 ──────────────────────────────────────────────────────────────────
+async function copyFlow(api: PublishedApi) {
+  try {
+    const res = await apiPortalApi.copyFlow(api.flow_id)
+    ElMessage.success(`已创建流程副本：${res.name}`)
+  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '复制失败') }
+}
+
+// ── 下线（从接口门户迁移来）──────────────────────────────────────────────────
+async function unpublish(api: PublishedApi) {
+  if (api.is_locked) return ElMessage.warning('接口已被管理员锁定，无法下线')
+  await ElMessageBox.confirm(`确认下线接口「${api.name}」？`, '下线确认', { type: 'warning' })
+  try {
+    await apiPortalApi.unpublish(api.id); ElMessage.success('已下线'); load()
+  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '操作失败') }
+}
+
+// ── 文档编辑（备注/示例/变更日志）───────────────────────────────────────────
+const remarksDrawerVisible = ref(false)
+const remarksApi = ref<PublishedApi | null>(null)
+const remarksForm = ref({ remarks: '', sample_request: '', sample_response: '', changelog: '' })
+const remarksSaving = ref(false)
+function openRemarksEdit(api: PublishedApi) {
+  remarksApi.value = api
+  remarksForm.value = {
+    remarks: api.remarks || '',
+    sample_request: api.sample_request || '',
+    sample_response: api.sample_response || '',
+    changelog: api.changelog || '',
+  }
+  remarksDrawerVisible.value = true
+}
+async function saveRemarks() {
+  if (!remarksApi.value) return
+  remarksSaving.value = true
+  try {
+    await apiPortalApi.updateRemarks(remarksApi.value.id, remarksForm.value)
+    ElMessage.success('文档已保存')
+    remarksDrawerVisible.value = false
+    load()
+  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '保存失败') }
+  finally { remarksSaving.value = false }
+}
+
 onMounted(load)
 </script>
 
@@ -223,6 +368,9 @@ onMounted(load)
         <h2>接口管理中心</h2>
         <p class="dim">管理员视图 — 查看所有已发布接口、流量统计、实例负载，配置策略并锁定接口</p>
       </div>
+      <el-button type="primary" @click="publishDialogVisible = true">
+        <el-icon style="margin-right:6px"><Plus /></el-icon>发布接口
+      </el-button>
     </header>
 
     <!-- 概览卡片 -->
@@ -318,7 +466,7 @@ onMounted(load)
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" width="320" fixed="right">
+      <el-table-column label="操作" width="420" fixed="right">
         <template #default="{ row }">
           <div class="action-btns">
             <el-tooltip content="接口文档">
@@ -360,6 +508,44 @@ onMounted(load)
                 @click="row.is_locked ? unlockApi(row) : openLock(row)"
               >
                 <el-icon><component :is="row.is_locked ? 'Unlock' : 'Lock'" /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-divider direction="vertical" style="margin: 0 2px" />
+            <el-tooltip content="加密保护">
+              <el-button
+                size="small"
+                circle
+                :type="row.encryption_enabled ? 'success' : 'info'"
+                :disabled="row.is_locked"
+                @click="openEncryption(row)"
+              >
+                <el-icon><Lock /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip :content="row.status === 'active' ? '暂停接口' : '激活接口'">
+              <el-button
+                size="small"
+                circle
+                :type="row.status === 'active' ? 'warning' : 'success'"
+                :disabled="row.is_locked"
+                @click="toggleStatus(row)"
+              >
+                <el-icon><component :is="row.status === 'active' ? 'VideoPause' : 'VideoPlay'" /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="编辑文档">
+              <el-button size="small" circle type="primary" @click="openRemarksEdit(row)">
+                <el-icon><EditPen /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="复制流程">
+              <el-button size="small" circle type="info" @click="copyFlow(row)">
+                <el-icon><CopyDocument /></el-icon>
+              </el-button>
+            </el-tooltip>
+            <el-tooltip content="下线接口">
+              <el-button size="small" circle type="danger" :disabled="row.is_locked" @click="unpublish(row)">
+                <el-icon><Delete /></el-icon>
               </el-button>
             </el-tooltip>
           </div>
@@ -653,6 +839,126 @@ onMounted(load)
           </transition-group>
         </template>
       </div>
+    </el-drawer>
+
+    <!-- ─── 发布接口 Dialog ─────────────────────────────────────────────────── -->
+    <el-dialog v-model="publishDialogVisible" title="发布接口" width="600px" destroy-on-close>
+      <el-form label-width="100px">
+        <el-form-item label="接口名称" required>
+          <el-input v-model="publishForm.name" placeholder="例如 向量检索接口" />
+        </el-form-item>
+        <el-form-item label="URL 路径" required>
+          <el-input v-model="publishForm.path" placeholder="例如 vector-search（仅字母/数字/下划线/短横线）">
+            <template #prepend>/api/public/</template>
+          </el-input>
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="publishForm.description" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="标签">
+          <el-input v-model="publishForm.tags" placeholder="逗号分隔，如 search,ai,vector" />
+        </el-form-item>
+        <el-form-item label="关联流程" required>
+          <el-select v-model="publishForm.flow_id" style="width:100%" placeholder="选择要发布的流程" filterable>
+            <el-option v-for="f in flows" :key="f.id" :label="f.name" :value="f.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="flowEntrypointsInfo?.entry_node_id" label="入口节点">
+          <el-tag type="success">已由流程配置（{{ flowEntrypointsInfo?.nodes.find(n => n.node_id === flowEntrypointsInfo?.entry_node_id)?.block_name || publishForm.entry_node_id }}）</el-tag>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="publishDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="publish">发布</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ─── 加密保护 Dialog ─────────────────────────────────────────────────── -->
+    <el-dialog v-model="encryptionDialogVisible" :title="`加密保护 - ${encryptionApi?.name || ''}`" width="540px" destroy-on-close>
+      <div v-loading="encryptionLoading">
+        <div class="enc-status-row">
+          <div class="enc-status-label">AES-256-GCM 加密</div>
+          <el-switch v-model="encEnabled" active-text="开启" inactive-text="关闭" />
+        </div>
+        <el-form-item v-if="encEnabled" label="强制加密" style="margin-top:12px">
+          <el-switch v-model="encRequire" />
+          <span class="dim" style="margin-left:8px">开启后拒绝明文请求</span>
+        </el-form-item>
+        <template v-if="encryptionInfo?.key_hint">
+          <el-divider />
+          <div class="key-section">
+            <div class="key-hint-row">
+              <span class="dim">密钥指纹：</span>
+              <code>{{ encryptionInfo.key_hint }}...</code>
+              <el-button text size="small" @click="rotateKey" :loading="encryptionSaving">轮转密钥</el-button>
+            </div>
+            <template v-if="encryptionInfo.encryption_key">
+              <el-input :value="encryptionInfo.encryption_key" readonly class="key-input" size="small">
+                <template #append>
+                  <el-button @click="copyKey">复制</el-button>
+                </template>
+              </el-input>
+            </template>
+            <el-divider content-position="left"><span class="dim" style="font-size:12px">Java 调用方配置示例</span></el-divider>
+            <pre class="code-block">{{ javaConfigSnippet }}</pre>
+          </div>
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="encryptionDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="encryptionSaving" @click="saveEncryption">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ─── 编辑文档 Drawer ─────────────────────────────────────────────────── -->
+    <el-drawer
+      v-model="remarksDrawerVisible"
+      :title="`编辑文档 — ${remarksApi?.name || ''}`"
+      size="600px"
+      direction="rtl"
+    >
+      <div class="remarks-edit">
+        <el-form label-position="top">
+          <el-form-item label="开发者备注（将展示在接口门户文档中）">
+            <el-input
+              v-model="remarksForm.remarks"
+              type="textarea"
+              :rows="4"
+              placeholder="描述接口用途、调用限制、注意事项等..."
+            />
+          </el-form-item>
+          <el-form-item label="示例请求体（JSON 格式，留空则自动生成）">
+            <el-input
+              v-model="remarksForm.sample_request"
+              type="textarea"
+              :rows="6"
+              placeholder='{"inputs": {"text": "Spring Cloud 微服务架构"}}'
+              style="font-family: monospace; font-size: 12px"
+            />
+          </el-form-item>
+          <el-form-item label="示例响应体（JSON 格式，留空则自动生成）">
+            <el-input
+              v-model="remarksForm.sample_response"
+              type="textarea"
+              :rows="6"
+              placeholder='{"outputs": {"results": []}, "status": "succeeded"}'
+              style="font-family: monospace; font-size: 12px"
+            />
+          </el-form-item>
+          <el-form-item label="变更日志（Markdown，记录版本历史）">
+            <el-input
+              v-model="remarksForm.changelog"
+              type="textarea"
+              :rows="5"
+              placeholder="## v1.1.0 (2026-06-11)&#10;- 新增批量向量化支持&#10;- 优化延迟性能"
+            />
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button @click="remarksDrawerVisible = false">取消</el-button>
+        <el-button type="primary" :loading="remarksSaving" @click="saveRemarks">保存文档</el-button>
+      </template>
     </el-drawer>
 
     <!-- MQ Mock 测试 Dialog（复用组件） -->
@@ -957,4 +1263,37 @@ onMounted(load)
 }
 .mq-section-enter-active { transition: opacity 0.3s ease, transform 0.3s ease; }
 .mq-section-enter-from { opacity: 0; transform: translateY(8px); }
+
+/* 加密 Dialog */
+.enc-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: rgba(0,0,0,.12);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+.enc-status-label { font-weight: 600; font-size: 14px; }
+.key-section { display: flex; flex-direction: column; gap: 8px; }
+.key-hint-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.key-input :deep(.el-input__inner) { font-family: monospace; font-size: 11px; }
+.code-block {
+  background: rgba(0,0,0,.25);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 12px;
+  font-family: monospace;
+  color: #a5d6ff;
+  overflow-x: auto;
+  margin: 0;
+}
+
+/* 文档编辑 */
+.remarks-edit { padding: 0 4px; }
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
 </style>

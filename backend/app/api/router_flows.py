@@ -23,6 +23,7 @@ from app.core.flow.zip_import import (
     lookup_requirements_text,
     parse_zip,
 )
+from app.core.versioning import version_manager
 from app.db import get_session
 from app.errors import (
     PYFLOW_API_LOCKED,
@@ -179,24 +180,32 @@ async def import_flow_zip(
     cols = 4
     # 仅合法入口脚本参与数据流推断（path -> node_id）
     node_id_map: dict[str, str] = {}
+    # 收集需要自动发布稳定版本的块：(block_obj, req_text)
+    blocks_to_publish: list[tuple[Block, str]] = []
     for idx, (path, code) in enumerate(sorted(parsed.scripts.items())):
         block_id = gen_uuid()
         node_id = gen_uuid()
         filename = posixpath.basename(path)
         # pack.py 等无入口脚本：仍建块以保留源码，但标记 invalid 供画布置灰
         is_valid = _has_valid_entrypoint(code)
-        session.add(Block(
+        req_text = lookup_requirements_text(path, parsed.resources)
+        block_obj = Block(
             id=block_id,
             name=path,
             description=f"导入自 {flow_name}",
             owner_login_id=login_id,
             type="script",
             draft_code=code,
-            draft_requirements=lookup_requirements_text(path, parsed.resources),
+            draft_requirements=req_text,
+            source_flow_id=flow.id,
             input_ports=[{"name": "inputs", "type": "any", "required": False}],
             output_ports=[{"name": "output", "type": "any", "required": False}],
             entrypoints=_discover_script_entrypoints(code),
-        ))
+        )
+        session.add(block_obj)
+        if is_valid:
+            # 有合法入口的块：收集待自动发布
+            blocks_to_publish.append((block_obj, req_text))
         session.add(FlowNode(
             id=node_id,
             flow_id=flow.id,
@@ -229,6 +238,25 @@ async def import_flow_zip(
 
     flow.tree = build_tree(leaves)
     flow.resources = parsed.resources
+
+    # 先 flush 使 Block 记录入库，再写 MinIO + BlockVersion（双写一致性）
+    await session.flush()
+    for block_obj, req_text in blocks_to_publish:
+        try:
+            await version_manager.create_block_version(
+                session,
+                block_obj,
+                version_tag="zip-import",
+                commit_message=f"auto-publish from zip import: {flow_name}",
+                login_id=login_id,
+                requirements_text=req_text,
+                set_stable=True,
+                auto_commit=False,
+            )
+        except Exception:  # noqa: BLE001
+            # 版本发布失败不阻断导入（如 MinIO 不可用），块仍保留 draft 状态
+            pass
+
     await session.commit()
 
     return FlowImportResponse(
@@ -371,7 +399,9 @@ async def remove_flow(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(require_role(Role.EDITOR)),
 ):
-    """删除流程（未被锁定 / 发布 / 部署的流程），级联清理其节点、边、版本与运行记录。"""
+    """删除流程（未被锁定 / 发布 / 部署的流程），级联清理其节点、边、版本与运行记录。
+    若为 zip 导入的流程，同时删除所有来源归属于该 flow 的调用块及其版本快照（含 MinIO 对象）。
+    """
     flow = await _get_flow(session, flow_id)
     await _assert_flow_deletable(session, flow_id)
 
@@ -379,6 +409,14 @@ async def remove_flow(
     await session.execute(delete(FlowNode).where(FlowNode.flow_id == flow_id))
     await session.execute(delete(FlowVersion).where(FlowVersion.flow_id == flow_id))
     await session.execute(delete(FlowRun).where(FlowRun.flow_id == flow_id))
+
+    # 级联删除所有来源于该 flow 的调用块（及 MinIO 版本快照）
+    source_blocks = (await session.execute(
+        select(Block).where(Block.source_flow_id == flow_id)
+    )).scalars().all()
+    for block in source_blocks:
+        await version_manager.delete_block_with_versions(session, block)
+
     await session.delete(flow)
     await session.commit()
     return {"deleted": flow_id}

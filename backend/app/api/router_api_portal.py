@@ -31,6 +31,7 @@ from app.errors import (
     PYFLOW_API_NOT_FOUND,
     PYFLOW_API_PATH_EXISTS,
     PYFLOW_API_RATE_LIMITED,
+    PYFLOW_AUTH_FORBIDDEN,
     PYFLOW_BLOCK_NOT_FOUND,
     PYFLOW_EXEC_SANDBOX_ERROR,
     BusinessException,
@@ -44,6 +45,7 @@ from app.schemas.api_portal import (
     ApiEncryptionKeyResponse,
     ApiEncryptionRequest,
     ApiMqConfigRequest,
+    ApiRemarksRequest,
     ApiResponse,
     PublishApiRequest,
 )
@@ -233,6 +235,20 @@ async def list_my_apis(
     rows = (await session.execute(
         select(PublishedApi)
         .where(PublishedApi.owner_login_id == login_id)
+        .order_by(PublishedApi.created_at.desc())
+    )).scalars().all()
+    return rows
+
+
+@router.get("/api/portal/apis/browse", response_model=list[ApiResponse])
+async def browse_apis(
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.VIEWER)),
+):
+    """浏览所有已发布且处于活跃状态的接口（对接口门户用户开放，不限制 owner）。"""
+    rows = (await session.execute(
+        select(PublishedApi)
+        .where(PublishedApi.status == "active")
         .order_by(PublishedApi.created_at.desc())
     )).scalars().all()
     return rows
@@ -503,7 +519,40 @@ async def get_api_docs(
         # ── MQ 触发支持（接口级）──
         "mq_supported": mq_invocation is not None,
         "mq_invocation": mq_invocation,
+        # ── 开发者文档（可编辑） ──
+        "remarks": api.remarks or "",
+        "sample_request": api.sample_request or "",
+        "sample_response": api.sample_response or "",
+        "changelog": api.changelog or "",
+        "is_locked": api.is_locked,
     }
+
+
+@router.put("/api/portal/apis/{api_id}/remarks", response_model=ApiResponse)
+async def update_api_remarks(
+    api_id: str,
+    req: ApiRemarksRequest,
+    session: AsyncSession = Depends(get_session),
+    login_id: str = Depends(require_role(Role.EDITOR)),
+):
+    """更新接口的开发者文档（备注、示例请求/响应、变更日志）。接口负责人或管理员可操作。"""
+    api = await _get_api(session, api_id)
+    if api.owner_login_id != login_id:
+        from app.auth.rbac import Role, get_user_roles
+        roles = await get_user_roles(login_id, session)
+        if max(roles) < Role.ADMIN:
+            raise BusinessException(PYFLOW_AUTH_FORBIDDEN, "只有接口负责人或管理员可编辑文档")
+    if req.remarks is not None:
+        api.remarks = req.remarks
+    if req.sample_request is not None:
+        api.sample_request = req.sample_request
+    if req.sample_response is not None:
+        api.sample_response = req.sample_response
+    if req.changelog is not None:
+        api.changelog = req.changelog
+    await session.commit()
+    await session.refresh(api)
+    return api
 
 
 def _entry_input_ports(

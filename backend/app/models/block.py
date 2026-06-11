@@ -26,6 +26,8 @@ class Block(Base, UUIDMixin, TimestampMixin):
     draft_notebook: Mapped[dict] = mapped_column(JSON, default=dict)
 
     stable_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # zip 导入时记录来源 flow_id，用于分组展示与级联删除
+    source_flow_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
     input_ports: Mapped[list] = mapped_column(JSON, default=list)
     output_ports: Mapped[list] = mapped_column(JSON, default=list)

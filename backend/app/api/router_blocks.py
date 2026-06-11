@@ -18,7 +18,7 @@ from pyflow_runtime.executor import discover_entrypoints
 
 from app.models.api_portal import PublishedApi
 from app.models.block import Block
-from app.models.flow import FlowNode
+from app.models.flow import Flow, FlowNode
 from app.schemas.block import (
     BlockCreateRequest,
     BlockResponse,
@@ -98,7 +98,20 @@ async def list_blocks(
     _: str = Depends(require_role(Role.VIEWER)),
 ):
     rows = (await session.execute(select(Block).order_by(Block.updated_at.desc()))).scalars().all()
-    return rows
+    # 批量取来源 flow 名称，避免 N+1
+    flow_ids = {b.source_flow_id for b in rows if b.source_flow_id}
+    flow_name_map: dict[str, str] = {}
+    if flow_ids:
+        flows = (await session.execute(
+            select(Flow.id, Flow.name).where(Flow.id.in_(flow_ids))
+        )).all()
+        flow_name_map = {fid: fname for fid, fname in flows}
+    result = []
+    for b in rows:
+        d = BlockResponse.model_validate(b)
+        d.source_flow_name = flow_name_map.get(b.source_flow_id) if b.source_flow_id else None
+        result.append(d)
+    return result
 
 
 @router.post("", response_model=BlockResponse)

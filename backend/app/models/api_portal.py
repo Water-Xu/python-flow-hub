@@ -84,3 +84,12 @@ class PublishedApi(Base, UUIDMixin, TimestampMixin):
     success_calls: Mapped[int] = mapped_column(BigInteger, default=0)
     error_calls: Mapped[int] = mapped_column(BigInteger, default=0)
     avg_latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+
+    # ── 开发者文档（供接口门户展示，管理员可编辑） ──
+    remarks: Mapped[str] = mapped_column(Text, default="")
+    # 示例请求体（JSON 文本，用于文档展示）
+    sample_request: Mapped[str] = mapped_column(Text, default="")
+    # 示例响应体（JSON 文本，用于文档展示）
+    sample_response: Mapped[str] = mapped_column(Text, default="")
+    # 变更日志（Markdown，记录版本变更历史）
+    changelog: Mapped[str] = mapped_column(Text, default="")

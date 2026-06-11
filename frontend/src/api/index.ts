@@ -60,6 +60,8 @@ export interface Block {
   output_ports: any[]
   entrypoints: Entrypoint[]
   compute_config: Record<string, any>
+  source_flow_id?: string | null
+  source_flow_name?: string | null
 }
 
 export const blockApi = {
@@ -253,6 +255,11 @@ export interface PublishedApi {
   success_calls: number
   error_calls: number
   avg_latency_ms: number
+  // 开发者文档字段
+  remarks: string
+  sample_request: string
+  sample_response: string
+  changelog: string
   created_at: string
   updated_at: string
 }
@@ -285,6 +292,8 @@ export interface FlowEntrypointsInfo {
 
 export const apiPortalApi = {
   list: () => client.get<any, PublishedApi[]>('/api/portal/apis').then(ensureArray<PublishedApi>),
+  /** 浏览所有活跃接口（接口门户用，不限 owner） */
+  browse: () => client.get<any, PublishedApi[]>('/api/portal/apis/browse').then(ensureArray<PublishedApi>),
   publish: (data: {
     name: string
     description?: string
@@ -318,6 +327,11 @@ export const apiPortalApi = {
   getEncryptionKey: (id: string) =>
     client.get<any, ApiEncryptionKey>(`/api/portal/apis/${id}/encryption/key`),
   copyFlow: (flowId: string) => client.post<any, any>(`/api/flows/${flowId}/copy`),
+  /** 更新接口开发者文档（备注、示例请求/响应、变更日志） */
+  updateRemarks: (
+    id: string,
+    data: { remarks?: string; sample_request?: string; sample_response?: string; changelog?: string },
+  ) => client.put<any, PublishedApi>(`/api/portal/apis/${id}/remarks`, data),
   /**
    * 在线测试：直接调用公开入口 POST /api/public/{path}，返回完整 AxiosResponse，
    * 供测试面板读取 HTTP 状态码与原始响应（不走全局错误拦截，错误由调用方捕获）。

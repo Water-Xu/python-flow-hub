@@ -55,6 +55,7 @@ async def create_block_version(
     requirements_text: str = "",
     set_stable: bool = True,
     storage: ObjectStorage | None = None,
+    auto_commit: bool = True,
 ) -> BlockVersion:
     """创建 Block 版本快照：先写 MinIO，再写 DB 指针。"""
     storage = storage or get_storage()
@@ -118,10 +119,36 @@ async def create_block_version(
         if req_hash:
             block.requirements_hash = req_hash
 
-    await session.commit()
+    await session.flush()
+    if auto_commit:
+        await session.commit()
     await session.refresh(version)
     logger.info("block_version_created", block_id=block.id, version_id=version_id, tag=version_tag)
     return version
+
+
+async def delete_block_with_versions(
+    session: AsyncSession,
+    block: Block,
+    *,
+    storage: ObjectStorage | None = None,
+) -> None:
+    """删除 Block 及其全部版本快照（含 MinIO 对象）。调用方负责 commit。"""
+    storage = storage or get_storage()
+    versions = (await session.execute(
+        select(BlockVersion).where(BlockVersion.block_id == block.id)
+    )).scalars().all()
+    for v in versions:
+        # 清理 MinIO 对象（best-effort，失败不阻断）
+        for key in [v.code_path, v.requirements_path, v.notebook_path]:
+            if key:
+                try:
+                    await storage.delete(key)
+                except Exception:  # noqa: BLE001
+                    pass
+        await session.delete(v)
+    await session.delete(block)
+    logger.info("block_deleted_with_versions", block_id=block.id, versions=len(versions))
 
 
 async def get_block_version_content(

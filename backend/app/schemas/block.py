@@ -71,6 +71,9 @@ class BlockResponse(BaseModel):
     output_ports: list[Any]
     entrypoints: list[Any] = []
     compute_config: dict[str, Any]
+    # zip 导入来源 flow
+    source_flow_id: str | None = None
+    source_flow_name: str | None = None
     created_at: datetime
     updated_at: datetime
 
