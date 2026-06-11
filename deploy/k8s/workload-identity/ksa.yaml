@@ -5,6 +5,15 @@
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  name: pyflow-hub-sa
+  namespace: pyflow-blocks
+  annotations:
+    # 控制面 GSA：cloudbuild.builds.editor + artifactregistry.writer + storage.objectAdmin(pyflow-build bucket)
+    iam.gke.io/gcp-service-account: pyflow-hub-sa@lhy-styon-dev-4832.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
   name: pyflow-block-default
   namespace: pyflow-blocks
   # 零权限默认 KSA：不绑定任何 GSA（普通 script/notebook 块）
