@@ -253,6 +253,103 @@ async def deployment_status(
     return await orchestrator.status(session, dep)
 
 
+@router.get("/{deployment_id}/pods")
+async def list_deployment_pods(
+    deployment_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.VIEWER)),
+):
+    """列出该部署的全部 Pod（含状态/重启次数/节点）。"""
+    dep = await _get(session, deployment_id)
+    if dep.environment != "k8s":
+        return []
+
+    def _do():
+        from kubernetes import client, config  # type: ignore
+        try:
+            config.load_incluster_config()
+        except Exception:
+            config.load_kube_config()
+        v1 = client.CoreV1Api()
+        namespace = "pyflow-blocks"
+        label_selector = f"pyflow.deploy/prefix={dep.resource_prefix}"
+        pods = v1.list_namespaced_pod(namespace, label_selector=label_selector)
+        result = []
+        for pod in pods.items:
+            cs = pod.status.container_statuses or []
+            restarts = sum(c.restart_count for c in cs) if cs else 0
+            state = "unknown"
+            if pod.status.phase:
+                state = pod.status.phase.lower()
+            if cs:
+                st = cs[0].state
+                if st.running:
+                    state = "running"
+                elif st.waiting:
+                    state = f"waiting:{st.waiting.reason or ''}"
+                elif st.terminated:
+                    state = f"terminated:{st.terminated.reason or ''}"
+            result.append({
+                "name": pod.metadata.name,
+                "node": pod.spec.node_name or "",
+                "phase": pod.status.phase or "Unknown",
+                "state": state,
+                "restarts": restarts,
+                "app": pod.metadata.labels.get("app", "") if pod.metadata.labels else "",
+                "ready": all(c.ready for c in cs) if cs else False,
+                "start_time": pod.status.start_time.isoformat() if pod.status.start_time else None,
+            })
+        return result
+
+    import asyncio
+    return await asyncio.to_thread(_do)
+
+
+@router.get("/{deployment_id}/pods/{pod_name}/logs")
+async def get_pod_logs(
+    deployment_id: str,
+    pod_name: str,
+    container: str | None = None,
+    tail_lines: int = 200,
+    previous: bool = False,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.VIEWER)),
+):
+    """获取指定 Pod 的运行日志（tail_lines 行，previous=true 看上次崩溃日志）。"""
+    dep = await _get(session, deployment_id)
+    if dep.environment != "k8s":
+        return {"logs": ""}
+
+    def _do():
+        from kubernetes import client, config  # type: ignore
+        from kubernetes.client.rest import ApiException  # type: ignore
+        try:
+            config.load_incluster_config()
+        except Exception:
+            config.load_kube_config()
+        v1 = client.CoreV1Api()
+        namespace = "pyflow-blocks"
+        kwargs: dict = {
+            "tail_lines": max(1, min(tail_lines, 2000)),
+            "timestamps": True,
+        }
+        if container:
+            kwargs["container"] = container
+        if previous:
+            kwargs["previous"] = True
+        try:
+            logs = v1.read_namespaced_pod_log(pod_name, namespace, **kwargs)
+        except ApiException as e:
+            if e.status == 400 and previous:
+                logs = f"[无上次崩溃日志] HTTP {e.status}: {e.reason}"
+            else:
+                logs = f"[获取日志失败] HTTP {e.status}: {e.reason}"
+        return {"logs": logs or "（暂无日志）"}
+
+    import asyncio
+    return await asyncio.to_thread(_do)
+
+
 @router.delete("/{deployment_id}")
 async def destroy_deployment(
     deployment_id: str,

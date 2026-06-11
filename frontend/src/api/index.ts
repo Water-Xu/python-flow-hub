@@ -136,6 +136,16 @@ export const deploymentApi = {
   /** Flow 维度资源汇总（各块独立 Pod 请求/上限累加 + 节点池占用 + KEDA 峰值估算） */
   resourceSummary: (id: string) =>
     client.get<any, FlowResourceSummary>(`/api/deployments/${id}/resource-summary`),
+  /** 列出该部署的全部 Pod（状态/重启次数/节点） */
+  listPods: (id: string) => client.get<any, any[]>(`/api/deployments/${id}/pods`).then(ensureArray<any>),
+  /** 获取指定 Pod 的日志 */
+  podLogs: (id: string, podName: string, opts?: { container?: string; tail_lines?: number; previous?: boolean }) => {
+    const p = new URLSearchParams()
+    if (opts?.container) p.set('container', opts.container)
+    if (opts?.tail_lines) p.set('tail_lines', String(opts.tail_lines))
+    if (opts?.previous) p.set('previous', 'true')
+    return client.get<any, { logs: string }>(`/api/deployments/${id}/pods/${podName}/logs?${p}`)
+  },
 }
 
 export interface FlowResourceSummary {

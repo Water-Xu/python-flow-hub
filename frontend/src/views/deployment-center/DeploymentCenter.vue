@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watch, computed } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watch, computed, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { deploymentApi, flowApi, type BlockResource, type FlowResourceSummary } from '@/api'
 
@@ -40,6 +40,63 @@ const gpuTypeOptions = ['nvidia-tesla-t4', 'nvidia-tesla-l4', 'nvidia-tesla-a100
 const livePrecheck = ref<any>(null)
 const livePrecheckLoading = ref(false)
 let precheckTimer: number | undefined
+
+// ── 节点日志 ──
+const podList = ref<any[]>([])
+const podListLoading = ref(false)
+const selectedPod = ref<string>('')
+const podLogs = ref<string>('')
+const podLogsLoading = ref(false)
+const showPrevLogs = ref(false)
+const logTailLines = ref(300)
+const logPanelRef = ref<HTMLElement | null>(null)
+let logRefreshTimer: number | undefined
+
+async function loadPodList() {
+  if (!detail.value) return
+  podListLoading.value = true
+  try {
+    podList.value = await deploymentApi.listPods(detail.value.id)
+    if (podList.value.length && !selectedPod.value) {
+      selectedPod.value = podList.value[0].name
+    }
+  } catch {
+    podList.value = []
+  } finally {
+    podListLoading.value = false
+  }
+}
+
+async function loadPodLogs() {
+  if (!detail.value || !selectedPod.value) return
+  podLogsLoading.value = true
+  try {
+    const res = await deploymentApi.podLogs(detail.value.id, selectedPod.value, {
+      tail_lines: logTailLines.value,
+      previous: showPrevLogs.value,
+    })
+    podLogs.value = res.logs || '（暂无日志）'
+    await nextTick()
+    if (logPanelRef.value) logPanelRef.value.scrollTop = logPanelRef.value.scrollHeight
+  } catch (e: any) {
+    podLogs.value = `[加载失败] ${e?.response?.data?.detail || e?.message || ''}`
+  } finally {
+    podLogsLoading.value = false
+  }
+}
+
+function startLogRefresh() {
+  stopLogRefresh()
+  loadPodLogs()
+  logRefreshTimer = window.setInterval(loadPodLogs, 5000)
+}
+
+function stopLogRefresh() {
+  if (logRefreshTimer) { clearInterval(logRefreshTimer); logRefreshTimer = undefined }
+}
+
+watch(selectedPod, () => { if (selectedPod.value) loadPodLogs() })
+watch(showPrevLogs, () => { if (selectedPod.value) loadPodLogs() })
 
 // Flow 维度资源汇总（各块独立 Pod 累加 + 节点池占用 + KEDA 峰值）
 const resSummary = ref<FlowResourceSummary | null>(null)
@@ -376,6 +433,10 @@ async function openDetail(row: any) {
   resourceRows.value = []
   livePrecheck.value = null
   resSummary.value = null
+  podList.value = []
+  selectedPod.value = ''
+  podLogs.value = ''
+  stopLogRefresh()
   loadEnvRows(row)
   if (row.environment === 'k8s') {
     try {
@@ -415,7 +476,10 @@ onMounted(() => {
     if (!document.hidden) load()
   }, 15000)
 })
-onBeforeUnmount(() => timer && clearInterval(timer))
+onBeforeUnmount(() => {
+  timer && clearInterval(timer)
+  stopLogRefresh()
+})
 </script>
 
 <template>
@@ -498,8 +562,15 @@ onBeforeUnmount(() => timer && clearInterval(timer))
       </template>
     </el-dialog>
 
-    <el-drawer v-model="drawer" :title="detail?.name" size="58%">
-      <el-tabs v-model="detailTab" @tab-change="(n: any) => n === 'resources' && resourceRows.length === 0 && loadResources()">
+    <el-drawer v-model="drawer" :title="detail?.name" size="58%" @close="stopLogRefresh">
+      <el-tabs
+        v-model="detailTab"
+        @tab-change="(n: any) => {
+          if (n === 'resources' && resourceRows.length === 0) loadResources()
+          if (n === 'logs') { loadPodList(); startLogRefresh() }
+          if (n !== 'logs') stopLogRefresh()
+        }"
+      >
         <el-tab-pane label="Pod 状态" name="status">
           <el-table :data="detail?.block_statuses || []" size="small">
             <el-table-column prop="name" label="名称" show-overflow-tooltip />
@@ -754,6 +825,59 @@ onBeforeUnmount(() => timer && clearInterval(timer))
             <pre>{{ JSON.stringify(m, null, 2) }}</pre>
           </div>
         </el-tab-pane>
+
+        <!-- ── 节点日志 ── -->
+        <el-tab-pane label="节点日志" name="logs">
+          <div class="log-toolbar">
+            <el-select
+              v-model="selectedPod"
+              placeholder="选择 Pod"
+              size="small"
+              style="width: 320px"
+              v-loading="podListLoading"
+              @change="loadPodLogs"
+            >
+              <el-option
+                v-for="p in podList"
+                :key="p.name"
+                :label="p.name"
+                :value="p.name"
+              >
+                <div class="pod-opt">
+                  <span>{{ p.name }}</span>
+                  <el-tag
+                    size="small"
+                    :type="p.state === 'running' ? 'success' : p.state?.startsWith('waiting') ? 'warning' : 'danger'"
+                    effect="plain"
+                  >{{ p.state }}</el-tag>
+                  <span class="dim" style="font-size:11px">重启 {{ p.restarts }}</span>
+                </div>
+              </el-option>
+            </el-select>
+            <el-select v-model="logTailLines" size="small" style="width: 100px" @change="loadPodLogs">
+              <el-option :value="100" label="后 100 行" />
+              <el-option :value="300" label="后 300 行" />
+              <el-option :value="500" label="后 500 行" />
+              <el-option :value="2000" label="后 2000 行" />
+            </el-select>
+            <el-switch v-model="showPrevLogs" size="small" active-text="崩溃日志" inactive-text="当前" />
+            <el-button size="small" :loading="podLogsLoading" @click="loadPodLogs">
+              <el-icon><Refresh /></el-icon>
+            </el-button>
+            <el-button size="small" @click="loadPodList"><el-icon><RefreshLeft /></el-icon> 刷新 Pod</el-button>
+            <el-tag size="small" type="info" effect="plain" style="margin-left:auto">每 5s 自动刷新</el-tag>
+          </div>
+
+          <div v-if="podList.length === 0 && !podListLoading" class="log-empty">
+            <el-empty description="暂无运行中的 Pod，请先部署" :image-size="64" />
+          </div>
+          <div v-else-if="!selectedPod" class="log-empty">
+            <el-empty description="请选择一个 Pod 查看日志" :image-size="64" />
+          </div>
+          <div v-else ref="logPanelRef" class="log-panel" v-loading="podLogsLoading && !podLogs">
+            <pre class="log-content">{{ podLogs }}</pre>
+          </div>
+        </el-tab-pane>
       </el-tabs>
     </el-drawer>
   </div>
@@ -943,5 +1067,47 @@ onBeforeUnmount(() => timer && clearInterval(timer))
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+/* ── 节点日志 ── */
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--el-fill-color-light, #f5f7fa);
+}
+.pod-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+.log-empty { padding: 32px 0; }
+.log-panel {
+  height: calc(100vh - 340px);
+  min-height: 300px;
+  overflow-y: auto;
+  background: #0d1117;
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  animation: fade 0.25s ease;
+  scrollbar-width: thin;
+  scrollbar-color: #30363d #0d1117;
+}
+.log-panel::-webkit-scrollbar { width: 6px; }
+.log-panel::-webkit-scrollbar-track { background: #0d1117; }
+.log-panel::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+.log-content {
+  margin: 0;
+  color: #c9d1d9;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 </style>
