@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+  workflow_dispatch:
 
 env:
   PROJECT_ID: lhy-styon-dev-4832
@@ -34,5 +35,4 @@ jobs:
           gcloud builds submit . \
             --config=cloudbuild.yaml \
             --project=$PROJECT_ID \
-            --substitutions=_SHORT_SHA=$SHORT_SHA \
-            --async
+            --substitutions=_SHORT_SHA=$SHORT_SHA
