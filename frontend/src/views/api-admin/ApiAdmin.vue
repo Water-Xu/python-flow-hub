@@ -338,6 +338,20 @@ async function unpublish(api: PublishedApi) {
   } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '操作失败') }
 }
 
+/** 更多操作下拉统一路由 */
+function handleMoreCmd(cmd: string, row: PublishedApi) {
+  switch (cmd) {
+    case 'docs':       openDocs(row); break
+    case 'instances':  openInstances(row); break
+    case 'version':    openVersionSwitch(row); break
+    case 'encryption': openEncryption(row); break
+    case 'lock':       row.is_locked ? unlockApi(row) : openLock(row); break
+    case 'remarks':    openRemarksEdit(row); break
+    case 'copy':       copyFlow(row); break
+    case 'unpublish':  unpublish(row); break
+  }
+}
+
 // ── 文档编辑（备注/示例/变更日志）───────────────────────────────────────────
 const remarksDrawerVisible = ref(false)
 const remarksApi = ref<PublishedApi | null>(null)
@@ -473,88 +487,59 @@ onMounted(load)
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" width="420" fixed="right">
+      <el-table-column label="操作" width="310" fixed="right">
         <template #default="{ row }">
-          <div class="action-btns">
-            <el-tooltip content="接口文档">
-              <el-button size="small" circle @click="openDocs(row)">
-                <el-icon><Document /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="实例负载">
-              <el-button size="small" circle @click="openInstances(row)">
-                <el-icon><Monitor /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="策略配置">
-              <el-button size="small" circle type="primary" @click="openPolicy(row)">
-                <el-icon><Setting /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="触发配置">
-              <el-button
-                size="small"
-                circle
-                type="primary"
-                :disabled="row.is_locked"
-                @click="openTriggerConfig(row)"
+          <div class="act-bar">
+            <!-- 主操作：文档 + 策略 + 触发 -->
+            <el-button size="small" class="act-btn" @click="openDocs(row)">
+              <el-icon><Document /></el-icon>文档
+            </el-button>
+            <el-button size="small" class="act-btn act-btn-primary" @click="openPolicy(row)">
+              <el-icon><Setting /></el-icon>策略
+            </el-button>
+            <el-button size="small" class="act-btn act-btn-primary" :disabled="row.is_locked" @click="openTriggerConfig(row)">
+              <el-icon><MessageBox /></el-icon>触发
+            </el-button>
+
+            <!-- 状态快切：运行中 / 已暂停 -->
+            <el-tooltip :content="row.status === 'active' ? '点击暂停' : '点击激活'">
+              <span
+                class="status-toggle"
+                :class="row.status === 'active' ? 'st-active' : 'st-paused'"
+                :style="row.is_locked ? 'opacity:.45;cursor:not-allowed' : ''"
+                @click="!row.is_locked && toggleStatus(row)"
               >
-                <el-icon><MessageBox /></el-icon>
-              </el-button>
+                <span class="st-dot" />
+                {{ row.status === 'active' ? '运行中' : '已暂停' }}
+              </span>
             </el-tooltip>
-            <el-tooltip content="版本切换">
-              <el-button size="small" circle type="info" @click="openVersionSwitch(row)">
-                <el-icon><Switch /></el-icon>
+
+            <!-- 更多操作下拉 -->
+            <el-dropdown trigger="click" @command="(cmd: string) => handleMoreCmd(cmd, row)">
+              <el-button size="small" class="act-btn act-more">
+                更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
               </el-button>
-            </el-tooltip>
-            <el-tooltip :content="row.is_locked ? '解锁接口' : '锁定接口'">
-              <el-button
-                size="small"
-                circle
-                :type="row.is_locked ? 'danger' : 'warning'"
-                @click="row.is_locked ? unlockApi(row) : openLock(row)"
-              >
-                <el-icon><component :is="row.is_locked ? 'Unlock' : 'Lock'" /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-divider direction="vertical" style="margin: 0 2px" />
-            <el-tooltip content="加密保护">
-              <el-button
-                size="small"
-                circle
-                :type="row.encryption_enabled ? 'success' : 'info'"
-                :disabled="row.is_locked"
-                @click="openEncryption(row)"
-              >
-                <el-icon><Lock /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip :content="row.status === 'active' ? '暂停接口' : '激活接口'">
-              <el-button
-                size="small"
-                circle
-                :type="row.status === 'active' ? 'warning' : 'success'"
-                :disabled="row.is_locked"
-                @click="toggleStatus(row)"
-              >
-                <el-icon><component :is="row.status === 'active' ? 'VideoPause' : 'VideoPlay'" /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="编辑文档">
-              <el-button size="small" circle type="primary" @click="openRemarksEdit(row)">
-                <el-icon><EditPen /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="复制流程">
-              <el-button size="small" circle type="info" @click="copyFlow(row)">
-                <el-icon><CopyDocument /></el-icon>
-              </el-button>
-            </el-tooltip>
-            <el-tooltip content="下线接口">
-              <el-button size="small" circle type="danger" :disabled="row.is_locked" @click="unpublish(row)">
-                <el-icon><Delete /></el-icon>
-              </el-button>
-            </el-tooltip>
+              <template #dropdown>
+                <el-dropdown-menu class="more-menu">
+                  <el-dropdown-item command="docs" icon="Document">查看文档</el-dropdown-item>
+                  <el-dropdown-item command="instances" icon="Monitor">实例负载</el-dropdown-item>
+                  <el-dropdown-item command="version" icon="Switch">版本切换</el-dropdown-item>
+                  <el-dropdown-item divided command="encryption" icon="Lock">
+                    <span>加密保护</span>
+                    <el-tag v-if="row.encryption_enabled" size="small" type="success" effect="plain" style="margin-left:6px">已开启</el-tag>
+                  </el-dropdown-item>
+                  <el-dropdown-item command="lock" icon="Lock">
+                    <span>{{ row.is_locked ? '解锁接口' : '锁定接口' }}</span>
+                    <el-tag v-if="row.is_locked" size="small" type="danger" effect="plain" style="margin-left:6px">已锁定</el-tag>
+                  </el-dropdown-item>
+                  <el-dropdown-item divided command="remarks" icon="EditPen">编辑文档</el-dropdown-item>
+                  <el-dropdown-item command="copy" icon="CopyDocument">复制流程</el-dropdown-item>
+                  <el-dropdown-item divided command="unpublish" icon="Delete" :disabled="row.is_locked">
+                    <span style="color:#ef4444">下线接口</span>
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
         </template>
       </el-table-column>
@@ -1097,6 +1082,104 @@ onMounted(load)
 }
 .action-btns {
   display: flex;
+  gap: 6px;
+}
+
+/* ── 新版操作栏 ──────────────────────────────────── */
+.act-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+}
+.act-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 9px;
+  height: 26px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--pf-border-strong, #d8dce3);
+  background: var(--pf-panel, #fff);
+  color: var(--pf-text, #1f2329);
+  cursor: pointer;
+  transition: all .15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.act-btn:hover {
+  border-color: var(--pf-accent, #2563eb);
+  color: var(--pf-accent, #2563eb);
+  background: rgba(37,99,235,.05);
+}
+.act-btn.act-btn-primary {
+  background: rgba(37,99,235,.06);
+  border-color: rgba(37,99,235,.3);
+  color: var(--pf-accent, #2563eb);
+}
+.act-btn.act-btn-primary:hover {
+  background: rgba(37,99,235,.14);
+  border-color: var(--pf-accent, #2563eb);
+}
+.act-btn.act-more {
+  background: var(--pf-panel-2, #f0f2f5);
+  border-color: var(--pf-border, #e5e7eb);
+  color: var(--pf-text-dim, #6b7280);
+}
+.act-btn.act-more:hover {
+  background: var(--pf-border, #e5e7eb);
+  color: var(--pf-text, #1f2329);
+  border-color: var(--pf-border-strong, #d8dce3);
+}
+.act-btn:disabled { opacity: .45; cursor: not-allowed; pointer-events: none; }
+
+/* 状态快切徽章 */
+.status-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .15s;
+  border: 1px solid;
+  flex-shrink: 0;
+  user-select: none;
+}
+.status-toggle.st-active {
+  background: #dcfce7;
+  color: #15803d;
+  border-color: #bbf7d0;
+}
+.status-toggle.st-active:hover { background: #bbf7d0; }
+.status-toggle.st-paused {
+  background: #fef3c7;
+  color: #b45309;
+  border-color: #fde68a;
+}
+.status-toggle.st-paused:hover { background: #fde68a; }
+.st-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: blink 1.5s ease-in-out infinite;
+}
+.st-paused .st-dot { animation: none; opacity: .6; }
+@keyframes blink {
+  0%,100% { opacity: 1; }
+  50% { opacity: .3; }
+}
+
+/* 下拉菜单微调 */
+.more-menu :deep(.el-dropdown-menu__item) {
+  font-size: 13px;
+  padding: 7px 16px;
+  display: flex;
+  align-items: center;
   gap: 6px;
 }
 
