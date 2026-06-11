@@ -221,7 +221,14 @@ const publishForm = ref({
 })
 const flowEntrypointsInfo = ref<FlowEntrypointsInfo | null>(null)
 const entrypointsLoading = ref(false)
-  } catch { /* ignore */ } finally {
+watch(
+  () => publishForm.value.flow_id,
+  async (flowId) => {
+    if (!flowId) { flowEntrypointsInfo.value = null; return }
+    entrypointsLoading.value = true
+    try {
+      flowEntrypointsInfo.value = await apiPortalApi.getFlowEntrypoints(flowId)
+    } catch { /* ignore */ } finally {
       entrypointsLoading.value = false
     }
   },

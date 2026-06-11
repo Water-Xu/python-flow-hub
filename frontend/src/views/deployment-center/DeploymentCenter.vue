@@ -406,6 +406,8 @@ const statusType: Record<string, string> = {
   stopped: 'info',
 }
 
+let timer: ReturnType<typeof window.setInterval> | undefined
+
 onMounted(() => {
   load()
   // 后台标签暂停轮询，省去不可见时的无谓请求
