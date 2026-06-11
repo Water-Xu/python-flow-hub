@@ -18,6 +18,9 @@ class PublishApiRequest(BaseModel):
     path: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
     tags: str = ""
     flow_id: str
+    # 接口级图入口节点 ID（优先于 Flow.entry_node_id；两者均为空退化为所有根节点）。
+    # 允许同一 Flow 以不同子图入口发布为多个接口。
+    entry_node_id: str | None = None
     # API 级全局入口函数；None = 各节点保持自己的 config.entrypoint（或默认 run）
     entrypoint: str | None = None
     # 节点级入口函数映射 {node_id: entrypoint_name}，优先级高于全局 entrypoint。
@@ -88,6 +91,7 @@ class ApiResponse(BaseModel):
     status: str
     trigger_type: str
     mq_config: dict
+    entry_node_id: str | None
     entrypoint: str | None
     entrypoint_map: dict
     is_locked: bool

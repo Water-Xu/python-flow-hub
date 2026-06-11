@@ -108,7 +108,7 @@ export const execApi = {
 export const deploymentApi = {
   list: () => client.get<any, any[]>('/api/deployments').then(ensureArray<any>),
   get: (id: string) => client.get<any, any>(`/api/deployments/${id}`),
-  create: (data: { flow_id: string; name: string; environment: string }) =>
+  create: (data: { flow_id: string; name: string; environment: string; deployment_type?: string }) =>
     client.post('/api/deployments', data),
   /** 一键部署到 K8s（构建镜像 + apply Deployment/Service/KEDA/NetworkPolicy，DEPLOYER） */
   deploy: (id: string) => client.post<any, any>(`/api/deployments/${id}/deploy`),
@@ -234,6 +234,7 @@ export interface PublishedApi {
   status: string
   trigger_type: string
   mq_config: Record<string, any>
+  entry_node_id: string | null
   entrypoint: string | null
   entrypoint_map: Record<string, string>
   is_locked: boolean
@@ -289,6 +290,7 @@ export const apiPortalApi = {
     path: string
     tags?: string
     flow_id: string
+    entry_node_id?: string | null
     entrypoint?: string | null
     entrypoint_map?: Record<string, string>
   }) => client.post<any, PublishedApi>('/api/portal/apis', data),

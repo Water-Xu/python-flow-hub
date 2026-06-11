@@ -32,3 +32,5 @@ class FlowDeployment(Base, UUIDMixin, TimestampMixin):
     # 形如 {block_id: {cpu_request, memory_request, cpu_limit, memory_limit, gpu_enabled, gpu_count, gpu_type}}；
     # 部署时合并到对应 block 的 compute_config，仅作用于该部署）
     resource_overrides: Mapped[dict] = mapped_column(JSON, default=dict)
+    # 部署模型：block_mode = 每块独立 Pod（旧行为）；flow_mode = 全 Flow 单一 Pod（决策新增）
+    deployment_type: Mapped[str] = mapped_column(String(16), default="block_mode")

@@ -544,6 +544,235 @@ def render_flow_consumer_manifests(
     return manifests
 
 
+# ─────────────────────────── Flow-Runner（flow_mode 整流单 Pod 模型） ───────────────────────────
+
+@dataclass
+class FlowRunnerSpec:
+    """整流单 Pod 部署描述（flow_mode 决策：每条 Flow 部署为一个 Pod，所有块代码内嵌执行）。
+
+    优势：消除块间 HTTP 调用开销；简化资源规划（1 Pod per Flow）；KEDA 仅对 Flow 级扩缩。
+    runner 角色为 flow_runner，启动时从 MinIO 拉取所有块代码，在 Pod 内 in-process 执行 DAG。
+    """
+
+    flow_id: str
+    flow_name: str
+    # 各块信息，runner 据此逐一从 MinIO 拉取代码
+    blocks: list[dict[str, Any]]   # [{block_id, code_path}]
+    # DAG 快照（无 service 字段，in-process 不需要块 Service）
+    dag: dict[str, Any]            # {nodes, edges, entry_node_id}
+    # 该 Flow 上所有 MQ/both 触发接口（含各自 entry_node_id 与 entrypoint_map）
+    mq_apis: list[dict[str, Any]]  # [{api_id, mq_config, entry_node_id, entrypoint_map}]
+    compute_config: dict[str, Any] = field(default_factory=dict)
+    env_vars: dict[str, str] = field(default_factory=dict)
+    secret_refs: dict[str, str] = field(default_factory=dict)
+    image: str = ""
+
+    @property
+    def flow_short(self) -> str:
+        return self.flow_id.replace("-", "")[:8]
+
+    @property
+    def has_mq(self) -> bool:
+        return bool(self.mq_apis)
+
+
+def flow_runner_name(ctx: DeployContext, spec: FlowRunnerSpec) -> str:
+    prefix = ctx.resource_prefix or "flow"
+    return f"{prefix}-fr-{spec.flow_short}"[:63]
+
+
+def _flow_runner_labels(spec: FlowRunnerSpec, ctx: DeployContext) -> dict[str, str]:
+    return {
+        "app": f"pyflow-fr-{spec.flow_short}",
+        "pyflow.flow/id": spec.flow_id,
+        "pyflow.runner/type": "flow_runner",
+        "pyflow.deploy/prefix": ctx.resource_prefix or "adhoc",
+        "pyflow.runtime/protocol": RUNTIME_PROTOCOL_VERSION,
+    }
+
+
+def build_flow_runner_deployment(
+    spec: FlowRunnerSpec, ctx: DeployContext, *, min_replicas: int
+) -> dict[str, Any]:
+    """Flow-Runner Deployment：整流单 Pod，所有块 in-process 执行，暴露 /run（HTTP）+
+    内建 MQ 消费（flow_mode，决策新增）。"""
+    import json
+
+    name = flow_runner_name(ctx, spec)
+    labels = _flow_runner_labels(spec, ctx)
+    image = spec.image or ctx.runner_image
+
+    env = [
+        {"name": "PYFLOW_RUNNER_ROLE", "value": "flow_runner"},
+        {"name": "PYFLOW_FLOW_ID", "value": spec.flow_id},
+        {"name": "PYFLOW_FLOW_BLOCKS", "value": json.dumps(spec.blocks or [], ensure_ascii=False)},
+        {"name": "PYFLOW_FLOW_DAG", "value": json.dumps(spec.dag or {}, ensure_ascii=False)},
+        {"name": "PYFLOW_MQ_APIS", "value": json.dumps(spec.mq_apis or [], ensure_ascii=False)},
+        {"name": "PYFLOW_NAMESPACE", "value": ctx.namespace},
+        {"name": "PYFLOW_MINIO_BUCKET", "value": ctx.minio_bucket},
+        {"name": "PYFLOW_MINIO_SECURE", "value": "true" if ctx.minio_secure else "false"},
+        {"name": "PYFLOW_PROTOCOL_VERSION", "value": RUNTIME_PROTOCOL_VERSION},
+        {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
+    ]
+    for k, v in (spec.env_vars or {}).items():
+        env.append({"name": k, "value": str(v)})
+
+    env_from = []
+    if ctx.inject_middleware and ctx.middleware_secret:
+        env_from.append({"secretRef": {"name": ctx.middleware_secret}})
+    if spec.secret_refs:
+        env_from.append({"secretRef": {"name": f"pyflow-fr-{spec.flow_short}-secrets"}})
+
+    pod_spec: dict[str, Any] = {
+        "serviceAccountName": ctx.ksa_default,
+        "securityContext": pod_security_context(),
+        "containers": [
+            {
+                "name": "flow-runner",
+                "image": image,
+                "env": env,
+                "envFrom": env_from,
+                "resources": container_resources(spec.compute_config or {}),
+                "securityContext": container_security_context(),
+                # /tmp 用于用户代码临时文件（readOnlyRootFilesystem 要求挂载 emptyDir）
+                "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}],
+                # 暴露 HTTP /run 端点（被控制面 HTTP 路径直接调用）
+                "ports": [{"containerPort": INVOKE_PORT, "name": "run"}],
+            }
+        ],
+        "volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": "200Mi"}}],
+        "nodeSelector": {"cloud.google.com/gke-nodepool": WORKERS_NODE_POOL},
+        "runtimeClassName": "gvisor",
+    }
+
+    return {
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": name, "namespace": ctx.namespace, "labels": labels},
+        "spec": {
+            # flow_runner 至少 1 副本（同时服务 HTTP；MQ 由 KEDA 扩缩）
+            "replicas": max(min_replicas, 1),
+            "selector": {"matchLabels": {"app": labels["app"]}},
+            "template": {"metadata": {"labels": labels}, "spec": pod_spec},
+        },
+    }
+
+
+def build_flow_runner_service(spec: FlowRunnerSpec, ctx: DeployContext) -> dict[str, Any]:
+    """暴露 /run 的 ClusterIP Service，供控制面 HTTP 调用路径直接调用整流。"""
+    name = flow_runner_name(ctx, spec)
+    labels = _flow_runner_labels(spec, ctx)
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {"name": name, "namespace": ctx.namespace, "labels": labels},
+        "spec": {
+            "selector": {"app": labels["app"]},
+            "ports": [{"port": INVOKE_PORT, "targetPort": INVOKE_PORT, "name": "run"}],
+        },
+    }
+
+
+def build_flow_runner_network_policy(
+    spec: FlowRunnerSpec, ctx: DeployContext
+) -> dict[str, Any]:
+    """FlowRunner egress：kube-dns + 中间件白名单（RabbitMQ/Redis/MinIO）。
+
+    无需访问同命名空间块 Service（所有块 in-process 执行），比 block_mode 策略更严格。
+    """
+    labels = _flow_runner_labels(spec, ctx)
+    egress: list[dict[str, Any]] = [
+        {  # kube-dns
+            "to": [{"namespaceSelector": {}}],
+            "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}],
+        },
+    ]
+    if ctx.inject_middleware and ctx.middleware_egress:
+        egress.extend(ctx.middleware_egress)
+    return {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+            "name": f"{flow_runner_name(ctx, spec)}-egress",
+            "namespace": ctx.namespace,
+            "labels": labels,
+        },
+        "spec": {
+            "podSelector": {"matchLabels": {"app": labels["app"]}},
+            "policyTypes": ["Egress"],
+            "egress": egress,
+        },
+    }
+
+
+def build_flow_runner_scaledobject(
+    spec: FlowRunnerSpec,
+    ctx: DeployContext,
+    *,
+    max_replica: int,
+    msgs_per_replica: int,
+) -> dict[str, Any] | None:
+    """KEDA ScaledObject for flow_runner：多 MQ API 触发合并为多 triggers（取最大值扩缩）。
+
+    仅在存在 MQ 触发接口时生成；纯 HTTP Flow 不创建 ScaledObject（固定 min_replicas=1）。
+    """
+    if not spec.mq_apis:
+        return None
+    name = flow_runner_name(ctx, spec)
+    triggers = [
+        {
+            "type": "rabbitmq",
+            "metadata": {
+                "protocol": "http",
+                "queueName": f"flow.{api['api_id']}.queue",
+                "mode": "QueueLength",
+                "value": str(msgs_per_replica),
+            },
+            "authenticationRef": {"name": "pyflow-rabbitmq-trigger-auth"},
+        }
+        for api in spec.mq_apis
+    ]
+    return {
+        "apiVersion": "keda.sh/v1alpha1",
+        "kind": "ScaledObject",
+        "metadata": {
+            "name": f"{name}-scaler",
+            "namespace": ctx.namespace,
+            "labels": _flow_runner_labels(spec, ctx),
+        },
+        "spec": {
+            "scaleTargetRef": {"name": name},
+            # 最少 1 副本（HTTP /run 需常驻），MQ 高负载时扩缩
+            "minReplicaCount": 1,
+            "maxReplicaCount": max_replica,
+            "triggers": triggers,
+        },
+    }
+
+
+def render_flow_runner_manifests(
+    spec: FlowRunnerSpec,
+    ctx: DeployContext,
+    *,
+    max_replica: int,
+    msgs_per_replica: int,
+    keda_enabled: bool = True,
+) -> list[dict[str, Any]]:
+    """渲染 flow_mode 整流 Pod 的全部 K8s manifest（Deployment + Service + NetworkPolicy + KEDA）。"""
+    manifests: list[dict[str, Any]] = [
+        build_flow_runner_deployment(spec, ctx, min_replicas=1),
+        build_flow_runner_service(spec, ctx),
+        build_flow_runner_network_policy(spec, ctx),
+    ]
+    if keda_enabled and spec.has_mq:
+        so = build_flow_runner_scaledobject(
+            spec, ctx, max_replica=max_replica, msgs_per_replica=msgs_per_replica
+        )
+        if so:
+            manifests.append(so)
+    return manifests
+
+
 # ─────────────────────────── 预检 ───────────────────────────
 
 @dataclass

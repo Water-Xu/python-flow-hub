@@ -1,4 +1,4 @@
-"""集群状态采集（Phase 4a）：Block / Flow-Consumer Deployment 副本/Pod 状态 → 部署中心 / WS 推送。"""
+"""集群状态采集（Phase 4a）：Block / Flow-Consumer / FlowRunner Deployment 副本/Pod 状态 → 部署中心 / WS 推送。"""
 
 from __future__ import annotations
 
@@ -9,8 +9,10 @@ from app.core.k8s.manifest_generator import (
     BlockDeploySpec,
     DeployContext,
     FlowConsumerSpec,
+    FlowRunnerSpec,
     deployment_name,
     flow_consumer_name,
+    flow_runner_name,
 )
 from app.observability.logging import get_logger
 
@@ -81,3 +83,25 @@ def _update_metrics(resource_prefix: str, block_id: str, replicas: int) -> None:
         K8S_BLOCK_REPLICAS.labels(resource_prefix=resource_prefix or "adhoc", block_id=block_id).set(replicas)
     except Exception:  # noqa: BLE001
         pass
+
+
+async def collect_flow_runner_status(
+    spec: FlowRunnerSpec,
+    ctx: DeployContext,
+) -> list[dict[str, Any]]:
+    """采集 flow_mode 整流单 Pod 的副本状态（单一 FlowRunner Deployment）。"""
+    name = flow_runner_name(ctx, spec)
+    try:
+        st = await read_deployment_status(name, ctx.namespace)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("flow_runner_status_failed", flow_id=spec.flow_id, error=str(exc))
+        st = {"exists": False, "replicas": 0, "ready": 0, "error": str(exc)}
+    return [
+        {
+            "flow_id": spec.flow_id,
+            "name": spec.flow_name,
+            "deployment": name,
+            "kind": "flow_runner",
+            **st,
+        }
+    ]

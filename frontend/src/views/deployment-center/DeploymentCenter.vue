@@ -7,7 +7,7 @@ const deployments = ref<any[]>([])
 const flows = ref<any[]>([])
 const loading = ref(false)
 const dialogVisible = ref(false)
-const form = ref({ flow_id: '', name: '', environment: 'k8s' })
+const form = ref({ flow_id: '', name: '', environment: 'k8s', deployment_type: 'block_mode' })
 const acting = ref<Record<string, boolean>>({})
 
 // 详情抽屉
@@ -117,6 +117,7 @@ async function createDeployment() {
   if (!form.value.flow_id || !form.value.name) return ElMessage.warning('请选择流程并填写名称')
   await deploymentApi.create(form.value)
   dialogVisible.value = false
+  form.value = { flow_id: '', name: '', environment: 'k8s', deployment_type: 'block_mode' }
   ElMessage.success('部署记录已创建')
   load()
 }
@@ -443,7 +444,7 @@ onBeforeUnmount(() => timer && clearInterval(timer))
     </el-table>
 
     <el-dialog v-model="dialogVisible" title="新建部署" width="460px">
-      <el-form label-width="80px">
+      <el-form label-width="90px">
         <el-form-item label="流程">
           <el-select v-model="form.flow_id" style="width: 100%">
             <el-option v-for="f in flows" :key="f.id" :label="f.name" :value="f.id" />
@@ -456,6 +457,21 @@ onBeforeUnmount(() => timer && clearInterval(timer))
             <el-radio-button label="k8s" />
           </el-radio-group>
         </el-form-item>
+        <el-form-item v-if="form.environment === 'k8s'" label="部署模式">
+          <el-radio-group v-model="form.deployment_type">
+            <el-radio-button value="block_mode">块级独立 Pod</el-radio-button>
+            <el-radio-button value="flow_mode">Flow 整流单 Pod</el-radio-button>
+          </el-radio-group>
+          <div style="margin-top:6px;font-size:12px;color:#888">
+            <template v-if="form.deployment_type === 'block_mode'">
+              每个调用块各自部署一个常驻 Pod（/invoke 服务），Flow 消费者按 DAG 编排调用。
+            </template>
+            <template v-else>
+              整条 Flow 部署为单一 Pod，所有块 in-process 执行，KEDA 对 Flow 级扩缩。
+              资源消耗更低，块间无 HTTP 调用开销。
+            </template>
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
@@ -465,13 +481,17 @@ onBeforeUnmount(() => timer && clearInterval(timer))
 
     <el-drawer v-model="drawer" :title="detail?.name" size="58%">
       <el-tabs v-model="detailTab" @tab-change="(n: any) => n === 'resources' && resourceRows.length === 0 && loadResources()">
-        <el-tab-pane label="Block 状态" name="status">
+        <el-tab-pane label="Pod 状态" name="status">
           <el-table :data="detail?.block_statuses || []" size="small">
-            <el-table-column prop="name" label="块" show-overflow-tooltip />
-            <el-table-column label="类型" width="130">
+            <el-table-column prop="name" label="名称" show-overflow-tooltip />
+            <el-table-column label="类型" width="140">
               <template #default="{ row }">
-                <el-tag size="small" :type="row.kind === 'flow_consumer' ? 'warning' : 'info'" effect="plain">
-                  {{ row.kind === 'flow_consumer' ? 'Flow 消费者' : 'invoke 服务' }}
+                <el-tag
+                  size="small"
+                  :type="row.kind === 'flow_consumer' ? 'warning' : row.kind === 'flow_runner' ? 'success' : 'info'"
+                  effect="plain"
+                >
+                  {{ row.kind === 'flow_consumer' ? 'Flow 消费者' : row.kind === 'flow_runner' ? 'Flow Runner' : 'invoke 服务' }}
                 </el-tag>
               </template>
             </el-table-column>

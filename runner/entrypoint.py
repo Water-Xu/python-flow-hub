@@ -20,6 +20,7 @@ from pyflow_runtime.executor import BlockExecutionError, execute_user_code
 
 ROLE = os.getenv("PYFLOW_RUNNER_ROLE", "invoke")
 BLOCK_ID = os.getenv("PYFLOW_BLOCK_ID", "")
+FLOW_ID = os.getenv("PYFLOW_FLOW_ID", "")
 API_ID = os.getenv("PYFLOW_API_ID", "")
 NAMESPACE = os.getenv("PYFLOW_NAMESPACE", "pyflow-blocks")
 INVOKE_PORT = 8000
@@ -135,18 +136,31 @@ async def _invoke_block_service(service: str, inputs: dict, entrypoint: str) -> 
 
 
 def make_flow_execute_fn(dag: dict):
-    """构造 execute_fn：一条 MQ 消息 → 驱动整条 DAG（调各块 invoke Service），返回 {node_id: output}。"""
+    """构造 execute_fn：一条 MQ 消息 → 驱动整条 DAG（调各块 invoke Service），返回 {node_id: output}。
+
+    DAG 快照中若内嵌了 entrypoint_map / entrypoint，则按 API 级优先级解析每节点入口函数，
+    与控制面 _resolve_node_entrypoint 逻辑一致，避免 MQ 路径与 HTTP 路径行为分叉。
+    """
     from pyflow_runtime.flow_dag import run_flow
 
     nodes = dag.get("nodes", [])
     edges = dag.get("edges", [])
     entry_node_id = dag.get("entry_node_id")
+    entrypoint_map: dict = dag.get("entrypoint_map") or {}
+    global_entrypoint: str | None = dag.get("entrypoint")
 
     async def node_executor(node: dict, node_inputs: dict) -> dict:
         service = node.get("service")
         if not service:
             raise BlockExecutionError(f"node {node.get('id')} missing invoke service")
-        entrypoint = (node.get("config") or {}).get("entrypoint") or "run"
+        node_id = node.get("id")
+        # 入口函数优先级：entrypoint_map[node_id] > 全局 entrypoint > 节点 config > 默认 run
+        entrypoint = (
+            entrypoint_map.get(node_id)
+            or global_entrypoint
+            or (node.get("config") or {}).get("entrypoint")
+            or "run"
+        )
         return await _invoke_block_service(service, node_inputs, entrypoint)
 
     async def _execute(inputs: dict) -> dict:
@@ -299,6 +313,10 @@ def run_invoke_server() -> None:
     async def live():
         return {"status": "alive", "protocol": RUNTIME_PROTOCOL_VERSION}
 
+    @app.get("/health/ready")
+    async def ready():
+        return {"status": "ready", "protocol": RUNTIME_PROTOCOL_VERSION}
+
     @app.post("/invoke")
     async def invoke(payload: dict):
         result = await asyncio.to_thread(
@@ -310,9 +328,232 @@ def run_invoke_server() -> None:
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
 
+async def run_flow_runner() -> None:
+    """整流单 Pod（flow_mode）：所有块代码内嵌 in-process 执行，暴露 /run（HTTP）+
+    内建 MQ 消费（每个 MQ 接口独立协程），KEDA 按 MQ 队列深度扩缩。
+
+    与 flow_consumer 角色的区别：
+    - 无需 invoke Service；所有块代码从 MinIO 拉取后在 Pod 内 in-process 执行，消除块间 HTTP 开销；
+    - 同时处理 HTTP 调用（/run）和多 MQ 接口消费；
+    - 每个 MQ 接口的 entry_node_id / entrypoint_map 均被独立感知，实现同 Flow 多入口语义。
+    """
+    import uvicorn
+    from fastapi import FastAPI
+
+    # 加载所有块代码
+    blocks_json = os.getenv("PYFLOW_FLOW_BLOCKS", "[]")
+    try:
+        blocks_info: list[dict] = json.loads(blocks_json)
+    except json.JSONDecodeError:
+        blocks_info = []
+
+    block_code_map: dict[str, str] = {}
+    for b in blocks_info:
+        code = _load_code_from_minio(b.get("code_path", ""))
+        if code is not None:
+            block_code_map[b["block_id"]] = code
+        else:
+            # 兜底 stub（同 invoke 角色逻辑）
+            block_code_map[b["block_id"]] = "def run(inputs):\n    return {'ok': True, 'inputs': inputs}\n"
+
+    dag = load_flow_dag()
+
+    mq_apis_json = os.getenv("PYFLOW_MQ_APIS", "[]")
+    try:
+        mq_apis: list[dict] = json.loads(mq_apis_json)
+    except json.JSONDecodeError:
+        mq_apis = []
+
+    # 通用 in-process node_executor（被 HTTP /run 和 MQ 消费共用）
+    async def node_executor(node: dict, node_inputs: dict) -> dict:
+        block_id = node.get("block_id")
+        if not block_id:
+            return {}
+        code = block_code_map.get(block_id, "")
+        entrypoint = (node.get("config") or {}).get("entrypoint") or "run"
+        result = await asyncio.to_thread(execute_user_code, code, node_inputs, entrypoint)
+        if result.get("error"):
+            raise BlockExecutionError(result["error"])
+        output = result.get("output")
+        return output if isinstance(output, dict) else ({"value": output} if output is not None else {})
+
+    app = FastAPI(title=f"pyflow-flow-runner-{FLOW_ID}")
+
+    @app.get("/health/live")
+    async def live():
+        return {"status": "alive", "protocol": RUNTIME_PROTOCOL_VERSION, "flow_id": FLOW_ID}
+
+    @app.get("/health/ready")
+    async def ready():
+        return {"status": "ready", "protocol": RUNTIME_PROTOCOL_VERSION, "flow_id": FLOW_ID}
+
+    @app.post("/run")
+    async def run_endpoint(payload: dict):
+        """HTTP 触发整流执行。支持调用方传入 entry_node_id 覆盖默认入口。"""
+        from pyflow_runtime.flow_dag import run_flow
+
+        entry_node_id = payload.get("entry_node_id") or dag.get("entry_node_id")
+        inputs = payload.get("inputs", {})
+        try:
+            outputs = await run_flow(
+                dag.get("nodes", []), dag.get("edges", []), inputs,
+                node_executor, entry_node_id=entry_node_id,
+            )
+            return {"outputs": outputs, "status": "succeeded"}
+        except Exception as exc:  # noqa: BLE001
+            return {"error": str(exc)[:500], "status": "failed"}
+
+    # 启动每个 MQ 接口的消费协程（后台任务）
+    async def _start_mq_consumers() -> None:
+        for api_info in mq_apis:
+            asyncio.create_task(_run_mq_for_api(api_info, dag, node_executor))
+
+    config = uvicorn.Config(app, host="0.0.0.0", port=INVOKE_PORT, loop="asyncio")
+    server = uvicorn.Server(config)
+    # 先启动 MQ 消费者，再启动 HTTP 服务
+    loop = asyncio.get_event_loop()
+    loop.create_task(_start_mq_consumers())
+    await server.serve()
+
+
+async def _run_mq_for_api(api_info: dict, dag: dict, node_executor) -> None:
+    """为单个 MQ 接口启动消费循环（与 flow_consumer 角色逻辑相同，但 execute_fn 改为 in-process DAG）。"""
+    import aio_pika
+    import redis.asyncio as aioredis
+
+    from pyflow_runtime.backoff_queue import backoff_queue, dead_queue, dlq_queue
+    from pyflow_runtime.consumer import consume_with_idempotency, protocol_compatible, queue_topology
+    from pyflow_runtime.flow_dag import run_flow
+    from pyflow_runtime.idempotency import IdempotencyStore
+    from pyflow_runtime.reply_builder import render_reply_routing_key
+
+    api_id: str = api_info["api_id"]
+    mq_config: dict = api_info.get("mq_config") or {}
+    entry_node_id: str | None = api_info.get("entry_node_id")
+    entrypoint_map: dict = api_info.get("entrypoint_map") or {}
+    global_entrypoint: str | None = api_info.get("entrypoint")
+
+    dag_nodes = dag.get("nodes", [])
+    dag_edges = dag.get("edges", [])
+
+    async def execute_fn(inputs: dict) -> dict:
+        # 构建感知 entrypoint_map 的 node_executor（同 router_api_portal._resolve_node_entrypoint 逻辑）
+        async def _node_exec(node: dict, node_inputs: dict) -> dict:
+            block_id = node.get("block_id")
+            if not block_id:
+                return {}
+            node_id = node.get("id")
+            ep = (
+                entrypoint_map.get(node_id)
+                or global_entrypoint
+                or (node.get("config") or {}).get("entrypoint")
+                or "run"
+            )
+            code = node_executor.__closure__  # noqa: 通过闭包传递已加载代码（见下方 workaround）
+            # 直接复用外层 node_executor，entrypoint 通过 config 注入
+            patched_node = dict(node)
+            patched_node["config"] = {**(node.get("config") or {}), "entrypoint": ep}
+            return await node_executor(patched_node, node_inputs)
+
+        return await run_flow(dag_nodes, dag_edges, inputs, _node_exec, entry_node_id=entry_node_id)
+
+    redis = aioredis.from_url(
+        os.getenv("PYFLOW_REDIS_URL") or os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+        decode_responses=True,
+    )
+    store = IdempotencyStore(redis, f"{os.getenv('HOSTNAME', 'flow-runner')}-{api_id[:8]}")
+
+    conn = await aio_pika.connect_robust(
+        os.getenv("PYFLOW_RABBITMQ_URL")
+        or os.getenv("RABBITMQ_URL", "amqp://pyflow:pyflow@localhost:5672//lhy-styon")
+    )
+    channel = await conn.channel()
+    await channel.set_qos(prefetch_count=1)
+
+    retry_delay_ms = int(mq_config.get("retry_delay_ms", 5000))
+    max_retry = int(mq_config.get("max_retry", 3))
+    topo = queue_topology(api_id, retry_delay_ms=retry_delay_ms)
+    main_q = await channel.declare_queue(
+        topo["main"]["name"], durable=True, arguments=topo["main"]["arguments"]
+    )
+    await channel.declare_queue(topo["dlq"]["name"], durable=True, arguments=topo["dlq"]["arguments"])
+    await channel.declare_queue(topo["backoff"]["name"], durable=True, arguments=topo["backoff"]["arguments"])
+    await channel.declare_queue(topo["dead"]["name"], durable=True)
+
+    flow_meta: dict = {"compute_config": {}, "mq_config": mq_config}
+    persistent = aio_pika.DeliveryMode.PERSISTENT
+    _reply_exchanges: dict = {}
+
+    async def _republish(routing_key: str, body: bytes, headers: dict) -> None:
+        await channel.default_exchange.publish(
+            aio_pika.Message(body=body, headers=headers, content_type="application/json",
+                             delivery_mode=persistent),
+            routing_key=routing_key,
+        )
+
+    async def reply_publisher(reply: dict, cfg: dict) -> None:
+        from pyflow_runtime.reply_builder import render_reply_routing_key as _rrk
+        exchange_name = (cfg.get("reply_exchange") or "").strip()
+        routing_key = _rrk(cfg.get("reply_routing_key_template"), reply, api_id)
+        msg = aio_pika.Message(
+            body=json.dumps(reply, ensure_ascii=False).encode("utf-8"),
+            content_type="application/json", delivery_mode=persistent,
+            headers={"pyflow-protocol": RUNTIME_PROTOCOL_VERSION},
+        )
+        if exchange_name:
+            exchange = _reply_exchanges.get(exchange_name)
+            if exchange is None:
+                exchange = await channel.declare_exchange(
+                    exchange_name, aio_pika.ExchangeType.TOPIC, durable=True
+                )
+                _reply_exchanges[exchange_name] = exchange
+            await exchange.publish(msg, routing_key=routing_key or "#")
+        else:
+            await channel.default_exchange.publish(msg, routing_key=routing_key)
+
+    async def on_message(message: "aio_pika.IncomingMessage") -> None:
+        headers = dict(message.headers or {})
+        if not protocol_compatible(headers):
+            await _republish(dead_queue(api_id), message.body, headers)
+            await message.ack()
+            return
+        try:
+            body = json.loads(message.body.decode("utf-8"))
+        except json.JSONDecodeError:
+            body = {}
+        try:
+            action = await consume_with_idempotency(
+                body, headers, flow_meta, store, execute_fn,
+                message_id=message.message_id, reply_publisher=reply_publisher,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[runner] flow_runner mq api={api_id} err={exc}", flush=True)
+            action = "nack"
+        retry_count = int(headers.get("x-retry-count", 0) or 0)
+        if action == "ack":
+            await message.ack()
+        elif action == "backoff":
+            await _republish(backoff_queue(api_id), message.body, headers)
+            await message.ack()
+        else:
+            if retry_count >= max_retry:
+                await _republish(dead_queue(api_id), message.body, headers)
+            else:
+                new_headers = dict(headers)
+                new_headers["x-retry-count"] = str(retry_count + 1)
+                await _republish(dlq_queue(api_id), message.body, new_headers)
+            await message.ack()
+
+    print(f"[runner] flow_runner mq consumer up api={api_id} protocol={RUNTIME_PROTOCOL_VERSION}", flush=True)
+    await main_q.consume(on_message)
+    await asyncio.Future()
+
+
 def main() -> None:
     if ROLE == "flow_consumer":
         asyncio.run(run_flow_consumer())
+    elif ROLE == "flow_runner":
+        asyncio.run(run_flow_runner())
     else:
         run_invoke_server()
 

@@ -21,15 +21,18 @@ from app.core.k8s.manifest_generator import (
     BlockDeploySpec,
     DeployContext,
     FlowConsumerSpec,
+    FlowRunnerSpec,
     capacity_precheck,
     deployment_name,
     derive_max_replica,
+    flow_runner_name,
     gcp_scope_precheck,
     gpu_precheck,
     parse_cpu_millicores,
     parse_mem_mib,
     render_block_manifests,
     render_flow_consumer_manifests,
+    render_flow_runner_manifests,
 )
 from app.errors import PYFLOW_K8S_DEPLOY_FAILED, BusinessException
 from app.models.api_portal import PublishedApi
@@ -350,10 +353,9 @@ async def build_flow_consumer_specs(
     """为该 Flow 上触发方式为 mq/both 的已发布接口构建 Flow-Consumer 部署描述（决策 3.1）。
 
     DAG 快照内嵌每个块节点的 invoke Service 名，供 runner flow_consumer 角色按 DAG 调用。
+    仅在 block_mode 下使用；flow_mode 由 build_flow_runner_spec 统一处理。
     """
     flow_id = deployment.flow_id
-    # 接口的「有效流程」= active_flow_id or flow_id（与调用/消费路径一致）；
-    # 兼容历史数据 active_flow_id 为空的行，避免漏建消费者。
     apis = (await session.execute(
         select(PublishedApi).where(
             PublishedApi.trigger_type.in_(["mq", "both"]),
@@ -373,7 +375,6 @@ async def build_flow_consumer_specs(
         select(FlowEdge).where(FlowEdge.flow_id == flow_id)
     )).scalars().all()
 
-    # 块节点 → invoke Service 名（与 render_block_manifests 一致）
     block_service = {bs.block_id: deployment_name(ctx, bs) for bs in block_specs}
     dag_nodes = [
         {
@@ -402,17 +403,111 @@ async def build_flow_consumer_specs(
 
     specs: list[FlowConsumerSpec] = []
     for api in apis:
+        # 将 API 级 entrypoint_map 嵌入 DAG 快照，runner flow_consumer 据此解析各节点入口
+        api_dag = {
+            **dag,
+            "entrypoint_map": api.entrypoint_map or {},
+            "entrypoint": api.entrypoint or None,
+            "entry_node_id": api.entry_node_id or dag.get("entry_node_id"),
+        }
         specs.append(FlowConsumerSpec(
             api_id=api.id,
             api_name=api.name,
             flow_id=flow_id,
             mq_config=api.mq_config or {},
-            dag=dag,
+            dag=api_dag,
             compute_config={},
             env_vars=consumer_env,
             image=ctx.runner_image,
         ))
     return specs
+
+
+async def build_flow_runner_spec(
+    session: AsyncSession,
+    deployment: FlowDeployment,
+    ctx: DeployContext,
+    block_specs: list[BlockDeploySpec],
+) -> FlowRunnerSpec:
+    """构建 flow_mode 整流单 Pod 的部署描述（决策 flow_mode）。
+
+    与 build_flow_consumer_specs 不同：
+    - DAG 快照不含 service 字段（in-process 无需块 Service）；
+    - mq_apis 包含该 Flow 上所有 MQ 接口（含 entry_node_id 和 entrypoint_map），
+      由 flow_runner 在 Pod 内为每个接口独立消费；
+    - block_specs 转换为 blocks 列表（仅 block_id + code_path，runner 拉取代码用）。
+    """
+    flow_id = deployment.flow_id
+    nodes = (await session.execute(
+        select(FlowNode).where(FlowNode.flow_id == flow_id)
+    )).scalars().all()
+    edges = (await session.execute(
+        select(FlowEdge).where(FlowEdge.flow_id == flow_id)
+    )).scalars().all()
+    flow_obj = await session.get(Flow, flow_id)
+
+    # DAG 快照（无 service 字段）
+    dag_nodes = [
+        {
+            "id": n.id, "node_type": n.node_type, "block_id": n.block_id,
+            "config": n.config, "position": n.position,
+        }
+        for n in nodes
+    ]
+    dag_edges = [
+        {
+            "id": e.id, "source_node_id": e.source_node_id, "target_node_id": e.target_node_id,
+            "source_port": e.source_port, "target_port": e.target_port,
+        }
+        for e in edges
+    ]
+    dag = {
+        "nodes": dag_nodes,
+        "edges": dag_edges,
+        "entry_node_id": flow_obj.entry_node_id if flow_obj else None,
+    }
+
+    # 块代码路径列表（runner 启动时逐一从 MinIO 拉取）
+    blocks = [
+        {"block_id": bs.block_id, "code_path": bs.code_path}
+        for bs in block_specs
+        if bs.code_path
+    ]
+
+    # MQ 触发接口列表（含接口级 entry_node_id 和 entrypoint_map，支持同 Flow 多入口）
+    mq_apis_rows = (await session.execute(
+        select(PublishedApi).where(
+            PublishedApi.trigger_type.in_(["mq", "both"]),
+            or_(
+                PublishedApi.active_flow_id == flow_id,
+                and_(PublishedApi.active_flow_id.is_(None), PublishedApi.flow_id == flow_id),
+            ),
+        )
+    )).scalars().all()
+    mq_apis = [
+        {
+            "api_id": api.id,
+            "mq_config": api.mq_config or {},
+            "entry_node_id": api.entry_node_id or (flow_obj.entry_node_id if flow_obj else None),
+            "entrypoint_map": api.entrypoint_map or {},
+            "entrypoint": api.entrypoint or None,
+        }
+        for api in mq_apis_rows
+    ]
+
+    global_env = await load_global_env(session)
+    runner_env = {**global_env, **(deployment.env_vars or {})}
+
+    return FlowRunnerSpec(
+        flow_id=flow_id,
+        flow_name=flow_obj.name if flow_obj else flow_id,
+        blocks=blocks,
+        dag=dag,
+        mq_apis=mq_apis,
+        compute_config={},
+        env_vars=runner_env,
+        image=ctx.runner_image,
+    )
 
 
 def render_all_manifests(
@@ -421,26 +516,46 @@ def render_all_manifests(
     *,
     keda_enabled: bool = True,
     flow_consumer_specs: list[FlowConsumerSpec] | None = None,
+    flow_runner_spec: FlowRunnerSpec | None = None,
 ) -> list[dict[str, Any]]:
-    """渲染全部 manifest：中间件连接 Secret + KEDA 鉴权（各一次）+ 各 Block invoke 资源
-    + 各接口 Flow-Consumer Deployment/ScaledObject（决策 3.1 重写为 Flow 级模型 A）。
+    """渲染全部 manifest。
+
+    - block_mode（默认）：中间件 Secret + KEDA 鉴权 + 各 Block invoke 资源
+      + 各接口 Flow-Consumer Deployment/ScaledObject（决策 3.1 重写为 Flow 级模型 A）。
+    - flow_mode（flow_runner_spec 非空）：中间件 Secret + KEDA 鉴权
+      + 整流单 Pod FlowRunner Deployment/Service/NetworkPolicy/ScaledObject。
+      block_mode 的块 Deployment/Service 不生成（所有块在 Pod 内 in-process 执行）。
 
     keda_enabled=False（集群未装 KEDA）时跳过 KEDA 鉴权 + ScaledObject，Flow-Consumer 退化为固定副本。
     """
     flow_consumer_specs = flow_consumer_specs or []
     manifests: list[dict[str, Any]] = []
-    # 共享中间件连接 Secret（让块/消费者连 redis/mq/db/minio）
+
+    # 共享中间件连接 Secret
     if ctx.inject_middleware and ctx.middleware_secret:
         manifests.append(middleware.build_middleware_secret(settings, ctx.namespace))
-    # 仅当存在 MQ 触发接口时才需要 KEDA RabbitMQ 鉴权
+
+    # flow_mode：整流单 Pod 路径（不生成块级资源）
+    if flow_runner_spec is not None:
+        has_mq = flow_runner_spec.has_mq
+        if keda_enabled and has_mq:
+            manifests.extend(keda_manager.build_rabbitmq_auth_manifests(ctx.namespace))
+        max_replica = min(settings.keda_max_replica_cap, settings.keda_max_replica_cap)
+        manifests.extend(render_flow_runner_manifests(
+            flow_runner_spec, ctx,
+            max_replica=max_replica,
+            msgs_per_replica=settings.keda_msgs_per_replica,
+            keda_enabled=keda_enabled,
+        ))
+        return manifests
+
+    # block_mode：原有路径
     if keda_enabled and flow_consumer_specs:
         manifests.extend(keda_manager.build_rabbitmq_auth_manifests(ctx.namespace))
-    # 块：一律 invoke Service
     for spec in specs:
         manifests.extend(render_block_manifests(spec, ctx, keda_enabled=keda_enabled))
-    # 接口级 Flow-Consumer（KEDA 按 flow.{api_id}.queue 扩缩）
     for fc in flow_consumer_specs:
-        max_replica = max(1, min(settings.keda_max_replica_cap, 20))
+        max_replica = settings.keda_max_replica_cap
         manifests.extend(render_flow_consumer_manifests(
             fc, ctx, max_replica=max_replica,
             msgs_per_replica=settings.keda_msgs_per_replica, keda_enabled=keda_enabled,
@@ -449,9 +564,10 @@ def render_all_manifests(
 
 
 async def deploy(session: AsyncSession, deployment: FlowDeployment) -> dict[str, Any]:
-    """执行一键部署。"""
+    """执行一键部署（block_mode 或 flow_mode）。"""
     from app.observability.metrics import K8S_DEPLOY
 
+    is_flow_mode = getattr(deployment, "deployment_type", "block_mode") == "flow_mode"
     specs = await build_deployment_specs(session, deployment)
     if not specs:
         raise BusinessException(PYFLOW_K8S_DEPLOY_FAILED, "no deployable blocks in flow")
@@ -468,21 +584,31 @@ async def deploy(session: AsyncSession, deployment: FlowDeployment) -> dict[str,
     # 镜像分层：按 requirements_hash 复用/构建依赖层（决策 11，4b）
     await _resolve_images(specs)
 
-    # 接口级 Flow-Consumer（trigger_type ∈ {mq,both} 的已发布接口）
-    flow_consumer_specs = await build_flow_consumer_specs(session, deployment, ctx, specs)
-
-    # 集群未装 KEDA 时优雅降级：跳过 ScaledObject，Flow-Consumer 退化为固定副本
     keda_ok = await deployment_manager.keda_available()
     warnings: list[str] = []
-    if not keda_ok and flow_consumer_specs:
-        warnings.append(
-            "集群未安装 KEDA：Flow-Consumer 以固定副本(min=1)运行，未启用基于队列深度的自动扩缩。"
-            "安装 KEDA 后重新部署即可恢复弹性伸缩。"
-        )
 
-    manifests = render_all_manifests(
-        specs, ctx, keda_enabled=keda_ok, flow_consumer_specs=flow_consumer_specs
-    )
+    if is_flow_mode:
+        # flow_mode：整流单 Pod
+        flow_runner_spec = await build_flow_runner_spec(session, deployment, ctx, specs)
+        if not keda_ok and flow_runner_spec.has_mq:
+            warnings.append(
+                "集群未安装 KEDA：FlowRunner 以固定副本(min=1)运行，未启用基于队列深度的自动扩缩。"
+                "安装 KEDA 后重新部署即可恢复弹性伸缩。"
+            )
+        manifests = render_all_manifests(
+            specs, ctx, keda_enabled=keda_ok, flow_runner_spec=flow_runner_spec
+        )
+    else:
+        # block_mode：原有路径
+        flow_consumer_specs = await build_flow_consumer_specs(session, deployment, ctx, specs)
+        if not keda_ok and flow_consumer_specs:
+            warnings.append(
+                "集群未安装 KEDA：Flow-Consumer 以固定副本(min=1)运行，未启用基于队列深度的自动扩缩。"
+                "安装 KEDA 后重新部署即可恢复弹性伸缩。"
+            )
+        manifests = render_all_manifests(
+            specs, ctx, keda_enabled=keda_ok, flow_consumer_specs=flow_consumer_specs
+        )
 
     deployment.status = "deploying"
     await session.commit()
@@ -495,14 +621,25 @@ async def deploy(session: AsyncSession, deployment: FlowDeployment) -> dict[str,
         K8S_DEPLOY.labels(action="deploy", result="apply_failed").inc()
         raise
 
-    block_statuses = await cluster_monitor.collect_deployment_status(
-        specs, ctx, flow_consumer_specs
-    )
+    if is_flow_mode:
+        flow_runner_spec = await build_flow_runner_spec(session, deployment, ctx, specs)
+        block_statuses = await cluster_monitor.collect_flow_runner_status(flow_runner_spec, ctx)
+    else:
+        flow_consumer_specs = await build_flow_consumer_specs(session, deployment, ctx, specs)
+        block_statuses = await cluster_monitor.collect_deployment_status(
+            specs, ctx, flow_consumer_specs
+        )
     deployment.status = cluster_monitor.aggregate_status(block_statuses)
     deployment.block_statuses = block_statuses
     await session.commit()
     K8S_DEPLOY.labels(action="deploy", result="ok").inc()
-    logger.info("flow_deployed", deployment_id=deployment.id, blocks=len(specs), keda=keda_ok)
+    logger.info(
+        "flow_deployed",
+        deployment_id=deployment.id,
+        mode=getattr(deployment, "deployment_type", "block_mode"),
+        blocks=len(specs),
+        keda=keda_ok,
+    )
     return {"status": deployment.status, "block_statuses": block_statuses, "warnings": warnings}
 
 
@@ -510,10 +647,15 @@ async def destroy(session: AsyncSession, deployment: FlowDeployment) -> dict[str
     """销毁部署：删除全部 K8s 资源。"""
     from app.observability.metrics import K8S_DEPLOY
 
+    is_flow_mode = getattr(deployment, "deployment_type", "block_mode") == "flow_mode"
     specs = await build_deployment_specs(session, deployment)
     ctx = _build_context(deployment)
-    flow_consumer_specs = await build_flow_consumer_specs(session, deployment, ctx, specs)
-    manifests = render_all_manifests(specs, ctx, flow_consumer_specs=flow_consumer_specs)
+    if is_flow_mode:
+        flow_runner_spec = await build_flow_runner_spec(session, deployment, ctx, specs)
+        manifests = render_all_manifests(specs, ctx, flow_runner_spec=flow_runner_spec)
+    else:
+        flow_consumer_specs = await build_flow_consumer_specs(session, deployment, ctx, specs)
+        manifests = render_all_manifests(specs, ctx, flow_consumer_specs=flow_consumer_specs)
     await deployment_manager.delete_manifests(manifests, ctx.namespace)
     deployment.status = "stopped"
     deployment.block_statuses = []
@@ -523,12 +665,17 @@ async def destroy(session: AsyncSession, deployment: FlowDeployment) -> dict[str
 
 
 async def status(session: AsyncSession, deployment: FlowDeployment) -> dict[str, Any]:
+    is_flow_mode = getattr(deployment, "deployment_type", "block_mode") == "flow_mode"
     specs = await build_specs(session, deployment.flow_id)
     ctx = _build_context(deployment)
-    flow_consumer_specs = await build_flow_consumer_specs(session, deployment, ctx, specs)
-    block_statuses = await cluster_monitor.collect_deployment_status(
-        specs, ctx, flow_consumer_specs
-    )
+    if is_flow_mode:
+        flow_runner_spec = await build_flow_runner_spec(session, deployment, ctx, specs)
+        block_statuses = await cluster_monitor.collect_flow_runner_status(flow_runner_spec, ctx)
+    else:
+        flow_consumer_specs = await build_flow_consumer_specs(session, deployment, ctx, specs)
+        block_statuses = await cluster_monitor.collect_deployment_status(
+            specs, ctx, flow_consumer_specs
+        )
     agg = cluster_monitor.aggregate_status(block_statuses)
     deployment.status = agg
     deployment.block_statuses = block_statuses

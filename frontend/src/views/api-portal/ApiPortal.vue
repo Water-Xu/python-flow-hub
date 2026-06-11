@@ -192,6 +192,8 @@ const form = ref({
   path: '',
   tags: '',
   flow_id: '',
+  // 接口级入口节点 ID（优先于 Flow.entry_node_id；空=退化为根节点全量执行）
+  entry_node_id: null as string | null,
   // 节点级入口函数映射 {node_id: entrypoint}，每个调用块分别指定
   entrypoint_map: {} as Record<string, string>,
 })
@@ -205,11 +207,14 @@ watch(
   async (fid) => {
     flowEntrypointsInfo.value = null
     form.value.entrypoint_map = {}
+    form.value.entry_node_id = null
     if (!fid) return
     entrypointsLoading.value = true
     try {
       const info = await apiPortalApi.getFlowEntrypoints(fid)
       flowEntrypointsInfo.value = info
+      // 若 Flow 本身已配置了单一入口，默认预填到接口级 entry_node_id
+      form.value.entry_node_id = info.entry_node_id ?? null
       // 默认沿用各节点画布中已配置的入口函数
       const map: Record<string, string> = {}
       for (const n of info.nodes) {
@@ -256,6 +261,7 @@ async function publish() {
       path: form.value.path,
       tags: form.value.tags,
       flow_id: form.value.flow_id,
+      entry_node_id: form.value.entry_node_id || null,
       entrypoint: null,
       entrypoint_map: { ...form.value.entrypoint_map },
     })
@@ -446,7 +452,7 @@ async function copyUrl(api: PublishedApi) {
 }
 
 function resetForm() {
-  form.value = { name: '', description: '', path: '', tags: '', flow_id: '', entrypoint_map: {} }
+  form.value = { name: '', description: '', path: '', tags: '', flow_id: '', entry_node_id: null, entrypoint_map: {} }
   flowEntrypointsInfo.value = null
 }
 
@@ -612,6 +618,38 @@ onMounted(load)
           </el-select>
         </el-form-item>
 
+        <!-- 入口节点选择：同一 Flow 可被不同接口以不同节点为入口发布 -->
+        <transition name="ep-fade">
+          <el-form-item v-if="form.flow_id" label="入口节点">
+            <div v-if="entrypointsLoading" class="ep-hint">正在读取流程节点列表…</div>
+            <template v-else-if="flowEntrypointsInfo">
+              <el-select
+                v-model="form.entry_node_id"
+                style="width:100%"
+                placeholder="不指定（从所有根节点同时进入）"
+                clearable
+              >
+                <el-option
+                  v-for="n in flowEntrypointsInfo.nodes"
+                  :key="n.node_id"
+                  :label="n.block_name + (n.is_entry ? '  ✦ Flow 默认入口' : '')"
+                  :value="n.node_id"
+                />
+              </el-select>
+              <div class="ep-hint" style="margin-top:6px">
+                <template v-if="form.entry_node_id">
+                  调用此接口将仅执行所选节点及其下游子图。
+                  不同接口可选择不同节点入口，实现同一 Flow 多用途复用。
+                </template>
+                <template v-else>
+                  未指定入口节点时，调用将从所有「无上游」的根节点同时进入。
+                  可在此处或在流程编辑器中为接口指定入口节点。
+                </template>
+              </div>
+            </template>
+          </el-form-item>
+        </transition>
+
         <!-- 入口函数选择：逐个调用块分别指定（解决多块含同名函数如 run 的歧义） -->
         <transition name="ep-fade">
           <el-form-item v-if="form.flow_id" label="入口函数">
@@ -632,8 +670,7 @@ onMounted(load)
               未指定单一入口节点：调用将从所有「无上游」的根节点同时进入。可在流程编辑器中双击某节点设为 API 入口。
             </div>
 
-            <template v-if="showEntrypointSelector && flowEntrypointsInfo">
-              <div class="ep-hint">
+            <template v-if="showEntrypointSelector && flowEntrypointsInfo">              <div class="ep-hint">
                 该流程含 <strong>{{ flowEntrypointsInfo.nodes.length }}</strong> 个调用块，
                 可为每个块单独指定要调用的入口函数（默认沿用节点配置）。
               </div>

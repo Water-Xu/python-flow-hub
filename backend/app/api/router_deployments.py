@@ -20,6 +20,7 @@ class DeploymentCreateRequest(BaseModel):
     flow_id: str
     name: str
     environment: str = "local"  # local | k8s
+    deployment_type: str = "block_mode"  # block_mode | flow_mode
 
 
 class DeploymentEnvRequest(BaseModel):
@@ -98,6 +99,7 @@ async def create_deployment(
     prefix = f"flow-{req.flow_id[:8]}-{req.name}".lower().replace(" ", "-")[:63]
     dep = FlowDeployment(
         flow_id=req.flow_id, name=req.name, environment=req.environment,
+        deployment_type=req.deployment_type,
         resource_prefix=prefix, status="stopped",
         entry_endpoint=f"/flow/{req.flow_id}/invoke",
     )

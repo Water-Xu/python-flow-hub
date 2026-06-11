@@ -151,7 +151,7 @@ async def _get_api_by_path(session: AsyncSession, path: str) -> PublishedApi:
 
 
 async def _resolve_block_services(session: AsyncSession, flow_id: str) -> dict[str, str]:
-    """k8s 模式下，若该流程存在运行中的部署，返回 ``block_id -> 常驻 invoke Service 名`` 映射。
+    """k8s 模式下，若该流程存在运行中的 block_mode 部署，返回 ``block_id -> 常驻 invoke Service 名`` 映射。
 
     命中后公开调用直接复用常驻 invoke Pod（稳定版本代码，无冷启动），免去每个块的一次性 Job；
     无运行部署 / 非 k8s 时返回空映射，调用回退到原一次性 Job 执行 draft 代码（行为不变）。
@@ -164,6 +164,7 @@ async def _resolve_block_services(session: AsyncSession, flow_id: str) -> dict[s
         .where(
             FlowDeployment.flow_id == flow_id,
             FlowDeployment.status.in_(["running", "partially_degraded"]),
+            FlowDeployment.deployment_type == "block_mode",
         )
         .order_by(FlowDeployment.updated_at.desc())
     )).scalars().first()
@@ -175,6 +176,50 @@ async def _resolve_block_services(session: AsyncSession, flow_id: str) -> dict[s
     specs = await build_specs(session, flow_id)
     ctx = _build_context(deployment)
     return {bs.block_id: deployment_name(ctx, bs) for bs in specs}
+
+
+async def _resolve_flow_runner_service(session: AsyncSession, flow_id: str) -> str | None:
+    """k8s flow_mode 已部署时，返回 FlowRunner Service 名，供控制面直接调用 /run 整流。
+
+    命中时跳过控制面 run_flow + block 逐个执行，由 FlowRunner Pod in-process 完成整流，
+    消除块间 HTTP 开销并使用稳定版本代码（而非 draft）。
+    """
+    if settings.deployment_mode != "k8s":
+        return None
+    deployment = (await session.execute(
+        select(FlowDeployment)
+        .where(
+            FlowDeployment.flow_id == flow_id,
+            FlowDeployment.status.in_(["running", "partially_degraded"]),
+            FlowDeployment.deployment_type == "flow_mode",
+        )
+        .order_by(FlowDeployment.updated_at.desc())
+    )).scalars().first()
+    if deployment is None:
+        return None
+    from app.core.k8s.orchestrator import _build_context
+    from app.core.k8s.manifest_generator import FlowRunnerSpec, flow_runner_name
+
+    ctx = _build_context(deployment)
+    flow_short = flow_id.replace("-", "")[:8]
+    prefix = ctx.resource_prefix or f"flow-{flow_id[:8]}"
+    return f"{prefix}-fr-{flow_short}"[:63]
+
+
+async def _call_flow_runner(
+    service: str, inputs: dict, entry_node_id: str | None
+) -> dict:
+    """调用 FlowRunner Pod 的 /run 端点执行整流（flow_mode k8s 路径）。"""
+    import httpx
+
+    url = f"http://{service}.{settings.k8s_namespace}:{8000}/run"
+    payload: dict = {"inputs": inputs}
+    if entry_node_id:
+        payload["entry_node_id"] = entry_node_id
+    async with httpx.AsyncClient(timeout=3600) as client:
+        resp = await client.post(url, json=payload)
+        resp.raise_for_status()
+        return resp.json()
 
 
 # ── 用户接口管理 ──────────────────────────────────────────────────────────────
@@ -221,6 +266,7 @@ async def publish_flow_as_api(
         active_flow_id=req.flow_id,
         owner_login_id=login_id,
         status="active",
+        entry_node_id=req.entry_node_id or None,
         entrypoint=req.entrypoint or None,
         entrypoint_map=req.entrypoint_map or {},
     )
@@ -420,7 +466,9 @@ async def get_api_docs(
                 })
 
     # 接口级 MQ 触发文档（trigger_type 为 mq/both 时非空），用流程入口块端口生成示例消息体
-    entry_ports = _entry_input_ports(nodes, edges, block_docs)
+    # 入口节点优先级：API 级 > Flow 级
+    effective_entry = api.entry_node_id or (flow.entry_node_id if flow else None)
+    entry_ports = _entry_input_ports(nodes, edges, block_docs, effective_entry)
     mq_invocation = build_mq_invocation(api, entry_ports)
 
     return {
@@ -431,6 +479,7 @@ async def get_api_docs(
         "method": "POST",
         "status": api.status,
         "trigger_type": api.trigger_type,
+        "entry_node_id": api.entry_node_id,
         "entrypoint": api.entrypoint,
         "entrypoint_map": api.entrypoint_map or {},
         "flow_id": flow_id,
@@ -458,13 +507,25 @@ async def get_api_docs(
 
 
 def _entry_input_ports(
-    nodes: list[Any], edges: list[Any], block_docs: list[dict[str, Any]]
+    nodes: list[Any],
+    edges: list[Any],
+    block_docs: list[dict[str, Any]],
+    entry_node_id: str | None = None,
 ) -> list[Any]:
-    """流程入口块（无入边的块节点）的 input_ports 合集，用于生成 MQ 示例消息体。"""
-    targets = {e.target_node_id for e in edges}
-    entry_block_ids = {
-        n.block_id for n in nodes if n.block_id and n.id not in targets
-    }
+    """流程入口块的 input_ports 合集，用于生成 MQ 示例消息体。
+
+    指定了 entry_node_id 时仅用该节点端口；否则取无入边的所有根节点。
+    """
+    if entry_node_id:
+        entry_block_ids = {
+            n.block_id for n in nodes
+            if n.block_id and n.id == entry_node_id
+        }
+    else:
+        targets = {e.target_node_id for e in edges}
+        entry_block_ids = {
+            n.block_id for n in nodes if n.block_id and n.id not in targets
+        }
     ports: list[Any] = []
     for doc in block_docs:
         if doc["block_id"] in entry_block_ids:
@@ -590,11 +651,41 @@ async def invoke_api(
         for e in edges_rows
     ]
 
-    # 指定了单一入口节点时，仅执行入口及其下游可达子图（入口独享 inputs）
+    # 入口节点优先级：API 级 entry_node_id > Flow 级 entry_node_id（兼容历史数据）
     flow_obj = await session.get(Flow, flow_id)
-    nodes, edges = select_entry_subgraph(
-        nodes, edges, flow_obj.entry_node_id if flow_obj else None
+    effective_entry_node_id = (
+        api.entry_node_id
+        or (flow_obj.entry_node_id if flow_obj else None)
     )
+    nodes, edges = select_entry_subgraph(nodes, edges, effective_entry_node_id)
+
+    # k8s flow_mode 已部署时，直接调用 FlowRunner Pod /run，省去控制面逐块执行
+    flow_runner_svc = await _resolve_flow_runner_service(session, flow_id)
+    if flow_runner_svc:
+        start_ts = time.time()
+        try:
+            runner_result = await _call_flow_runner(flow_runner_svc, inputs, effective_entry_node_id)
+            if runner_result.get("status") == "failed":
+                raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, runner_result.get("error", "flow_runner failed")[:500])
+            elapsed = (time.time() - start_ts) * 1000
+            api.total_calls += 1
+            api.success_calls += 1
+            n = api.total_calls
+            api.avg_latency_ms = (api.avg_latency_ms * (n - 1) + elapsed) / n
+            await session.commit()
+            outputs = runner_result.get("outputs", {})
+            payload, encrypted = _maybe_encrypt_outputs(api, outputs)
+            return {"outputs": payload, "encrypted": encrypted, "status": "succeeded", "latency_ms": round(elapsed, 2)}
+        except BusinessException:
+            api.total_calls += 1
+            api.error_calls += 1
+            await session.commit()
+            raise
+        except Exception as exc:
+            api.total_calls += 1
+            api.error_calls += 1
+            await session.commit()
+            raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, str(exc)[:500]) from exc
 
     # 一次 IN 查询批量装载所有块，避免按节点 N+1 逐个 session.get
     block_ids = {n["block_id"] for n in nodes if n.get("block_id")}
@@ -727,11 +818,13 @@ async def invoke_api_stream(
         for e in edges_rows
     ]
 
-    # 指定了单一入口节点时，仅执行入口及其下游可达子图（终止节点/块装载均基于裁剪后子图）
+    # 入口节点优先级：API 级 entry_node_id > Flow 级 entry_node_id（兼容历史数据）
     flow_obj = await session.get(Flow, flow_id)
-    nodes, edges = select_entry_subgraph(
-        nodes, edges, flow_obj.entry_node_id if flow_obj else None
+    effective_entry_node_id = (
+        api.entry_node_id
+        or (flow_obj.entry_node_id if flow_obj else None)
     )
+    nodes, edges = select_entry_subgraph(nodes, edges, effective_entry_node_id)
 
     block_ids = {n["block_id"] for n in nodes if n.get("block_id")}
     block_cache: dict[str, Block] = {}

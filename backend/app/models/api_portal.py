@@ -29,6 +29,10 @@ class PublishedApi(Base, UUIDMixin, TimestampMixin):
     flow_id: Mapped[str] = mapped_column(String(36), index=True)
     # active_flow_id: 当前实际调用的流程（可与 flow_id 不同，用于平滑过渡）
     active_flow_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # API 级图入口节点（None = 使用 Flow.entry_node_id；两者均为空时退化为所有根节点）。
+    # 允许同一条 Flow 被多个接口以不同子图入口发布，解决「不指定 Flow 级默认入口，
+    # 但各接口需从不同节点开始执行」的场景。
+    entry_node_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     # API 级入口函数名称（None = 使用各节点 config.entrypoint 或默认 run）
     # 全局覆盖（保留向后兼容）：设置后覆盖流程内所有未在 entrypoint_map 指定的节点。
     entrypoint: Mapped[str | None] = mapped_column(String(128), nullable=True)
