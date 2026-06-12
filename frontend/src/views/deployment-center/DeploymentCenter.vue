@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch, computed, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deploymentApi, flowApi, type BlockResource, type FlowResourceSummary, type DeploymentDependencies, type DepPackage } from '@/api'
+import { deploymentApi, flowApi, type BlockResource, type FlowResourceSummary, type DeploymentDependencies, type DepPackage, type BuildLogEntry } from '@/api'
 
 const deployments = ref<any[]>([])
 const flows = ref<any[]>([])
@@ -165,6 +165,44 @@ const resSummaryTip = computed(() =>
     ? 'FlowRunner 为整流单 Pod，所有块在同一进程内执行。常驻请求为容量闸门（min≥1 副本）；KEDA 对整个 Flow 级扩缩（0→N），峰值上界按 limit×maxReplica 估算，不计入常驻。'
     : '常驻请求为容量闸门（各块 min≥1 副本按 request 累加）；KEDA 仅作用于各 MQ 接口的 Flow-Consumer（0→N 按队列扩缩），峰值上界按各块 limit×maxReplica 估算，不计入常驻。'
 )
+
+// ── 构建日志 ──
+const buildLogs = ref<BuildLogEntry[]>([])
+const buildLogsLoading = ref(false)
+const buildLogsNote = ref('')
+const activeBuildId = ref<string>('')
+
+const buildStatusType: Record<string, string> = {
+  SUCCESS: 'success',
+  FAILURE: 'danger',
+  WORKING: 'warning',
+  QUEUED: 'info',
+  CANCELLED: 'info',
+}
+const buildStatusLabel: Record<string, string> = {
+  SUCCESS: '构建成功',
+  FAILURE: '构建失败',
+  WORKING: '构建中…',
+  QUEUED: '排队中',
+  CANCELLED: '已取消',
+}
+
+async function loadBuildLogs() {
+  if (!detail.value) return
+  buildLogsLoading.value = true
+  try {
+    const res = await deploymentApi.buildLogs(detail.value.id)
+    buildLogs.value = res.builds ?? []
+    buildLogsNote.value = res.note ?? ''
+    // 默认展开第一条 FAILURE 或最新一条
+    const firstFail = buildLogs.value.find((b) => b.status === 'FAILURE')
+    activeBuildId.value = (firstFail ?? buildLogs.value[0])?.id ?? ''
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '获取构建日志失败')
+  } finally {
+    buildLogsLoading.value = false
+  }
+}
 
 // ── 依赖列表 ──
 const depsData = ref<DeploymentDependencies | null>(null)
@@ -495,7 +533,16 @@ async function openDetail(row: any) {
   depsData.value = null
   depsFilterText.value = ''
   installPkgInput.value = ''
+  buildLogs.value = []
+  buildLogsNote.value = ''
+  activeBuildId.value = ''
   stopLogRefresh()
+  // partially_degraded：自动切到构建日志 tab 并加载
+  if (row.status === 'partially_degraded') {
+    detailTab.value = 'buildlogs'
+    await nextTick()
+    loadBuildLogs()
+  }
   loadEnvRows(row)
   if (row.environment === 'k8s') {
     try {
@@ -628,6 +675,7 @@ onBeforeUnmount(() => {
           if (n === 'resources' && resourceRows.length === 0) loadResources()
           if (n === 'logs') { loadPodList(); startLogRefresh() }
           if (n === 'deps' && !depsData) loadDependencies()
+          if (n === 'buildlogs' && buildLogs.value.length === 0) loadBuildLogs()
           if (n !== 'logs') stopLogRefresh()
         }"
       >
@@ -883,6 +931,61 @@ onBeforeUnmount(() => {
           <div v-for="(m, idx) in manifests" :key="idx" class="manifest">
             <el-tag size="small" effect="plain">{{ m.kind }} · {{ m.metadata?.name }}</el-tag>
             <pre>{{ JSON.stringify(m, null, 2) }}</pre>
+          </div>
+        </el-tab-pane>
+
+        <!-- ── 构建日志 ── -->
+        <el-tab-pane name="buildlogs">
+          <template #label>
+            <span class="build-tab-label">
+              构建日志
+              <el-badge
+                v-if="detail?.status === 'partially_degraded'"
+                is-dot
+                type="danger"
+                style="margin-left:4px;vertical-align:middle"
+              />
+            </span>
+          </template>
+
+          <div class="build-toolbar">
+            <span class="dim">最近依赖镜像 Cloud Build 构建记录</span>
+            <el-button size="small" :loading="buildLogsLoading" @click="loadBuildLogs">
+              <el-icon><Refresh /></el-icon> 刷新
+            </el-button>
+          </div>
+
+          <div v-loading="buildLogsLoading">
+            <el-empty v-if="!buildLogsLoading && buildLogs.length === 0" :description="buildLogsNote || '暂无构建记录（最近 24h）'" :image-size="64" />
+
+            <el-collapse v-else v-model="activeBuildId" accordion>
+              <el-collapse-item
+                v-for="b in buildLogs"
+                :key="b.id"
+                :name="b.id"
+              >
+                <template #title>
+                  <div class="build-item-head">
+                    <el-tag
+                      :type="buildStatusType[b.status] || 'info'"
+                      effect="dark"
+                      size="small"
+                      class="build-status-tag"
+                    >{{ buildStatusLabel[b.status] || b.status }}</el-tag>
+                    <code class="build-image">{{ b.image }}</code>
+                    <span class="dim build-time">{{ b.create_time ? new Date(b.create_time).toLocaleString() : '' }}</span>
+                    <a :href="b.console_url" target="_blank" class="build-console-link" @click.stop>
+                      <el-icon><Link /></el-icon> GCP 控制台
+                    </a>
+                  </div>
+                </template>
+
+                <div class="build-log-panel" ref="buildLogPanelRef">
+                  <div v-if="b.log_lines.length === 0" class="dim" style="padding:12px">暂无日志（日志可能仍在采集中，稍后刷新）</div>
+                  <pre v-else class="build-log-content">{{ b.log_lines.join('\n') }}</pre>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
           </div>
         </el-tab-pane>
 
@@ -1251,6 +1354,83 @@ onBeforeUnmount(() => {
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+/* ── 构建日志 ── */
+.build-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--el-fill-color-light, #f5f7fa);
+}
+.build-tab-label {
+  display: inline-flex;
+  align-items: center;
+}
+.build-item-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  width: 100%;
+}
+.build-status-tag {
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+.build-status-tag:hover { transform: scale(1.06); }
+.build-image {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 12px;
+  background: var(--el-fill-color, #f0f2f5);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--el-color-primary, #409eff);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.build-time {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.build-console-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--el-color-primary, #409eff);
+  text-decoration: none;
+  margin-left: auto;
+  flex-shrink: 0;
+  transition: opacity 0.2s;
+}
+.build-console-link:hover { opacity: 0.75; }
+.build-log-panel {
+  height: 420px;
+  overflow-y: auto;
+  background: #0d1117;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  animation: fade 0.25s ease;
+  scrollbar-width: thin;
+  scrollbar-color: #30363d #0d1117;
+}
+.build-log-panel::-webkit-scrollbar { width: 6px; }
+.build-log-panel::-webkit-scrollbar-track { background: #0d1117; }
+.build-log-panel::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+.build-log-content {
+  margin: 0;
+  color: #c9d1d9;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 /* ── 依赖列表 ── */

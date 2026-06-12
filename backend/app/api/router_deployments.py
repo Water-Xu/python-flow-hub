@@ -374,6 +374,108 @@ async def destroy_deployment(
     return {"deleted": True}
 
 
+@router.get("/{deployment_id}/build-logs")
+async def get_deployment_build_logs(
+    deployment_id: str,
+    hours: int = 24,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.VIEWER)),
+):
+    """获取最近依赖镜像 Cloud Build 构建日志（用于诊断 partially_degraded 状态）。"""
+    from app.config import get_settings as _get_settings
+    _settings = _get_settings()
+
+    if not _settings.cloudbuild_enabled:
+        return {"builds": [], "note": "Cloud Build 未启用"}
+
+    def _fetch() -> list[dict]:
+        import google.auth  # type: ignore
+        from google.auth.transport.requests import Request  # type: ignore
+        import httpx
+        from datetime import datetime, timezone, timedelta
+
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        creds.refresh(Request())
+        token = creds.token
+        project = _settings.gcp_project
+        hdrs = {"Authorization": f"Bearer {token}"}
+
+        # 1. 列出最近 N 小时的构建（含所有状态）
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max(1, min(hours, 72)))).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        url = f"https://cloudbuild.googleapis.com/v1/projects/{project}/builds"
+        with httpx.Client(timeout=20) as cli:
+            resp = cli.get(url, headers=hdrs, params={"filter": f'create_time>"{cutoff}"', "pageSize": 30})
+            if resp.status_code != 200:
+                return []
+            builds_raw = resp.json().get("builds", [])
+
+        # 2. 只保留 dep- 镜像相关的构建
+        dep_builds = [
+            b for b in builds_raw
+            if any(":dep-" in (img or "") for img in b.get("images", []))
+        ][:6]
+
+        if not dep_builds:
+            return []
+
+        # 3. 查询 Cloud Logging 获取最近日志行
+        result = []
+        for b in dep_builds:
+            build_id = b["id"]
+            status = b.get("status", "UNKNOWN")
+            image = next((img for img in b.get("images", []) if ":dep-" in img), "")
+
+            log_lines: list[str] = []
+            if status in ("FAILURE", "SUCCESS", "WORKING"):
+                log_filter = (
+                    f'logName="projects/{project}/logs/cloudbuild" '
+                    f'labels.build_id="{build_id}"'
+                )
+                with httpx.Client(timeout=20) as cli:
+                    lr = cli.post(
+                        "https://logging.googleapis.com/v2/entries:list",
+                        headers=hdrs,
+                        json={
+                            "resourceNames": [f"projects/{project}"],
+                            "filter": log_filter,
+                            "orderBy": "timestamp desc",
+                            "pageSize": 100,
+                        },
+                    )
+                    if lr.status_code == 200:
+                        entries = lr.json().get("entries", [])
+                        for e in reversed(entries):
+                            msg = (
+                                e.get("textPayload")
+                                or e.get("jsonPayload", {}).get("message", "")
+                                or e.get("jsonPayload", {}).get("text", "")
+                            )
+                            if msg and msg.strip():
+                                log_lines.append(msg.rstrip())
+
+            result.append({
+                "id": build_id,
+                "status": status,
+                "image": image.rsplit(":", 1)[-1] if ":" in image else image,
+                "image_full": image,
+                "create_time": b.get("createTime", ""),
+                "duration": b.get("duration", ""),
+                "log_lines": log_lines,
+                "console_url": (
+                    f"https://console.cloud.google.com/cloud-build/builds/{build_id}"
+                    f"?project={project}"
+                ),
+            })
+
+        return result
+
+    import asyncio
+    builds = await asyncio.to_thread(_fetch)
+    return {"builds": builds}
+
+
 def _parse_requirements_text(text: str) -> list[dict]:
     """解析 requirements.txt 文本为结构化包信息列表。"""
     packages = []

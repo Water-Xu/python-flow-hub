@@ -155,6 +155,25 @@ export const deploymentApi = {
       `/api/deployments/${id}/dependencies/install`,
       data,
     ),
+  /** 获取最近依赖镜像 Cloud Build 构建日志（诊断 partially_degraded） */
+  buildLogs: (id: string, hours = 24) =>
+    client.get<any, BuildLogsResult>(`/api/deployments/${id}/build-logs`, { params: { hours } }),
+}
+
+export interface BuildLogEntry {
+  id: string
+  status: 'SUCCESS' | 'FAILURE' | 'WORKING' | 'QUEUED' | 'CANCELLED' | string
+  image: string
+  image_full: string
+  create_time: string
+  duration: string
+  log_lines: string[]
+  console_url: string
+}
+
+export interface BuildLogsResult {
+  builds: BuildLogEntry[]
+  note?: string
 }
 
 export interface DepPackage {
