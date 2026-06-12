@@ -15,7 +15,7 @@ class PublishApiRequest(BaseModel):
 
     name: str = Field(min_length=1, max_length=128)
     description: str = ""
-    path: str = Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+    path: str = Field(min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9_\-/]+$")
     tags: str = ""
     flow_id: str
     # 接口级图入口节点 ID（优先于 Flow.entry_node_id；两者均为空退化为所有根节点）。

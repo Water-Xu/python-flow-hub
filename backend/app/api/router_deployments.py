@@ -18,6 +18,21 @@ from app.models.deployment import FlowDeployment
 router = APIRouter(prefix="/api/deployments", tags=["deployments"])
 
 
+def _k8s_safe_name(raw: str, max_len: int = 52) -> str:
+    """将任意字符串转为合法的 K8s RFC 1123 subdomain 片段。
+
+    规则：只保留 ASCII 字母/数字，其余字符（含中文、空格、下划线）统一替换为 '-'，
+    合并连续 '-'，去除首尾 '-'，截断到 max_len 字符。
+    """
+    s = raw.lower()
+    # 非 ASCII 字母/数字全部替换为 '-'（含中文、Unicode 符号等）
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    # 合并连续 '-' 并去首尾
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    # 全部被过滤掉（纯中文名）时返回空串，让调用方 fallback
+    return s[:max_len] if s else ""
+
+
 class DeploymentCreateRequest(BaseModel):
     flow_id: str
     name: str
@@ -106,7 +121,10 @@ async def create_deployment(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(require_role(Role.DEPLOYER)),
 ):
-    prefix = f"flow-{req.flow_id[:8]}-{req.name}".lower().replace(" ", "-")[:63]
+    safe_name = _k8s_safe_name(req.name)
+    # 名称清洗后为空（全中文/特殊字符）时降级为 flow_id 片段
+    prefix = f"flow-{req.flow_id[:8]}-{safe_name}" if safe_name else f"flow-{req.flow_id[:12]}"
+    prefix = prefix[:63].rstrip("-")
     dep = FlowDeployment(
         flow_id=req.flow_id, name=req.name, environment=req.environment,
         deployment_type=req.deployment_type,
@@ -246,6 +264,14 @@ async def deploy_deployment(
 ):
     """一键部署到 K8s（构建/apply Deployment/Service/KEDA/NetworkPolicy）。"""
     dep = await _get(session, deployment_id)
+    # 兼容旧数据：resource_prefix 可能含中文等非法字符，部署前自动修正并持久化
+    safe = _k8s_safe_name(dep.resource_prefix or "")
+    if not safe:
+        safe = f"flow-{dep.flow_id[:12]}"
+    if safe != dep.resource_prefix:
+        dep.resource_prefix = safe
+        session.add(dep)
+        await session.flush()
     return await orchestrator.deploy(session, dep)
 
 

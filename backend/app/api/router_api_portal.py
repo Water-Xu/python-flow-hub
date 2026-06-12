@@ -672,7 +672,7 @@ async def get_flow_entrypoints(
 
 # ── 公开调用入口 ───────────────────────────────────────────────────────────────
 
-@router.post("/api/public/{path}")
+@router.post("/api/public/{path:path}")
 async def invoke_api(
     path: str,
     request: Request,
@@ -925,7 +925,7 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
-@router.post("/api/public/{path}/stream")
+@router.post("/api/public/{path:path}/stream")
 async def invoke_api_stream(
     path: str,
     request: Request,

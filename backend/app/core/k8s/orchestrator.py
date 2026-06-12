@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy import and_, or_, select
@@ -59,10 +60,22 @@ _FLOW_RUNNER_DEFAULT_COMPUTE: dict[str, Any] = {
 }
 
 
+def _sanitize_k8s_prefix(raw: str) -> str:
+    """确保 resource_prefix 只含 K8s 合法字符（[a-z0-9-]），过滤中文/特殊字符。"""
+    s = re.sub(r"[^a-z0-9]+", "-", raw.lower())
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    return s[:52] if s else ""
+
+
 def _build_context(deployment: FlowDeployment) -> DeployContext:
+    raw_prefix = deployment.resource_prefix or f"flow-{deployment.flow_id[:8]}"
+    safe_prefix = _sanitize_k8s_prefix(raw_prefix)
+    # 如果清洗后为空（极端情况），fallback 到纯 ID
+    if not safe_prefix:
+        safe_prefix = f"flow-{deployment.flow_id[:12]}"
     return DeployContext(
         namespace=settings.k8s_namespace,
-        resource_prefix=deployment.resource_prefix or f"flow-{deployment.flow_id[:8]}",
+        resource_prefix=safe_prefix,
         runner_image=settings.runner_image,
         gpu_runner_image=settings.gpu_runner_image,
         ksa_default=settings.ksa_default,

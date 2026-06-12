@@ -941,7 +941,7 @@ onMounted(load)
           <el-input v-model="publishForm.name" placeholder="例如 向量检索接口" />
         </el-form-item>
         <el-form-item label="URL 路径" required>
-          <el-input v-model="publishForm.path" placeholder="例如 vector-search（仅字母/数字/下划线/短横线）">
+          <el-input v-model="publishForm.path" placeholder="例如 emb/text 或 vector-search">
             <template #prepend>/api/public/</template>
           </el-input>
         </el-form-item>
