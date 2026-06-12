@@ -365,9 +365,24 @@ async def flow_resource_summary(
     }
 
 
+async def _fetch_requirements_text(spec: BlockDeploySpec) -> str:
+    """从 MinIO 拉取单个块的 requirements 文本；失败返回空串。"""
+    storage = get_storage()
+    req_key = spec.requirements_path
+    if not req_key and spec.code_path:
+        req_key = spec.code_path.rsplit("/", 1)[0] + "/requirements.txt"
+    if not req_key:
+        return ""
+    try:
+        if await storage.exists(req_key):
+            return (await storage.get(req_key)).decode("utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("requirements_fetch_failed", block_id=spec.block_id, error=str(exc))
+    return ""
+
+
 async def _resolve_images(specs: list[BlockDeploySpec]) -> None:
     """为每个 spec 解析依赖层镜像（命中缓存复用，否则触发 Cloud Build；dev 用基础镜像）。"""
-    storage = get_storage()
     cache: dict[str, str] = {}
     for spec in specs:
         if not spec.requirements_hash:
@@ -377,15 +392,7 @@ async def _resolve_images(specs: list[BlockDeploySpec]) -> None:
         if cache_key in cache:
             spec.image = cache[cache_key]
             continue
-        req_text = ""
-        req_key = spec.requirements_path
-        if not req_key and spec.code_path:
-            req_key = spec.code_path.rsplit("/", 1)[0] + "/requirements.txt"
-        try:
-            if req_key and await storage.exists(req_key):
-                req_text = (await storage.get(req_key)).decode("utf-8")
-        except Exception as exc:  # noqa: BLE001 拉取依赖清单失败不阻断（用 base 镜像）
-            logger.warning("requirements_fetch_failed", block_id=spec.block_id, error=str(exc))
+        req_text = await _fetch_requirements_text(spec)
         if not req_text.strip():
             logger.warning(
                 "requirements_empty_for_hash",
@@ -401,6 +408,46 @@ async def _resolve_images(specs: list[BlockDeploySpec]) -> None:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("image_resolve_failed", block_id=spec.block_id, error=str(exc))
+
+
+async def _resolve_flow_runner_image(specs: list[BlockDeploySpec]) -> str:
+    """flow_mode 专用：合并所有块的 requirements 构建单一依赖镜像。
+
+    各块的 requirements 行去重合并后计算统一 hash，复用已有镜像或触发 Cloud Build 构建；
+    所有块均无 requirements 时直接返回基础镜像（无需构建）。
+    """
+    import hashlib
+
+    merged_lines: list[str] = []
+    seen_lines: set[str] = set()
+    has_real_deps = False
+
+    for spec in specs:
+        req_text = await _fetch_requirements_text(spec)
+        for line in req_text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped in seen_lines:
+                continue
+            seen_lines.add(stripped)
+            merged_lines.append(stripped)
+            if not stripped.startswith("#"):
+                has_real_deps = True
+
+    if not has_real_deps:
+        return settings.runner_image
+
+    merged_text = "\n".join(merged_lines) + "\n"
+    combined_hash = hashlib.sha256(merged_text.encode("utf-8")).hexdigest()
+    logger.info("flow_runner_image_resolving", combined_hash=combined_hash[:16], lines=len(merged_lines))
+    try:
+        image = await image_builder.ensure_dependency_image(merged_text, combined_hash)
+        logger.info("flow_runner_image_resolved", image=image)
+        return image
+    except BusinessException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("flow_runner_image_resolve_failed", error=str(exc))
+        return settings.runner_image
 
 
 def run_prechecks(specs: list[BlockDeploySpec]) -> dict[str, Any]:
@@ -517,6 +564,8 @@ async def build_flow_runner_spec(
     deployment: FlowDeployment,
     ctx: DeployContext,
     block_specs: list[BlockDeploySpec],
+    *,
+    image: str = "",
 ) -> FlowRunnerSpec:
     """构建 flow_mode 整流单 Pod 的部署描述（决策 flow_mode）。
 
@@ -602,7 +651,7 @@ async def build_flow_runner_spec(
         mq_apis=mq_apis,
         compute_config=compute_config,
         env_vars=runner_env,
-        image=ctx.runner_image,
+        image=image or ctx.runner_image,
     )
 
 
@@ -685,7 +734,11 @@ async def deploy(session: AsyncSession, deployment: FlowDeployment) -> dict[str,
 
     if is_flow_mode:
         # flow_mode：整流单 Pod
-        flow_runner_spec = await build_flow_runner_spec(session, deployment, ctx, specs)
+        # 合并所有块的 requirements，构建含所有块依赖的统一镜像（避免 base 镜像缺依赖）
+        flow_runner_image = await _resolve_flow_runner_image(specs)
+        flow_runner_spec = await build_flow_runner_spec(
+            session, deployment, ctx, specs, image=flow_runner_image
+        )
         if not keda_ok and flow_runner_spec.has_mq:
             warnings.append(
                 "集群未安装 KEDA：FlowRunner 以固定副本(min=1)运行，未启用基于队列深度的自动扩缩。"
@@ -718,7 +771,6 @@ async def deploy(session: AsyncSession, deployment: FlowDeployment) -> dict[str,
         raise
 
     if is_flow_mode:
-        flow_runner_spec = await build_flow_runner_spec(session, deployment, ctx, specs)
         block_statuses = await cluster_monitor.collect_flow_runner_status(flow_runner_spec, ctx)
     else:
         flow_consumer_specs = await build_flow_consumer_specs(session, deployment, ctx, specs)
