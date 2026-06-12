@@ -64,11 +64,12 @@ async def _counts(session: AsyncSession) -> dict:
 
 
 async def _exec_stats(session: AsyncSession, since: datetime) -> dict:
+    """整流级别（FlowRun）成功率统计，与调用记录列表保持一致口径。"""
     rows = (await session.execute(
-        select(ExecutionRecord.status, func.count(), func.avg(ExecutionRecord.duration_ms),
-               func.max(ExecutionRecord.duration_ms))
-        .where(ExecutionRecord.created_at >= since)
-        .group_by(ExecutionRecord.status)
+        select(FlowRun.status, func.count(), func.avg(FlowRun.duration_ms),
+               func.max(FlowRun.duration_ms))
+        .where(FlowRun.created_at >= since)
+        .group_by(FlowRun.status)
     )).all()
     total = 0
     success = 0
@@ -77,9 +78,9 @@ async def _exec_stats(session: AsyncSession, since: datetime) -> dict:
     max_ms = 0
     for status, cnt, avg_ms, mx in rows:
         total += cnt
-        if status == "success":
+        if status == "succeeded":
             success += cnt
-        elif status in ("failed", "timeout"):
+        elif status in ("failed", "canceled"):
             failed += cnt
         if avg_ms is not None:
             durations.append(float(avg_ms) * cnt)
@@ -98,11 +99,11 @@ async def _exec_stats(session: AsyncSession, since: datetime) -> dict:
 
 
 async def _exec_trend(session: AsyncSession, since: datetime) -> list[dict]:
-    """最近 24h 按小时分桶（执行总数 / 失败数）。"""
+    """最近 24h 按小时分桶，基于 FlowRun（整流粒度）。"""
     rows = (await session.execute(
-        select(ExecutionRecord.created_at, ExecutionRecord.status)
-        .where(ExecutionRecord.created_at >= since)
-        .order_by(ExecutionRecord.created_at.desc())
+        select(FlowRun.created_at, FlowRun.status)
+        .where(FlowRun.created_at >= since)
+        .order_by(FlowRun.created_at.desc())
         .limit(5000)
     )).all()
     buckets: dict[str, dict] = {}
@@ -111,9 +112,11 @@ async def _exec_trend(session: AsyncSession, since: datetime) -> list[dict]:
             continue
         ts = created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
         key = ts.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:00")
-        b = buckets.setdefault(key, {"hour": key, "total": 0, "failed": 0})
+        b = buckets.setdefault(key, {"hour": key, "total": 0, "success": 0, "failed": 0})
         b["total"] += 1
-        if status in ("failed", "timeout"):
+        if status == "succeeded":
+            b["success"] += 1
+        elif status in ("failed", "canceled"):
             b["failed"] += 1
     return [buckets[k] for k in sorted(buckets.keys())]
 

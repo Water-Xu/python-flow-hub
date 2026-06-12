@@ -218,7 +218,7 @@ onUnmounted(() => {
           </svg>
         </div>
         <div class="rate-meta">
-          <div class="rm-item"><span class="rm-label">24h 执行</span><span class="rm-val">{{ stats.total ?? 0 }}</span></div>
+          <div class="rm-item"><span class="rm-label">24h 整流</span><span class="rm-val">{{ stats.total ?? 0 }} 次</span></div>
           <div class="rm-item"><span class="rm-label">成功</span><span class="rm-val ok">{{ stats.success ?? 0 }}</span></div>
           <div class="rm-item"><span class="rm-label">失败</span><span class="rm-val err">{{ stats.failed ?? 0 }}</span></div>
           <div class="rm-item"><span class="rm-label">平均耗时</span><span class="rm-val">{{ stats.avg_duration_ms ?? 0 }}ms</span></div>
@@ -226,22 +226,32 @@ onUnmounted(() => {
       </div>
 
       <div class="pf-card trend-card">
-        <div class="card-title"><el-icon><Histogram /></el-icon> 最近 24h 执行趋势</div>
+        <div class="trend-head">
+          <div class="card-title" style="margin-bottom:0"><el-icon><Histogram /></el-icon> 最近 24h 整流趋势</div>
+          <div class="trend-legend">
+            <span class="tl-dot" style="background:#2563eb" /><span class="tl-lg-text">成功</span>
+            <span class="tl-dot" style="background:#ef4444;margin-left:8px" /><span class="tl-lg-text">失败</span>
+          </div>
+        </div>
         <div class="trend-chart" v-if="trend.length">
-          <div v-for="(t, i) in trend" :key="i" class="trend-col" :title="`${hourLabel(t.hour)} 执行 ${t.total} / 失败 ${t.failed}`">
+          <div
+            v-for="(t, i) in trend" :key="i" class="trend-col"
+            :title="`${hourLabel(t.hour)}  共 ${t.total} 次  成功 ${t.success ?? (t.total - t.failed)}  失败 ${t.failed}`"
+          >
             <div class="bar-wrap">
-              <div
-                class="bar"
-                :style="{ height: `${(t.total / maxTrend) * 100}%`, animationDelay: `${i * 20}ms` }"
-              >
-                <div class="bar-fail" :style="{ height: `${t.total ? (t.failed / t.total) * 100 : 0}%` }" />
+              <!-- 成功柱（蓝，从底部）+ 失败柱（红，叠在上面） -->
+              <div class="bar-stack" :style="{ height: `${(t.total / maxTrend) * 100}%`, animationDelay: `${i * 20}ms` }">
+                <div class="bar-seg bar-seg--fail"
+                  :style="{ flex: t.failed }" v-if="t.failed" />
+                <div class="bar-seg bar-seg--ok"
+                  :style="{ flex: (t.success ?? t.total - t.failed) }" />
               </div>
             </div>
             <span class="bar-label" v-if="i % 3 === 0">{{ hourLabel(t.hour) }}</span>
             <span class="bar-label" v-else>&nbsp;</span>
           </div>
         </div>
-        <el-empty v-else description="近 24h 暂无执行记录" :image-size="60" />
+        <el-empty v-else description="近 24h 暂无整流记录" :image-size="60" />
       </div>
     </div>
 
@@ -615,18 +625,25 @@ onUnmounted(() => {
 .rm-val.err { color: #ef4444; }
 
 .trend-card { flex: 1; min-width: 360px; padding: 18px 22px; animation: slide-up 0.45s ease both; }
-.trend-chart { display: flex; align-items: flex-end; gap: 3px; height: 130px; }
+.trend-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.trend-legend { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--pf-text-dim); }
+.tl-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; display: inline-block; }
+.tl-lg-text { margin-left: 3px; }
+.trend-chart { display: flex; align-items: flex-end; gap: 3px; height: 120px; }
 .trend-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; }
 .bar-wrap { flex: 1; width: 100%; display: flex; align-items: flex-end; }
-.bar {
+/* 堆叠柱：失败在顶（红），成功在底（蓝），从底部生长 */
+.bar-stack {
   width: 100%; min-height: 2px;
-  background: linear-gradient(180deg, var(--pf-accent), rgba(79,70,229,0.35));
+  display: flex; flex-direction: column-reverse;
   border-radius: 3px 3px 0 0;
-  position: relative; display: flex; flex-direction: column; justify-content: flex-start;
+  overflow: hidden;
   animation: bar-grow 0.5s ease both; transform-origin: bottom;
 }
 @keyframes bar-grow { from { transform: scaleY(0); } to { transform: scaleY(1); } }
-.bar-fail { width: 100%; background: #ef4444; border-radius: 3px 3px 0 0; }
+.bar-seg { width: 100%; min-height: 1px; }
+.bar-seg--ok   { background: #2563eb; }
+.bar-seg--fail { background: #ef4444; }
 .bar-label { font-size: 9px; color: var(--pf-text-dim); margin-top: 4px; height: 12px; }
 
 /* 依赖 */
