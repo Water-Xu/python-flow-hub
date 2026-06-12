@@ -9,6 +9,7 @@ import asyncio
 import json
 import time
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -42,6 +43,7 @@ from app.core.mq.validation import validate_mq_config
 from app.models.api_portal import PublishedApi
 from app.models.block import Block
 from app.models.deployment import FlowDeployment
+from app.models.execution import FlowRun
 from app.models.flow import Flow, FlowEdge, FlowNode
 from app.schemas.api_portal import (
     ApiAuthResponse,
@@ -56,6 +58,11 @@ from app.schemas.api_portal import (
 
 router = APIRouter(tags=["api-portal"])
 settings = get_settings()
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 # 内存限流计数器：{api_id: deque[timestamp]}（dev local；生产用 Redis）
 _rate_counters: dict[str, deque[float]] = defaultdict(deque)
@@ -768,12 +775,30 @@ async def invoke_api(
     # k8s flow_mode 已部署时，直接调用 FlowRunner Pod /run，省去控制面逐块执行
     flow_runner_svc = await _resolve_flow_runner_service(session, flow_id)
     if flow_runner_svc:
+        # 创建 FlowRun 记录，用于 Dashboard 整流链路展示
+        run = FlowRun(
+            flow_id=flow_id, status="running",
+            dag_snapshot={"entry_node_id": effective_entry_node_id, "mode": "flow_runner"},
+            node_states={},
+        )
+        session.add(run)
+        await session.flush()
         start_ts = time.time()
         try:
             runner_result = await _call_flow_runner(flow_runner_svc, inputs, effective_entry_node_id)
             if runner_result.get("status") == "failed":
+                run.status = "failed"
+                run.finished_at = _utcnow()
+                api.total_calls += 1
+                api.error_calls += 1
+                await session.commit()
                 raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, runner_result.get("error", "flow_runner failed")[:500])
             elapsed = (time.time() - start_ts) * 1000
+            run.status = "succeeded"
+            run.finished_at = _utcnow()
+            # 保存 runner 返回的节点状态（若有）供 trace 使用
+            if runner_result.get("node_states"):
+                run.node_states = runner_result["node_states"]
             api.total_calls += 1
             api.success_calls += 1
             n = api.total_calls
@@ -781,13 +806,19 @@ async def invoke_api(
             await session.commit()
             outputs = runner_result.get("outputs", {})
             payload, encrypted = _maybe_encrypt_outputs(api, outputs)
-            return {"outputs": payload, "encrypted": encrypted, "status": "succeeded", "latency_ms": round(elapsed, 2)}
+            return {"outputs": payload, "encrypted": encrypted, "status": "succeeded",
+                    "flow_run_id": run.id, "latency_ms": round(elapsed, 2)}
         except BusinessException:
-            api.total_calls += 1
-            api.error_calls += 1
+            if run.status == "running":
+                run.status = "failed"
+                run.finished_at = _utcnow()
+                api.total_calls += 1
+                api.error_calls += 1
             await session.commit()
             raise
         except Exception as exc:
+            run.status = "failed"
+            run.finished_at = _utcnow()
             api.total_calls += 1
             api.error_calls += 1
             await session.commit()
@@ -808,6 +839,15 @@ async def invoke_api(
     # k8s 模式且该流程已部署时，复用常驻 invoke Service（warm Pod），消除每块 Job 冷启动
     block_service = await _resolve_block_services(session, flow_id)
 
+    # 创建 FlowRun 记录，用于 Dashboard 整流链路展示
+    run = FlowRun(
+        flow_id=flow_id, status="running",
+        dag_snapshot={"entry_node_id": effective_entry_node_id, "mode": "orchestrated"},
+        node_states={},
+    )
+    session.add(run)
+    await session.flush()
+
     start_ts = time.time()
     try:
         async def node_executor(node: dict, node_inputs: dict) -> dict:
@@ -821,6 +861,7 @@ async def invoke_api(
                 session, block_id=block.id, code=block.draft_code or "",
                 inputs=node_inputs, login_id=api.owner_login_id,
                 entrypoint=entrypoint,
+                flow_run_id=run.id,
                 invoke_service=block_service.get(block.id),
             )
             if record.status != "success":
@@ -829,11 +870,13 @@ async def invoke_api(
             return record.output if isinstance(record.output, dict) else {"value": record.output}
 
         async def checkpoint(node_id: str, status: str, output: dict) -> None:
-            pass
+            run.node_states = {**run.node_states, node_id: {"status": status, "output": output}}
 
         outputs = await run_flow(nodes, edges, inputs, node_executor, checkpoint)
         elapsed = (time.time() - start_ts) * 1000
 
+        run.status = "succeeded"
+        run.finished_at = _utcnow()
         api.total_calls += 1
         api.success_calls += 1
         # 滚动平均
@@ -847,15 +890,20 @@ async def invoke_api(
             "outputs": payload,
             "encrypted": encrypted,
             "status": "succeeded",
+            "flow_run_id": run.id,
             "latency_ms": round(elapsed, 2),
         }
 
     except BusinessException:
+        run.status = "failed"
+        run.finished_at = _utcnow()
         api.total_calls += 1
         api.error_calls += 1
         await session.commit()
         raise
     except Exception as exc:
+        run.status = "failed"
+        run.finished_at = _utcnow()
         api.total_calls += 1
         api.error_calls += 1
         await session.commit()
@@ -947,11 +995,23 @@ async def invoke_api_stream(
     # 非终止节点可复用常驻 invoke Service（终止节点需流式，仍走 Job 流式路径）
     block_service = await _resolve_block_services(session, flow_id)
 
+    # 创建 FlowRun 记录（流式调用），用于 Dashboard 整流链路展示
+    stream_run = FlowRun(
+        flow_id=flow_id, status="running",
+        dag_snapshot={"entry_node_id": effective_entry_node_id, "mode": "stream"},
+        node_states={},
+    )
+    session.add(stream_run)
+    await session.flush()
+    await session.commit()
+
     async def _event_stream() -> Any:
-        yield _sse("running", {"status": "running"})
+        yield _sse("running", {"status": "running", "flow_run_id": stream_run.id})
 
         # 降级：不执行流程，直接产出 fallback（前置已完成，无并发，安全操作 session）
         if api.degradation_enabled and api.degradation_fallback:
+            stream_run.status = "succeeded"
+            stream_run.finished_at = _utcnow()
             api.total_calls += 1
             api.success_calls += 1
             await session.commit()
@@ -978,6 +1038,7 @@ async def invoke_api_stream(
                 record = await execute_block(
                     session, block_id=block.id, code=block.draft_code or "",
                     inputs=node_inputs, login_id=api.owner_login_id, entrypoint=entrypoint,
+                    flow_run_id=stream_run.id,
                     invoke_service=block_service.get(block.id),
                 )
                 if record.status != "success":
@@ -1002,7 +1063,7 @@ async def invoke_api_stream(
             return final_output
 
         async def checkpoint(node_id: str, status: str, output: dict) -> None:
-            pass
+            stream_run.node_states = {**stream_run.node_states, node_id: {"status": status, "output": output}}
 
         async def _run() -> None:
             try:
@@ -1034,6 +1095,8 @@ async def invoke_api_stream(
 
         elapsed = (time.time() - start_ts) * 1000
         if error_detail is not None:
+            stream_run.status = "failed"
+            stream_run.finished_at = _utcnow()
             api.total_calls += 1
             api.error_calls += 1
             await session.commit()
@@ -1041,6 +1104,8 @@ async def invoke_api_stream(
             yield _sse("done", {})
             return
 
+        stream_run.status = "succeeded"
+        stream_run.finished_at = _utcnow()
         api.total_calls += 1
         api.success_calls += 1
         n = api.total_calls
@@ -1050,7 +1115,7 @@ async def invoke_api_stream(
         result_payload, encrypted = _maybe_encrypt_outputs(api, final_outputs)
         yield _sse("result", {
             "outputs": result_payload, "encrypted": encrypted,
-            "status": "succeeded", "latency_ms": round(elapsed, 2),
+            "status": "succeeded", "flow_run_id": stream_run.id, "latency_ms": round(elapsed, 2),
         })
         yield _sse("done", {})
 

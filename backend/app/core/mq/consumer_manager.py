@@ -327,11 +327,17 @@ class ConsumerManager:
         return await self._execute_flow(api_id, inputs)
 
     async def _execute_flow(self, api_id: str, inputs: dict) -> dict:
-        """收到一条 MQ 消息后驱动整条 Flow 编排（dev-local：control plane docker_executor）。
+        """收到一条 MQ 消息后驱动整条 Flow 编排。
 
-        每次取接口 active_flow_id 的最新 DAG，落 FlowRun，按拓扑序内存传递 output→input，
-        返回 {node_id: output}（作为回复 result）。
+        与 HTTP/API Portal 路径对齐：
+        1. flow_mode 已部署 → 直接调 FlowRunner Pod /run（携带 entry_node_id）
+        2. block_mode 已部署 → execute_block + invoke_service（复用常驻 warm Pod）
+        3. 未部署 → execute_block 走沙箱
+
+        每次取接口 active_flow_id 的最新 DAG，落 FlowRun，返回 outputs（供 MQ 回复使用）。
         """
+        from datetime import datetime, timezone
+
         from app.core.execution_service import execute_block
         from app.core.flow.flow_runner import run_flow
         from app.db import get_session_factory
@@ -343,10 +349,14 @@ class ConsumerManager:
         )
         from app.models.api_portal import PublishedApi
         from app.models.block import Block
+        from app.models.deployment import FlowDeployment
         from app.models.execution import FlowRun
         from app.models.flow import Flow, FlowEdge, FlowNode
         from pyflow_runtime.flow_dag import select_entry_subgraph
         from sqlalchemy import select
+
+        def _utcnow() -> datetime:
+            return datetime.now(timezone.utc)
 
         async with get_session_factory()() as session:
             api = await session.get(PublishedApi, api_id)
@@ -371,16 +381,51 @@ class ConsumerManager:
                 )).scalars().all()
             ]
 
-            # 指定了单一入口节点时，仅执行入口及其下游可达子图（快照亦存裁剪后图）
-            nodes, edges = select_entry_subgraph(
-                nodes, edges, flow_obj.entry_node_id if flow_obj else None
+            # 入口节点优先级：API 级 entry_node_id > Flow 级 entry_node_id（与 HTTP 路径对齐）
+            effective_entry_node_id = (
+                api.entry_node_id
+                or (flow_obj.entry_node_id if flow_obj else None)
             )
+            nodes, edges = select_entry_subgraph(nodes, edges, effective_entry_node_id)
 
             flow_run = FlowRun(
                 flow_id=flow_id, status="running",
-                dag_snapshot={"nodes": nodes, "edges": edges}, node_states={},
+                dag_snapshot={"entry_node_id": effective_entry_node_id, "mode": "mq"},
+                node_states={},
             )
             session.add(flow_run)
+            await session.flush()
+
+            # ── flow_mode 已部署：直接调 FlowRunner Pod（与 HTTP 路径对齐）──────────
+            flow_runner_svc = await self._resolve_flow_runner_svc(session, flow_id)
+            if flow_runner_svc:
+                try:
+                    runner_result = await self._call_runner(flow_runner_svc, inputs, effective_entry_node_id)
+                    if runner_result.get("status") == "failed":
+                        flow_run.status = "failed"
+                        flow_run.finished_at = _utcnow()
+                        await session.commit()
+                        err = runner_result.get("error", "flow_runner failed")[:500]
+                        raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, err)
+                    flow_run.status = "succeeded"
+                    flow_run.finished_at = _utcnow()
+                    if runner_result.get("node_states"):
+                        flow_run.node_states = runner_result["node_states"]
+                    await session.commit()
+                    return runner_result.get("outputs", {})
+                except BusinessException:
+                    if flow_run.status == "running":
+                        flow_run.status = "failed"
+                        flow_run.finished_at = _utcnow()
+                        await session.commit()
+                    raise
+                except Exception as exc:
+                    flow_run.status = "failed"
+                    flow_run.finished_at = _utcnow()
+                    await session.commit()
+                    raise BusinessException(PYFLOW_EXEC_SANDBOX_ERROR, str(exc)[:500]) from exc
+
+            # ── block_mode 或未部署：逐块执行（复用常驻 invoke Service）────────────
             await session.commit()
             await session.refresh(flow_run)
 
@@ -396,8 +441,11 @@ class ConsumerManager:
                 if missing:
                     raise BusinessException(PYFLOW_BLOCK_NOT_FOUND, next(iter(missing)))
 
+            # block_mode 部署时，复用常驻 invoke Service（warm Pod，免冷启动）
+            block_service = await self._resolve_block_svcs(session, flow_id)
+
             # MQ 触发的入口函数优先级：
-            # mq_config.entrypoint(全局) > entrypoint_map[node_id](节点级) > api.entrypoint(全局) > 节点配置 > "run"
+            # mq_config.entrypoint > entrypoint_map[node_id] > api.entrypoint > 节点配置 > "run"
             mq_entrypoint_override = (api.mq_config or {}).get("entrypoint")
             api_entrypoint_map = api.entrypoint_map or {}
 
@@ -419,6 +467,7 @@ class ConsumerManager:
                     session, block_id=block.id, code=block.draft_code or "",
                     inputs=node_inputs, login_id=api.owner_login_id,
                     flow_run_id=flow_run.id, entrypoint=entrypoint,
+                    invoke_service=block_service.get(block.id),
                 )
                 if record.status != "success":
                     detail = (record.stderr or "block execution failed").strip()[:500]
@@ -434,12 +483,81 @@ class ConsumerManager:
             try:
                 outputs = await run_flow(nodes, edges, inputs, node_executor, checkpoint)
                 flow_run.status = "succeeded"
+                flow_run.finished_at = _utcnow()
                 await session.commit()
             except Exception:
                 flow_run.status = "failed"
+                flow_run.finished_at = _utcnow()
                 await session.commit()
                 raise
             return outputs
+
+    async def _resolve_flow_runner_svc(self, session: Any, flow_id: str) -> str | None:
+        """检测是否存在 flow_mode 部署，返回 FlowRunner Service 名（与 HTTP 路径对齐）。"""
+        from app.config import get_settings
+        from app.models.deployment import FlowDeployment
+        from sqlalchemy import select
+
+        cfg = get_settings()
+        if cfg.deployment_mode != "k8s":
+            return None
+        deployment = (await session.execute(
+            select(FlowDeployment)
+            .where(
+                FlowDeployment.flow_id == flow_id,
+                FlowDeployment.status.in_(["running", "partially_degraded"]),
+                FlowDeployment.deployment_type == "flow_mode",
+            )
+            .order_by(FlowDeployment.updated_at.desc())
+        )).scalars().first()
+        if deployment is None:
+            return None
+        from app.core.k8s.orchestrator import _build_context
+        ctx = _build_context(deployment)
+        flow_short = flow_id.replace("-", "")[:8]
+        prefix = ctx.resource_prefix or f"flow-{flow_id[:8]}"
+        return f"{prefix}-fr-{flow_short}"[:63]
+
+    async def _call_runner(self, service: str, inputs: dict, entry_node_id: str | None) -> dict:
+        """调用 FlowRunner Pod /run 端点（与 HTTP 路径对齐）。"""
+        import httpx
+        from app.config import get_settings
+
+        cfg = get_settings()
+        url = f"http://{service}.{cfg.k8s_namespace}:{8000}/run"
+        payload: dict = {"inputs": inputs}
+        if entry_node_id:
+            payload["entry_node_id"] = entry_node_id
+        async with httpx.AsyncClient(timeout=3600) as client:
+            resp = await client.post(url, json=payload)
+            resp.raise_for_status()
+            return resp.json()
+
+    async def _resolve_block_svcs(self, session: Any, flow_id: str) -> dict[str, str]:
+        """查询 block_mode 已部署的常驻 invoke Service 映射 {block_id: svc_name}。"""
+        from app.config import get_settings
+        from app.models.deployment import FlowDeployment
+        from sqlalchemy import select
+
+        cfg = get_settings()
+        if cfg.deployment_mode != "k8s":
+            return {}
+        rows = (await session.execute(
+            select(FlowDeployment)
+            .where(
+                FlowDeployment.flow_id == flow_id,
+                FlowDeployment.status.in_(["running", "partially_degraded"]),
+                FlowDeployment.deployment_type == "block_mode",
+            )
+        )).scalars().all()
+        result: dict[str, str] = {}
+        for dep in rows:
+            if dep.block_id:
+                from app.core.k8s.orchestrator import _build_context
+                ctx = _build_context(dep)
+                prefix = ctx.resource_prefix or f"block-{dep.block_id[:8]}"
+                result[dep.block_id] = f"{prefix}-invoke"[:63]
+        return result
 
     # ── 重投 / 退避 / 死信发布 ──────────────────────────────────────────────────
 

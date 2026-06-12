@@ -221,26 +221,55 @@ const publishForm = ref({
 })
 const flowEntrypointsInfo = ref<FlowEntrypointsInfo | null>(null)
 const entrypointsLoading = ref(false)
+
+/** 流程是否需要手动指定入口节点（流程本身未配置 entry_node_id 且有多于一个节点） */
+const needsEntryNodeSelection = computed(() => {
+  const info = flowEntrypointsInfo.value
+  if (!info) return false
+  return !info.entry_node_id && info.nodes.length > 1
+})
+
+/** 流程只有 1 个节点时自动使用该节点作为入口 */
+const autoSingleEntry = computed(() => {
+  const info = flowEntrypointsInfo.value
+  if (!info || info.entry_node_id || info.nodes.length !== 1) return null
+  return info.nodes[0].node_id
+})
+
 watch(
   () => publishForm.value.flow_id,
   async (flowId) => {
-    if (!flowId) { flowEntrypointsInfo.value = null; return }
+    if (!flowId) { flowEntrypointsInfo.value = null; publishForm.value.entry_node_id = null; return }
     entrypointsLoading.value = true
     try {
       flowEntrypointsInfo.value = await apiPortalApi.getFlowEntrypoints(flowId)
+      // 重置手动选择（切换流程时清空）
+      publishForm.value.entry_node_id = null
     } catch { /* ignore */ } finally {
       entrypointsLoading.value = false
     }
   },
 )
+
 async function publish() {
   if (!publishForm.value.name || !publishForm.value.path || !publishForm.value.flow_id)
     return ElMessage.warning('请填写接口名称、路径和关联流程')
+
+  // 确定最终入口节点：手动选 > 自动单节点 > null（由流程级 entry_node_id 决定）
+  const effectiveEntryNodeId =
+    publishForm.value.entry_node_id ||
+    autoSingleEntry.value ||
+    null
+
+  // 流程有多个节点且未配置入口，必须手动选择
+  if (needsEntryNodeSelection.value && !effectiveEntryNodeId)
+    return ElMessage.warning('该流程包含多个节点，请选择一个入口节点')
+
   try {
     await apiPortalApi.publish({
       name: publishForm.value.name, description: publishForm.value.description,
       path: publishForm.value.path, tags: publishForm.value.tags,
-      flow_id: publishForm.value.flow_id, entry_node_id: publishForm.value.entry_node_id || null,
+      flow_id: publishForm.value.flow_id, entry_node_id: effectiveEntryNodeId,
       entrypoint: null, entrypoint_map: { ...publishForm.value.entrypoint_map },
     })
     publishDialogVisible.value = false
@@ -927,8 +956,61 @@ onMounted(load)
             <el-option v-for="f in flows" :key="f.id" :label="f.name" :value="f.id" />
           </el-select>
         </el-form-item>
+
+        <!-- 流程已配置入口节点 → 仅展示 -->
         <el-form-item v-if="flowEntrypointsInfo?.entry_node_id" label="入口节点">
-          <el-tag type="success">已由流程配置（{{ flowEntrypointsInfo?.nodes.find(n => n.node_id === flowEntrypointsInfo?.entry_node_id)?.block_name || publishForm.entry_node_id }}）</el-tag>
+          <el-tag type="success">
+            <el-icon style="margin-right:4px"><CircleCheck /></el-icon>
+            已由流程配置（{{ flowEntrypointsInfo.nodes.find(n => n.node_id === flowEntrypointsInfo!.entry_node_id)?.block_name || flowEntrypointsInfo.entry_node_id }}）
+          </el-tag>
+        </el-form-item>
+
+        <!-- 流程只有 1 个节点 → 自动选择，展示提示 -->
+        <el-form-item v-else-if="flowEntrypointsInfo && flowEntrypointsInfo.nodes.length === 1" label="入口节点">
+          <el-tag type="info">
+            <el-icon style="margin-right:4px"><Connection /></el-icon>
+            自动使用唯一节点（{{ flowEntrypointsInfo.nodes[0].block_name }}）
+          </el-tag>
+        </el-form-item>
+
+        <!-- 流程有多个节点且无流程级入口 → 必须手动选择 -->
+        <el-form-item
+          v-else-if="flowEntrypointsInfo && flowEntrypointsInfo.nodes.length > 1"
+          label="入口节点"
+          required
+        >
+          <div style="width:100%">
+            <el-select
+              v-model="publishForm.entry_node_id"
+              style="width:100%"
+              placeholder="请选择作为接口入口的节点（必填）"
+              :loading="entrypointsLoading"
+            >
+              <el-option
+                v-for="node in flowEntrypointsInfo.nodes"
+                :key="node.node_id"
+                :label="node.block_name"
+                :value="node.node_id"
+              >
+                <div style="display:flex;align-items:center;gap:8px">
+                  <el-icon><Connection /></el-icon>
+                  <span>{{ node.block_name }}</span>
+                  <span v-if="node.configured_entrypoint && node.configured_entrypoint !== 'run'" style="font-size:11px;color:#9ca3af">
+                    入口函数: {{ node.configured_entrypoint }}
+                  </span>
+                </div>
+              </el-option>
+            </el-select>
+            <div style="margin-top:6px;font-size:12px;color:#d97706;display:flex;align-items:center;gap:4px">
+              <el-icon><Warning /></el-icon>
+              该流程未配置默认入口节点，必须在此指定一个节点作为接口入口点
+            </div>
+          </div>
+        </el-form-item>
+
+        <!-- 正在加载节点信息 -->
+        <el-form-item v-else-if="entrypointsLoading" label="入口节点">
+          <span style="font-size:12px;color:#9ca3af">加载节点信息中...</span>
         </el-form-item>
       </el-form>
       <template #footer>
