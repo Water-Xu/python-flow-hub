@@ -50,6 +50,19 @@ class PublishedApi(Base, UUIDMixin, TimestampMixin):
     # MQ 触发配置（queue/exchange/routing_key/input_mapping/condition/reply/retry 等）；
     # 队列按接口 id 命名 flow.{api_id}.queue，消费者每条消息读 active_flow_id 跑整条 Flow。
     mq_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    # HTTP 触发配置（input_mapping：将请求体字段按 JSONPath 映射到 Flow 输入端口，留空=直接取 body.inputs）
+    http_config: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # ── 访问认证（HMAC-SHA256 请求签名） ──
+    # 开启后，所有 HTTP 调用必须携带正确的 HMAC 签名，否则拒绝并记录失败执行
+    auth_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 256-bit 签名密钥（64 位 hex）；仅服务端持有，调用方用同一密钥计算签名
+    auth_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    @property
+    def auth_secret_hint(self) -> str | None:
+        """密钥前 8 位指纹（用于 ApiResponse 展示，不暴露完整密钥）。"""
+        return self.auth_secret[:8] if self.auth_secret else None
 
     # ── 锁定（管理员操作） ──
     is_locked: Mapped[bool] = mapped_column(Boolean, default=False)

@@ -210,7 +210,7 @@ onMounted(load)
 .group-section {
   border-radius: 10px;
   overflow: hidden;
-  background: var(--pf-card-bg, #1a1d23);
+  background: var(--pf-card-bg, #e9effd);
   border: 1px solid var(--pf-border, rgba(255,255,255,.07));
   transition: box-shadow .2s;
 }

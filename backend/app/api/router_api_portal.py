@@ -25,6 +25,8 @@ from pyflow_runtime.flow_dag import select_entry_subgraph
 from app.core.mq.invocation_doc import build_mq_invocation
 from app.db import get_session
 from app.errors import (
+    PYFLOW_API_AUTH_FAILED,
+    PYFLOW_API_AUTH_REQUIRED,
     PYFLOW_API_DECRYPT_FAILED,
     PYFLOW_API_ENCRYPTION_REQUIRED,
     PYFLOW_API_LOCKED,
@@ -42,6 +44,8 @@ from app.models.block import Block
 from app.models.deployment import FlowDeployment
 from app.models.flow import Flow, FlowEdge, FlowNode
 from app.schemas.api_portal import (
+    ApiAuthResponse,
+    ApiAuthToggleRequest,
     ApiEncryptionKeyResponse,
     ApiEncryptionRequest,
     ApiMqConfigRequest,
@@ -75,18 +79,22 @@ def _check_rate_limit(api: PublishedApi) -> None:
 
 
 def _resolve_inputs(api: PublishedApi, body: dict[str, Any]) -> dict[str, Any]:
-    """根据接口加密配置，从请求体中解出明文 ``inputs``。
+    """根据接口加密配置与 HTTP input_mapping，从请求体中解出 Flow 明文输入。
 
     规则：
     - 接口要求强制加密（``require_encrypted_request``）但请求未带 ``encrypted=true`` → 拒绝。
-    - 请求声明 ``encrypted=true`` 且接口已开启加密且配置了密钥 → 解密 ``inputs``（字符串密文）。
-    - 其它情况 → 按明文取 ``inputs``（兼容未加密调用）。
+    - 请求声明 ``encrypted=true`` 且接口已开启加密且配置了密钥 → 解密 ``inputs``（字符串密文）；
+      加密模式不应用 input_mapping（调用方负责构造明文结构）。
+    - 接口配置了 ``http_config.input_mapping`` → 以整条请求体为源，按 JSONPath 映射到 Flow 输入端口。
+    - 其它情况 → 取 ``body.inputs``（兼容未加密、无 mapping 的传统调用）。
 
     :param api: 已发布接口
     :param body: 原始请求体
-    :return: 明文 inputs
+    :return: 明文 inputs（可直接传给 Flow）
     :raises BusinessException: 强制加密但未加密 / 解密失败
     """
+    from pyflow_runtime.input_mapper import map_inputs  # 局部导入避免循环
+
     is_encrypted = bool(body.get("encrypted"))
     if api.require_encrypted_request and not is_encrypted:
         raise BusinessException(PYFLOW_API_ENCRYPTION_REQUIRED, f"接口 {api.path} 要求加密调用")
@@ -99,6 +107,10 @@ def _resolve_inputs(api: PublishedApi, body: dict[str, Any]) -> dict[str, Any]:
         except ValueError as exc:
             raise BusinessException(PYFLOW_API_DECRYPT_FAILED, str(exc)) from exc
         return decrypted if isinstance(decrypted, dict) else {}
+    # HTTP input_mapping：以整条请求体为源，按 JSONPath 映射到 Flow 输入端口
+    http_mapping = (api.http_config or {}).get("input_mapping")
+    if http_mapping and isinstance(http_mapping, dict):
+        return map_inputs(body, http_mapping)
     return body.get("inputs", {})
 
 
@@ -361,6 +373,9 @@ async def update_api_mq_config(
     validate_mq_config(req.mq_config, req.trigger_type)
     api.trigger_type = req.trigger_type
     api.mq_config = req.mq_config if req.trigger_type in ("mq", "both") else {}
+    # HTTP 输入映射：仅保存 input_mapping 字段（白名单写入，避免存入无关字段）
+    http_input_mapping = req.http_config.get("input_mapping", {}) if req.http_config else {}
+    api.http_config = {"input_mapping": http_input_mapping} if http_input_mapping else {}
     await session.commit()
     await session.refresh(api)
     return api
@@ -656,11 +671,53 @@ async def invoke_api(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ):
-    """公开调用接口（无需登录态校验；限流 + 降级在此处理）。"""
+    """公开调用接口（无需登录态校验；限流 + 降级 + 访问认证在此处理）。"""
+    from app.core.auth_validator import validate_request as _validate_auth
+    from app.models.execution import ExecutionRecord
+    import secrets as _secrets
+
     api = await _get_api_by_path(session, path)
 
     if api.status != "active":
         raise BusinessException(PYFLOW_API_NOT_FOUND, f"接口 {path} 当前状态为 {api.status}")
+
+    # 读取原始请求体（供 auth 校验和后续解析共用）
+    raw_body: bytes = b""
+    try:
+        raw_body = await request.body()
+    except Exception:
+        pass
+
+    # 访问认证（HMAC-SHA256）：开启后无有效签名直接拒绝并记录失败执行
+    if api.auth_enabled and api.auth_secret:
+        ts_header = request.headers.get("X-FlowHub-Timestamp")
+        token_header = request.headers.get("X-FlowHub-Token")
+        ok, reason = _validate_auth(api.auth_secret, path, raw_body, ts_header, token_header)
+        if not ok:
+            import logging as _logging
+            _logging.getLogger("pyflow.auth").warning(
+                "接口 %s 认证失败：%s  ts=%s  ip=%s",
+                path, reason, ts_header, request.client.host if request.client else "unknown",
+            )
+            # 记录认证失败执行记录（显示在看板"最近执行"中）
+            fail_rec = ExecutionRecord(
+                id=_secrets.token_hex(18)[:36],
+                block_id=None,
+                flow_run_id=None,
+                login_id=request.client.host if request.client else "unknown",
+                status="auth_failed",
+                inputs={"path": path, "reason": reason},
+                output=None,
+                stdout="",
+                stderr=f"认证失败：{reason}",
+                error_code=41817,
+                duration_ms=0,
+            )
+            session.add(fail_rec)
+            api.total_calls += 1
+            api.error_calls += 1
+            await session.commit()
+            raise BusinessException(PYFLOW_API_AUTH_FAILED, reason)
 
     # 降级：返回 fallback
     if api.degradation_enabled and api.degradation_fallback:
@@ -674,10 +731,10 @@ async def invoke_api(
 
     body: dict[str, Any] = {}
     try:
-        body = await request.json()
+        body = json.loads(raw_body) if raw_body else {}
     except Exception:
-        pass
-    # 加密保护：按接口配置解出明文 inputs（强制加密但明文 / 解密失败将抛 BusinessException）
+        body = {}
+    # 加密保护 + HTTP input_mapping：从请求体解出明文 inputs
     inputs = _resolve_inputs(api, body)
 
     flow_id = api.active_flow_id or api.flow_id
@@ -1009,3 +1066,74 @@ async def invoke_api_stream(
     )
 
 
+# ── 访问认证（HMAC-SHA256）管理 ───────────────────────────────────────────────
+
+@router.post("/api/portal/apis/{api_id}/auth", response_model=ApiAuthResponse)
+async def generate_auth_secret(
+    api_id: str,
+    req: ApiAuthToggleRequest,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.EDITOR)),
+):
+    """生成/重置 HMAC 签名密钥，并控制开关。
+
+    首次调用或重置时生成新密钥（完整密钥仅此一次返回）。关闭时仅禁用校验，不清除密钥。
+    """
+    import secrets as _secrets
+    api = await _get_api(session, api_id)
+    if api.is_locked:
+        raise BusinessException(PYFLOW_API_LOCKED, f"接口 {api.name} 已锁定")
+    new_secret: str | None = None
+    if req.enabled and not api.auth_secret:
+        # 首次开启：生成 256-bit 密钥
+        new_secret = _secrets.token_hex(32)
+        api.auth_secret = new_secret
+    api.auth_enabled = req.enabled
+    await session.commit()
+    await session.refresh(api)
+    return ApiAuthResponse(
+        api_id=api.id,
+        auth_enabled=api.auth_enabled,
+        secret_hint=api.auth_secret[:8] if api.auth_secret else None,
+        auth_secret=new_secret,  # 仅首次返回完整密钥
+    )
+
+
+@router.post("/api/portal/apis/{api_id}/auth/rotate", response_model=ApiAuthResponse)
+async def rotate_auth_secret(
+    api_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.EDITOR)),
+):
+    """轮转 HMAC 签名密钥（旧密钥立即失效，返回新密钥）。"""
+    import secrets as _secrets
+    api = await _get_api(session, api_id)
+    if api.is_locked:
+        raise BusinessException(PYFLOW_API_LOCKED, f"接口 {api.name} 已锁定")
+    new_secret = _secrets.token_hex(32)
+    api.auth_secret = new_secret
+    api.auth_enabled = True
+    await session.commit()
+    await session.refresh(api)
+    return ApiAuthResponse(
+        api_id=api.id,
+        auth_enabled=True,
+        secret_hint=new_secret[:8],
+        auth_secret=new_secret,
+    )
+
+
+@router.get("/api/portal/apis/{api_id}/auth", response_model=ApiAuthResponse)
+async def get_auth_info(
+    api_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.EDITOR)),
+):
+    """查看访问认证状态（不返回完整密钥）。"""
+    api = await _get_api(session, api_id)
+    return ApiAuthResponse(
+        api_id=api.id,
+        auth_enabled=api.auth_enabled,
+        secret_hint=api.auth_secret[:8] if api.auth_secret else None,
+        auth_secret=None,
+    )

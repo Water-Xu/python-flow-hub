@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
@@ -8,7 +8,6 @@ import { authApi } from '@/api'
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
-const collapsed = ref(false)
 
 const isLoginPage = computed(() => route.path === '/login')
 
@@ -24,7 +23,6 @@ const menus = computed(() => {
     { path: '/executions', label: '执行历史', icon: 'Histogram' },
     { path: '/platform-settings', label: '平台设置', icon: 'Setting' },
   ]
-  // ADMIN 才显示角色管理
   if (authStore.isAdmin) {
     base.push({ path: '/rbac-admin', label: '角色管理', icon: 'UserFilled' })
   }
@@ -44,12 +42,9 @@ const roleBadge = computed(() => {
   return map[role] || (role ? role.toUpperCase() : 'DEV')
 })
 
-const roleBadgeType = computed(() => {
-  const role = authStore.user?.pyflowRole || ''
-  if (role === 'admin') return 'danger'
-  if (role === 'deployer') return 'warning'
-  if (role === 'editor') return 'primary'
-  return 'info'
+const userTooltip = computed(() => {
+  const name = authStore.user?.username || authStore.user?.loginId || 'dev'
+  return `${name} · ${roleBadge.value}`
 })
 
 async function handleLogout() {
@@ -59,7 +54,6 @@ async function handleLogout() {
   ElMessage.success('已退出登录')
 }
 
-// 应用启动时拉取当前用户信息
 onMounted(async () => {
   if (authStore.isLoggedIn && !authStore.user) {
     try {
@@ -75,60 +69,46 @@ onMounted(async () => {
 </script>
 
 <template>
-  <!-- 登录页不显示侧边栏 -->
   <div v-if="isLoginPage" class="login-wrap">
     <router-view />
   </div>
 
-  <!-- 主布局 -->
   <div v-else class="layout">
-    <aside class="sidebar" :class="{ collapsed }">
-      <div class="brand">
-        <span class="logo">⚡</span>
-        <transition name="fade">
-          <span v-if="!collapsed" class="brand-name">PyFlowHub</span>
-        </transition>
-      </div>
+    <aside class="sidebar">
+      <el-tooltip content="PyFlowHub" placement="right" effect="light" :show-after="300">
+        <div class="brand">
+          <span class="logo">⚡</span>
+        </div>
+      </el-tooltip>
 
       <nav class="nav">
-        <router-link
+        <el-tooltip
           v-for="m in menus"
           :key="m.path"
-          :to="m.path"
-          class="nav-item"
-          :class="{ active: route.path.startsWith(m.path) }"
+          :content="m.label"
+          placement="right"
+          effect="light"
+          :show-after="200"
         >
-          <el-icon><component :is="m.icon" /></el-icon>
-          <transition name="fade">
-            <span v-if="!collapsed" class="nav-label">{{ m.label }}</span>
-          </transition>
-        </router-link>
+          <router-link
+            :to="m.path"
+            class="nav-item"
+            :class="{ active: route.path.startsWith(m.path) }"
+          >
+            <el-icon :size="20"><component :is="m.icon" /></el-icon>
+          </router-link>
+        </el-tooltip>
       </nav>
 
-      <!-- 用户信息 + 登出 -->
-      <div class="user-section" v-if="authStore.isLoggedIn">
-        <transition name="fade">
-          <div v-if="!collapsed" class="user-info">
-            <div class="user-avatar">{{ userInitial }}</div>
-            <div class="user-detail">
-              <span class="user-name">{{ authStore.user?.username || authStore.user?.loginId || 'dev' }}</span>
-              <el-tag :type="roleBadgeType" size="small" effect="dark">{{ roleBadge }}</el-tag>
-            </div>
-          </div>
-        </transition>
-        <div class="user-avatar-mini" v-if="collapsed" :title="authStore.user?.username">
-          {{ userInitial }}
-        </div>
-        <div class="logout-btn" @click="handleLogout" title="退出登录">
-          <el-icon><SwitchButton /></el-icon>
-          <transition name="fade">
-            <span v-if="!collapsed">退出</span>
-          </transition>
-        </div>
-      </div>
-
-      <div class="collapse-btn" @click="collapsed = !collapsed">
-        <el-icon><component :is="collapsed ? 'Expand' : 'Fold'" /></el-icon>
+      <div v-if="authStore.isLoggedIn" class="user-section">
+        <el-tooltip :content="userTooltip" placement="right" effect="light" :show-after="200">
+          <div class="user-avatar">{{ userInitial }}</div>
+        </el-tooltip>
+        <el-tooltip content="退出登录" placement="right" effect="light" :show-after="200">
+          <button type="button" class="logout-btn" @click="handleLogout">
+            <el-icon :size="18"><SwitchButton /></el-icon>
+          </button>
+        </el-tooltip>
       </div>
     </aside>
 
@@ -144,137 +124,131 @@ onMounted(async () => {
 
 <style scoped>
 .login-wrap { height: 100vh; }
+
 .layout {
   display: flex;
   height: 100%;
 }
+
 .sidebar {
-  width: 220px;
+  width: 64px;
+  flex-shrink: 0;
   background: var(--pf-panel);
   border-right: 1px solid var(--pf-border);
-  box-shadow: var(--pf-shadow-sm);
   display: flex;
   flex-direction: column;
-  transition: width 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  align-items: center;
+  padding: 20px 0 24px;
+  gap: 8px;
 }
-.sidebar.collapsed { width: 68px; }
+
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 20px 18px;
-  font-size: 20px;
-  font-weight: 700;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  cursor: default;
+  transition: transform 0.25s ease, background 0.2s ease;
 }
-.logo { font-size: 24px; }
-.brand-name { color: var(--pf-text); letter-spacing: 0.2px; }
+.brand:hover {
+  background: var(--pf-panel-2);
+  transform: scale(1.05);
+}
+.logo {
+  font-size: 22px;
+  line-height: 1;
+}
+
 .nav {
   flex: 1;
-  padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 12px 0;
+  min-height: 0;
   overflow-y: auto;
 }
+
 .nav-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
-  border-radius: 10px;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
   color: var(--pf-text-dim);
   text-decoration: none;
-  transition: background 0.2s ease, color 0.2s ease, transform 0.15s ease;
+  transition: background 0.22s ease, color 0.22s ease, transform 0.18s ease, box-shadow 0.22s ease;
 }
 .nav-item:hover {
   background: var(--pf-panel-2);
   color: var(--pf-text);
-  transform: translateX(3px);
+  transform: scale(1.06);
 }
 .nav-item.active {
   background: var(--pf-accent-soft);
   color: var(--pf-accent);
-  box-shadow: inset 3px 0 0 var(--pf-accent);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.15);
 }
 
-/* 用户区 */
 .user-section {
-  border-top: 1px solid var(--pf-border);
-  padding: 10px 10px 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--pf-border);
+  width: calc(100% - 16px);
+  margin: 0 8px;
 }
-.user-info {
+
+.user-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #7c3aed, #4f46e5);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 6px;
-  border-radius: 10px;
-  background: var(--pf-panel-2);
-}
-.user-avatar {
-  width: 34px; height: 34px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #7c3aed, #4f46e5);
-  color: #fff;
-  font-size: 13px;
-  font-weight: 700;
-  display: flex; align-items: center; justify-content: center;
-  flex-shrink: 0;
-}
-.user-avatar-mini {
-  width: 34px; height: 34px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #7c3aed, #4f46e5);
-  color: #fff;
-  font-size: 13px;
-  font-weight: 700;
-  display: flex; align-items: center; justify-content: center;
-  margin: 0 auto;
+  justify-content: center;
   cursor: default;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
-.user-detail {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
+.user-avatar:hover {
+  transform: scale(1.06);
+  box-shadow: 0 4px 12px rgba(124, 58, 237, 0.25);
 }
-.user-name {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--pf-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+
 .logout-btn {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  font-size: 13px;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
   color: var(--pf-text-dim);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: background 0.2s ease, color 0.2s ease, transform 0.18s ease;
 }
 .logout-btn:hover {
-  background: rgba(239,68,68,0.08);
+  background: rgba(239, 68, 68, 0.08);
   color: #ef4444;
+  transform: scale(1.06);
 }
 
-.collapse-btn {
-  padding: 14px;
-  cursor: pointer;
-  color: var(--pf-text-dim);
-  border-top: 1px solid var(--pf-border);
-  transition: color 0.2s ease;
-}
-.collapse-btn:hover { color: var(--pf-accent); }
 .content {
   flex: 1;
   overflow: auto;
-  padding: 24px;
+  padding: 32px 40px;
+  background: var(--pf-bg);
 }
 </style>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { apiAdminApi, apiPortalApi, flowApi, type PublishedApi, type FlowEntrypointsInfo, type ApiEncryptionKey } from '@/api'
+import { apiAdminApi, apiPortalApi, flowApi, type PublishedApi, type FlowEntrypointsInfo, type ApiEncryptionKey, type ApiAuthKey } from '@/api'
 import MqMockTestDialog from '@/components/MqMockTestDialog.vue'
 import MqTriggerForm from '@/components/MqTriggerForm.vue'
 
@@ -311,6 +311,71 @@ const javaConfigSnippet = computed(() => {
   return `flowhub:\n  encryption:\n    enabled: true\n    path-keys:\n      ${path}: "${key}"`
 })
 
+// ── 访问认证（HMAC-SHA256） ────────────────────────────────────────────────────
+const authDialogVisible = ref(false)
+const authApi = ref<PublishedApi | null>(null)
+const authInfo = ref<ApiAuthKey | null>(null)
+const authLoading = ref(false)
+const authSaving = ref(false)
+const authEnabled = ref(false)
+
+async function openAuth(api: PublishedApi) {
+  if (api.is_locked) return ElMessage.warning('接口已锁定，无法修改认证配置')
+  authApi.value = api
+  authInfo.value = null
+  authEnabled.value = api.auth_enabled
+  authDialogVisible.value = true
+  authLoading.value = true
+  try {
+    authInfo.value = await apiPortalApi.getAuthInfo(api.id)
+    authEnabled.value = authInfo.value.auth_enabled
+  } catch { /* 读取失败不阻断 */ } finally {
+    authLoading.value = false
+  }
+}
+
+async function saveAuth() {
+  if (!authApi.value) return
+  authSaving.value = true
+  try {
+    const res = await apiPortalApi.updateAuth(authApi.value.id, { enabled: authEnabled.value })
+    authInfo.value = res
+    ElMessage.success(authEnabled.value ? '访问认证已开启' : '访问认证已关闭')
+    if (res.auth_secret) {
+      // 首次开启有新密钥，不关闭对话框，让用户复制
+    } else {
+      authDialogVisible.value = false
+    }
+    load()
+  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '保存失败') }
+  finally { authSaving.value = false }
+}
+
+async function rotateAuthSecret() {
+  if (!authApi.value) return
+  await ElMessageBox.confirm('轮转后旧密钥立即失效，调用方需同步更新为新密钥。确认轮转？', '轮转签名密钥', { type: 'warning' })
+  authSaving.value = true
+  try {
+    authInfo.value = await apiPortalApi.rotateAuthSecret(authApi.value.id)
+    ElMessage.success('签名密钥已轮转，请复制并更新到调用方')
+    load()
+  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '轮转失败') }
+  finally { authSaving.value = false }
+}
+
+async function copyAuthSecret() {
+  const key = authInfo.value?.auth_secret
+  if (!key) return ElMessage.warning('当前无可复制的完整密钥，请轮转或重新开启以获取')
+  try { await navigator.clipboard.writeText(key); ElMessage.success('密钥已复制') }
+  catch { ElMessage.warning('复制失败，请手动选择复制') }
+}
+
+const javaAuthSnippet = computed(() => {
+  const path = authApi.value?.path || 'your-api-path'
+  const secret = authInfo.value?.auth_secret || '（在此填入上方完整密钥）'
+  return `flowhub:\n  auth:\n    path-secrets:\n      ${path}: "${secret}"`
+})
+
 // ── 暂停 / 激活 ───────────────────────────────────────────────────────────────
 async function toggleStatus(api: PublishedApi) {
   if (api.is_locked) return ElMessage.warning('接口已锁定，无法操作')
@@ -345,6 +410,7 @@ function handleMoreCmd(cmd: string, row: PublishedApi) {
     case 'instances':  openInstances(row); break
     case 'version':    openVersionSwitch(row); break
     case 'encryption': openEncryption(row); break
+    case 'auth':       openAuth(row); break
     case 'lock':       row.is_locked ? unlockApi(row) : openLock(row); break
     case 'remarks':    openRemarksEdit(row); break
     case 'copy':       copyFlow(row); break
@@ -529,6 +595,10 @@ onMounted(load)
                   <el-dropdown-item divided command="encryption" icon="Lock">
                     <span>加密保护</span>
                     <el-tag v-if="row.encryption_enabled" size="small" type="success" effect="plain" style="margin-left:6px">已开启</el-tag>
+                  </el-dropdown-item>
+                  <el-dropdown-item command="auth" icon="Key">
+                    <span>访问认证</span>
+                    <el-tag v-if="row.auth_enabled" size="small" type="warning" effect="plain" style="margin-left:6px">已开启</el-tag>
                   </el-dropdown-item>
                   <el-dropdown-item command="lock" icon="Lock">
                     <span>{{ row.is_locked ? '解锁接口' : '锁定接口' }}</span>
@@ -876,7 +946,14 @@ onMounted(load)
         </div>
         <el-form-item v-if="encEnabled" label="强制加密" style="margin-top:12px">
           <el-switch v-model="encRequire" />
-          <span class="dim" style="margin-left:8px">开启后拒绝明文请求</span>
+          <span class="dim" style="margin-left:8px">开启后拒绝明文请求，仅接受加密 inputs</span>
+        </el-form-item>
+        <el-form-item v-if="encEnabled" label="作用说明" style="margin-top:4px">
+          <p class="dim" style="margin:0;line-height:1.7">
+            调用方将请求体 <code>inputs</code> 字段用 <strong>AES-256-GCM</strong> 加密后发送；<br>
+            服务端用接口密钥解密后注入流程，响应 <code>outputs</code> 同样加密返回。<br>
+            请求格式：<code>{"inputs": "&lt;base64密文&gt;", "encrypted": true}</code>
+          </p>
         </el-form-item>
         <template v-if="encryptionInfo?.key_hint">
           <el-divider />
@@ -884,23 +961,96 @@ onMounted(load)
             <div class="key-hint-row">
               <span class="dim">密钥指纹：</span>
               <code>{{ encryptionInfo.key_hint }}...</code>
-              <el-button text size="small" @click="rotateKey" :loading="encryptionSaving">轮转密钥</el-button>
+              <el-tag size="small" type="success" effect="plain" style="margin-left:4px">已配置</el-tag>
+              <el-button text size="small" @click="rotateKey" :loading="encryptionSaving" style="margin-left:auto">轮转密钥</el-button>
             </div>
             <template v-if="encryptionInfo.encryption_key">
+              <div class="key-label">完整密钥（复制后配置到调用方，仅此一次可见）</div>
               <el-input :value="encryptionInfo.encryption_key" readonly class="key-input" size="small">
                 <template #append>
                   <el-button @click="copyKey">复制</el-button>
                 </template>
               </el-input>
             </template>
+            <template v-else>
+              <el-alert type="warning" :closable="false" show-icon style="margin-top:8px"
+                title="密钥已存在但不可见" description="出于安全考虑，完整密钥仅在生成/轮转时展示一次。如需更新，请点击「轮转密钥」。" />
+            </template>
             <el-divider content-position="left"><span class="dim" style="font-size:12px">Java 调用方配置示例</span></el-divider>
             <pre class="code-block">{{ javaConfigSnippet }}</pre>
           </div>
+        </template>
+        <template v-else-if="encEnabled">
+          <el-divider />
+          <el-alert type="info" :closable="false" show-icon
+            title="首次开启加密"
+            description="点击「保存」后系统自动生成 256-bit 密钥，请妥善保存（仅生成时可见一次），配置到 Java 调用方的 flowhub.encryption.path-keys 中。" />
         </template>
       </div>
       <template #footer>
         <el-button @click="encryptionDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="encryptionSaving" @click="saveEncryption">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ─── 访问认证 Dialog ──────────────────────────────────────────────────── -->
+    <el-dialog v-model="authDialogVisible" :title="`访问认证 - ${authApi?.name || ''}`" width="580px" destroy-on-close>
+      <div v-loading="authLoading">
+        <div class="enc-status-row">
+          <div class="enc-status-label">HMAC-SHA256 签名认证</div>
+          <el-switch v-model="authEnabled" active-text="开启" inactive-text="关闭" />
+        </div>
+        <el-form-item v-if="authEnabled" label="作用说明" style="margin-top:12px">
+          <p class="dim" style="margin:0;line-height:1.7">
+            开启后，所有 HTTP 调用必须携带正确的 HMAC 签名；<br>
+            未携带或签名不匹配的请求将被<strong>拒绝</strong>，并在首页「最近执行」中记录失败日志。<br>
+            调用方需在请求头加入：<code>X-FlowHub-Timestamp</code>（Unix 毫秒）和 <code>X-FlowHub-Token</code>（签名 hex）。
+          </p>
+        </el-form-item>
+        <template v-if="authInfo?.secret_hint">
+          <el-divider />
+          <div class="key-section">
+            <div class="key-hint-row">
+              <span class="dim">密钥指纹：</span>
+              <code>{{ authInfo.secret_hint }}...</code>
+              <el-tag size="small" type="warning" effect="plain" style="margin-left:4px">已配置</el-tag>
+              <el-button text size="small" @click="rotateAuthSecret" :loading="authSaving" style="margin-left:auto">轮转密钥</el-button>
+            </div>
+            <template v-if="authInfo.auth_secret">
+              <div class="key-label">完整签名密钥（64 位 hex，复制后配置到调用方，仅此一次可见）</div>
+              <el-input :value="authInfo.auth_secret" readonly class="key-input" size="small">
+                <template #append>
+                  <el-button @click="copyAuthSecret">复制</el-button>
+                </template>
+              </el-input>
+            </template>
+            <template v-else>
+              <el-alert type="warning" :closable="false" show-icon style="margin-top:8px"
+                title="密钥已存在但不可见" description="出于安全考虑，完整密钥仅在生成/轮转时展示一次。如需更新，请点击「轮转密钥」。" />
+            </template>
+            <el-divider content-position="left"><span class="dim" style="font-size:12px">Java 调用方配置（Spring Boot application.yml）</span></el-divider>
+            <pre class="code-block">{{ javaAuthSnippet }}</pre>
+            <el-divider content-position="left"><span class="dim" style="font-size:12px">签名规范</span></el-divider>
+            <pre class="code-block" style="font-size:11px">待签字符串 = "{timestamp_ms}\n{path}\n{body_md5}"
+签名 = HMAC-SHA256(secret_hex, 待签字符串)
+请求头：
+  X-FlowHub-Timestamp: &lt;Unix 毫秒&gt;
+  X-FlowHub-Token:     &lt;签名 hex 小写&gt;
+
+有效窗口：±5 分钟（防重放）</pre>
+          </div>
+        </template>
+        <template v-else-if="authEnabled">
+          <el-divider />
+          <el-alert type="info" :closable="false" show-icon
+            title="首次开启访问认证"
+            description="点击「保存」后系统自动生成 256-bit 签名密钥，请妥善保存（仅生成时可见一次），配置到 Java 调用方的 flowhub.auth.path-secrets 中。" />
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="authDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="authSaving" @click="saveAuth">保存</el-button>
+        <el-button v-if="authInfo?.secret_hint" @click="authDialogVisible = false" type="success">已复制，关闭</el-button>
       </template>
     </el-dialog>
 
@@ -976,6 +1126,7 @@ onMounted(load)
         :api-id="triggerApi.id"
         :trigger-type="triggerApi.trigger_type"
         :mq-config="triggerApi.mq_config"
+        :http-config="triggerApi.http_config"
       />
       <template #footer>
         <el-button @click="triggerDialogVisible = false">取消</el-button>
@@ -1369,6 +1520,7 @@ onMounted(load)
 .enc-status-label { font-weight: 600; font-size: 14px; }
 .key-section { display: flex; flex-direction: column; gap: 8px; }
 .key-hint-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.key-label { font-size: 11px; color: var(--pf-text-dim); margin-top: 4px; }
 .key-input :deep(.el-input__inner) { font-family: monospace; font-size: 11px; }
 .code-block {
   background: rgba(0,0,0,.25);

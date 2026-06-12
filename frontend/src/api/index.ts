@@ -248,6 +248,7 @@ export interface PublishedApi {
   status: string
   trigger_type: string
   mq_config: Record<string, any>
+  http_config: Record<string, any>
   entry_node_id: string | null
   entrypoint: string | null
   entrypoint_map: Record<string, string>
@@ -262,6 +263,9 @@ export interface PublishedApi {
   degradation_fallback: Record<string, any>
   encryption_enabled: boolean
   require_encrypted_request: boolean
+  // 访问认证（HMAC-SHA256）
+  auth_enabled: boolean
+  auth_secret_hint: string | null
   total_calls: number
   success_calls: number
   error_calls: number
@@ -283,6 +287,15 @@ export interface ApiEncryptionKey {
   encryption_key: string | null
   /** 密钥指纹（前 8 位），用于核对而不暴露完整密钥 */
   key_hint: string | null
+}
+
+export interface ApiAuthKey {
+  api_id: string
+  auth_enabled: boolean
+  /** 密钥前 8 位指纹 */
+  secret_hint: string | null
+  /** 完整 64 位 hex 密钥，仅首次开启/轮转时返回 */
+  auth_secret: string | null
 }
 
 export interface FlowEntrypointsInfo {
@@ -323,8 +336,8 @@ export const apiPortalApi = {
   pause: (id: string) => client.post(`/api/portal/apis/${id}/pause`),
   activate: (id: string) => client.post(`/api/portal/apis/${id}/activate`),
   getDocs: (id: string) => client.get<any, any>(`/api/portal/apis/${id}/docs`),
-  /** 配置接口触发方式（http/mq/both）+ MQ 触发参数（队列/条件/映射/回复/重试，决策 3.1 Flow 级） */
-  updateMq: (id: string, data: { trigger_type: string; mq_config: Record<string, any> }) =>
+  /** 配置接口触发方式（http/mq/both）+ MQ 触发参数 + HTTP 输入映射（决策 3.1 Flow 级） */
+  updateMq: (id: string, data: { trigger_type: string; mq_config: Record<string, any>; http_config?: Record<string, any> }) =>
     client.put<any, PublishedApi>(`/api/portal/apis/${id}/mq`, data),
   /** 开启/关闭接口加密保护（AES-256-GCM）；首次开启返回新生成的密钥 */
   updateEncryption: (
@@ -337,6 +350,15 @@ export const apiPortalApi = {
   /** 查看接口当前完整密钥（用于配置调用方） */
   getEncryptionKey: (id: string) =>
     client.get<any, ApiEncryptionKey>(`/api/portal/apis/${id}/encryption/key`),
+  /** 开启/关闭访问认证（HMAC-SHA256）；首次开启自动生成密钥，返回完整密钥（仅此一次） */
+  updateAuth: (id: string, data: { enabled: boolean }) =>
+    client.post<any, ApiAuthKey>(`/api/portal/apis/${id}/auth`, data),
+  /** 轮转 HMAC 签名密钥（旧密钥立即失效，返回新密钥） */
+  rotateAuthSecret: (id: string) =>
+    client.post<any, ApiAuthKey>(`/api/portal/apis/${id}/auth/rotate`),
+  /** 查看访问认证状态（不返回完整密钥） */
+  getAuthInfo: (id: string) =>
+    client.get<any, ApiAuthKey>(`/api/portal/apis/${id}/auth`),
   copyFlow: (flowId: string) => client.post<any, any>(`/api/flows/${flowId}/copy`),
   /** 更新接口开发者文档（备注、示例请求/响应、变更日志） */
   updateRemarks: (

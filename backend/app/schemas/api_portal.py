@@ -29,11 +29,13 @@ class PublishApiRequest(BaseModel):
 
 
 class ApiMqConfigRequest(BaseModel):
-    """更新接口触发方式与 MQ 触发配置（决策 3.1 Flow 级）。"""
+    """更新接口触发方式、MQ 触发配置与 HTTP 触发配置（决策 3.1 Flow 级）。"""
 
     # http：仅同步 HTTP；mq：仅 MQ 异步触发；both：两者皆可
     trigger_type: Literal["http", "mq", "both"]
     mq_config: dict[str, Any] = {}
+    # HTTP 触发配置；input_mapping：{目标字段名: JSONPath 来源路径}，留空=取 body.inputs
+    http_config: dict[str, Any] = {}
 
 
 class ApiPolicyRequest(BaseModel):
@@ -91,6 +93,7 @@ class ApiResponse(BaseModel):
     status: str
     trigger_type: str
     mq_config: dict
+    http_config: dict = {}
     entry_node_id: str | None
     entrypoint: str | None
     entrypoint_map: dict
@@ -106,6 +109,9 @@ class ApiResponse(BaseModel):
     # 加密保护（不含密钥本身，密钥仅通过 /encryption/key 单独获取）
     encryption_enabled: bool
     require_encrypted_request: bool
+    # 访问认证（HMAC-SHA256）
+    auth_enabled: bool = False
+    auth_secret_hint: str | None = None  # 密钥前 8 位，用于确认是否已配置
     total_calls: int
     success_calls: int
     error_calls: int
@@ -125,6 +131,21 @@ class ApiResponse(BaseModel):
     def invoke_path(self) -> str:
         """对外完整可调路径（含网关前缀），供门户卡片/复制直接使用。"""
         return f"{get_settings().public_api_prefix}/api/public/{self.path}"
+
+
+class ApiAuthResponse(BaseModel):
+    """访问认证密钥响应（密钥仅生成/轮转时可见）。"""
+
+    api_id: str
+    auth_enabled: bool
+    secret_hint: str | None = None   # 前 8 字符
+    auth_secret: str | None = None   # 完整 64 字符，仅新生成时返回
+
+
+class ApiAuthToggleRequest(BaseModel):
+    """开启/关闭访问认证。"""
+
+    enabled: bool
 
 
 class ApiRemarksRequest(BaseModel):

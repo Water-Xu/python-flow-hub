@@ -12,6 +12,8 @@ const props = defineProps<{
   apiId: string
   triggerType?: string
   mqConfig?: Record<string, any>
+  /** HTTP 触发配置（input_mapping 等） */
+  httpConfig?: Record<string, any>
   /** 当前 API 关联 flow 的可用入口函数列表（由父组件传入，空则不展示选择器） */
   availableEntrypoints?: string[]
   /** API 级 entrypoint（只读展示，用于提示用户当前 API 绑定的函数） */
@@ -41,10 +43,13 @@ const form = ref({
   carry_fields: [] as CarryField[],
   // MQ 专属入口函数覆盖（优先级高于 API 级 entrypoint）
   entrypoint: '' as string,
+  // HTTP 触发：以整条请求体为源的输入映射（与 MQ input_mapping 独立）
+  http_input_mapping: '{}',
 })
 
 function reset() {
   const cfg = props.mqConfig || {}
+  const hcfg = props.httpConfig || {}
   form.value = {
     trigger_type: props.triggerType || 'http',
     exchange: cfg.exchange || '',
@@ -61,6 +66,7 @@ function reset() {
     retry_delay_ms: cfg.retry_delay_ms ?? 5000,
     carry_fields: (cfg.carry_fields || []).map((f: any) => ({ ...f })),
     entrypoint: cfg.entrypoint || '',
+    http_input_mapping: JSON.stringify(hcfg.input_mapping || {}, null, 2),
   }
 }
 
@@ -69,14 +75,24 @@ const hasMqEntrypointChoice = computed(
   () => (props.availableEntrypoints?.length ?? 0) > 1,
 )
 
-// 父组件每次打开不同接口会整体替换 mqConfig（引用变化即可触发），无需 deep 深度遍历
-watch(() => [props.apiId, props.triggerType, props.mqConfig], reset, { immediate: true })
+// 父组件每次打开不同接口会整体替换 mqConfig/httpConfig（引用变化即可触发），无需 deep 深度遍历
+watch(() => [props.apiId, props.triggerType, props.mqConfig, props.httpConfig], reset, { immediate: true })
 
 const mqEnabled = computed(() => form.value.trigger_type !== 'http')
+const httpEnabled = computed(() => form.value.trigger_type !== 'mq')
 
 const inputMappingValid = computed(() => {
   try {
     const v = JSON.parse(form.value.input_mapping || '{}')
+    return v && typeof v === 'object' && !Array.isArray(v)
+  } catch {
+    return false
+  }
+})
+
+const httpInputMappingValid = computed(() => {
+  try {
+    const v = JSON.parse(form.value.http_input_mapping || '{}')
     return v && typeof v === 'object' && !Array.isArray(v)
   } catch {
     return false
@@ -117,10 +133,19 @@ function removeCarryField(idx: number) {
   form.value.carry_fields.splice(idx, 1)
 }
 
-/** 收集为后端 updateMq 入参；纯 http 触发时 mq_config 为空对象。 */
-function collect(): { trigger_type: string; mq_config: Record<string, any> } {
+/** 收集为后端 updateMq 入参；包含 trigger_type、mq_config 和 http_config。 */
+function collect(): { trigger_type: string; mq_config: Record<string, any>; http_config: Record<string, any> } {
+  // HTTP input_mapping（独立于 MQ，始终收集）
+  let http_input_mapping: object = {}
+  try {
+    http_input_mapping = JSON.parse(form.value.http_input_mapping || '{}')
+  } catch {
+    http_input_mapping = {}
+  }
+  const http_config: Record<string, any> = { input_mapping: http_input_mapping }
+
   if (!mqEnabled.value) {
-    return { trigger_type: 'http', mq_config: {} }
+    return { trigger_type: 'http', mq_config: {}, http_config }
   }
   let input_mapping: object = {}
   try {
@@ -147,7 +172,7 @@ function collect(): { trigger_type: string; mq_config: Record<string, any> } {
   if (form.value.entrypoint) {
     mq_config.entrypoint = form.value.entrypoint
   }
-  return { trigger_type: form.value.trigger_type, mq_config }
+  return { trigger_type: form.value.trigger_type, mq_config, http_config }
 }
 
 defineExpose({ collect, errors, reset })
@@ -164,9 +189,36 @@ defineExpose({ collect, errors, reset })
       <span class="dim" style="margin-left:10px">MQ 触发会消费 flow.{{ apiId }}.queue 驱动整条流程</span>
     </el-form-item>
 
+    <!-- HTTP 输入映射（trigger_type 为 http 或 both 时显示） -->
+    <transition name="mq-fade">
+      <div v-if="httpEnabled">
+        <el-divider content-position="left">HTTP 输入映射</el-divider>
+        <el-form-item label="HTTP input_mapping" :class="{ 'has-err': !httpInputMappingValid }">
+          <el-input
+            v-model="form.http_input_mapping"
+            type="textarea"
+            :rows="4"
+            placeholder='{"flow字段名": "$.请求体路径"}'
+            style="font-family:monospace;font-size:12px"
+          />
+          <p class="dim" :class="{ 'err-text': !httpInputMappingValid }">
+            {{ httpInputMappingValid
+              ? 'JSON 格式：{目标字段名: JSONPath 来源路径}；留空 = 直接取请求体 inputs 字段（兼容旧调用方）'
+              : '⚠ 当前不是合法 JSON 对象' }}
+          </p>
+        </el-form-item>
+        <el-alert type="info" :closable="false" show-icon style="margin-bottom:12px;font-size:12px">
+          <template #default>
+            配置后，调用方可直接发送<code style="margin:0 4px">{"orderId":"123","amount":100}</code>，
+            无需包裹 <code>inputs</code> 字段；服务端按映射规则提取后传入流程。
+          </template>
+        </el-alert>
+      </div>
+    </transition>
+
     <transition name="mq-fade">
       <div v-if="mqEnabled">
-        <el-divider content-position="left">基础</el-divider>
+        <el-divider content-position="left">MQ 基础</el-divider>
         <el-form-item label="Queue（主队列）">
           <el-input v-model="form.queue" :placeholder="`flow.${apiId}.queue`" />
         </el-form-item>
@@ -221,8 +273,8 @@ defineExpose({ collect, errors, reset })
           <p class="dim">命中才执行，未命中直接 ack 跳过</p>
         </el-form-item>
 
-        <el-divider content-position="left">输入映射</el-divider>
-        <el-form-item label="input_mapping" :class="{ 'has-err': !inputMappingValid }">
+        <el-divider content-position="left">MQ 输入映射</el-divider>
+        <el-form-item label="MQ input_mapping" :class="{ 'has-err': !inputMappingValid }">
           <el-input
             v-model="form.input_mapping"
             type="textarea"

@@ -29,6 +29,8 @@ PYFLOW_API_RATE_LIMITED = (41812, "lang.pyflow.api.rate_limited")
 PYFLOW_API_PATH_EXISTS = (41813, "lang.pyflow.api.path_exists")
 PYFLOW_API_ENCRYPTION_REQUIRED = (41814, "lang.pyflow.api.encryption_required")
 PYFLOW_API_DECRYPT_FAILED = (41815, "lang.pyflow.api.decrypt_failed")
+PYFLOW_API_AUTH_REQUIRED = (41816, "lang.pyflow.api.auth_required")
+PYFLOW_API_AUTH_FAILED = (41817, "lang.pyflow.api.auth_failed")
 
 # 系统异常 5xxxx（网关统一友好提示）—— pyflow 子区间 51800~51899
 PYFLOW_EXEC_TIMEOUT = (51801, "lang.pyflow.exec.timeout")
