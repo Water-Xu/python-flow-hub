@@ -111,26 +111,40 @@ async def _exec_trend(session: AsyncSession, since: datetime) -> list[dict]:
 
 async def _recent_executions(session: AsyncSession, limit: int = 15) -> list[dict]:
     rows = (await session.execute(
-        select(ExecutionRecord).order_by(ExecutionRecord.created_at.desc()).limit(limit)
-    )).scalars().all()
+        select(ExecutionRecord, Block.name.label("block_name"))
+        .outerjoin(Block, ExecutionRecord.block_id == Block.id)
+        .order_by(ExecutionRecord.created_at.desc())
+        .limit(limit)
+    )).all()
     return [{
-        "id": r.id, "block_id": r.block_id, "flow_run_id": r.flow_run_id,
-        "status": r.status, "duration_ms": r.duration_ms, "error_code": r.error_code,
-        "login_id": r.login_id, "created_at": r.created_at,
+        "id": r.ExecutionRecord.id,
+        "block_id": r.ExecutionRecord.block_id,
+        "block_name": r.block_name or "",
+        "flow_run_id": r.ExecutionRecord.flow_run_id,
+        "status": r.ExecutionRecord.status,
+        "duration_ms": r.ExecutionRecord.duration_ms,
+        "error_code": r.ExecutionRecord.error_code,
+        "login_id": r.ExecutionRecord.login_id,
+        "created_at": r.ExecutionRecord.created_at,
     } for r in rows]
 
 
 async def _recent_flow_runs(session: AsyncSession, limit: int = 12) -> list[dict]:
     rows = (await session.execute(
-        select(FlowRun).order_by(FlowRun.created_at.desc()).limit(limit)
-    )).scalars().all()
+        select(FlowRun, Flow.name.label("flow_name"))
+        .outerjoin(Flow, FlowRun.flow_id == Flow.id)
+        .order_by(FlowRun.created_at.desc())
+        .limit(limit)
+    )).all()
     out = []
-    for r in rows:
+    for row in rows:
+        r = row.FlowRun
         states = r.node_states or {}
         done = sum(1 for s in states.values() if isinstance(s, dict) and s.get("status") == "done")
         skipped = sum(1 for s in states.values() if isinstance(s, dict) and s.get("status") == "skipped")
         out.append({
-            "id": r.id, "flow_id": r.flow_id, "flow_deployment_id": r.flow_deployment_id,
+            "id": r.id, "flow_id": r.flow_id, "flow_name": row.flow_name or "",
+            "flow_deployment_id": r.flow_deployment_id,
             "status": r.status, "node_total": len(states), "node_done": done,
             "node_skipped": skipped, "owner_pod": r.owner_pod,
             "created_at": r.created_at, "finished_at": r.finished_at,
@@ -170,10 +184,11 @@ async def flow_run_trace(
     session: AsyncSession = Depends(get_session),
     _: str = Depends(require_role(Role.VIEWER)),
 ):
-    """单次整流链路 trace：按节点状态还原执行步骤（成功/跳过/失败 + 输出）。"""
+    """单次整流链路 trace：按节点状态还原执行步骤（成功/跳过/失败 + 输出），含块名称与完整日志。"""
     run = await session.get(FlowRun, run_id)
     if run is None:
         raise BusinessException(PYFLOW_FLOW_NOT_FOUND, run_id)
+    flow = await session.get(Flow, run.flow_id) if run.flow_id else None
     states = run.node_states or {}
     steps = []
     for node_id, st in states.items():
@@ -187,24 +202,90 @@ async def flow_run_trace(
             "output": st.get("output"),
             "error": st.get("error"),
         })
-    # 单块执行明细（关联 flow_run_id）
+    # 单块执行明细（关联 flow_run_id），含块名称与完整 stdout/stderr
     recs = (await session.execute(
-        select(ExecutionRecord).where(ExecutionRecord.flow_run_id == run_id)
+        select(ExecutionRecord, Block.name.label("block_name"))
+        .outerjoin(Block, ExecutionRecord.block_id == Block.id)
+        .where(ExecutionRecord.flow_run_id == run_id)
         .order_by(ExecutionRecord.created_at)
-    )).scalars().all()
+    )).all()
     return {
         "run": {
-            "id": run.id, "flow_id": run.flow_id, "status": run.status,
-            "owner_pod": run.owner_pod, "fence_token": run.fence_token,
+            "id": run.id, "flow_id": run.flow_id, "flow_name": flow.name if flow else "",
+            "status": run.status, "owner_pod": run.owner_pod,
+            "fence_token": run.fence_token,
             "created_at": run.created_at, "finished_at": run.finished_at,
         },
         "steps": steps,
         "executions": [{
-            "id": r.id, "block_id": r.block_id, "status": r.status,
-            "duration_ms": r.duration_ms, "stderr": (r.stderr or "")[:500],
-            "created_at": r.created_at,
+            "id": r.ExecutionRecord.id,
+            "block_id": r.ExecutionRecord.block_id,
+            "block_name": r.block_name or "",
+            "status": r.ExecutionRecord.status,
+            "duration_ms": r.ExecutionRecord.duration_ms,
+            "inputs": r.ExecutionRecord.inputs,
+            "output": r.ExecutionRecord.output,
+            "stdout": r.ExecutionRecord.stdout or "",
+            "stderr": r.ExecutionRecord.stderr or "",
+            "created_at": r.ExecutionRecord.created_at,
         } for r in recs],
     }
+
+
+@router.get("/exec/{execution_id}")
+async def exec_detail(
+    execution_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.VIEWER)),
+):
+    """单次执行详情：入参、出参、完整 stdout/stderr；若关联整流则附加链路 trace。"""
+    r = await session.get(ExecutionRecord, execution_id)
+    if r is None:
+        raise BusinessException(PYFLOW_FLOW_NOT_FOUND, execution_id)
+    block = await session.get(Block, r.block_id) if r.block_id else None
+    result: dict = {
+        "id": r.id,
+        "block_id": r.block_id,
+        "block_name": block.name if block else "",
+        "status": r.status,
+        "duration_ms": r.duration_ms,
+        "error_code": r.error_code,
+        "login_id": r.login_id,
+        "inputs": r.inputs,
+        "output": r.output,
+        "stdout": r.stdout or "",
+        "stderr": r.stderr or "",
+        "created_at": r.created_at,
+        "flow_run_id": r.flow_run_id,
+        "flow_run": None,
+    }
+    if r.flow_run_id:
+        run = await session.get(FlowRun, r.flow_run_id)
+        if run:
+            flow = await session.get(Flow, run.flow_id) if run.flow_id else None
+            states = run.node_states or {}
+            steps = [
+                {
+                    "node_id": node_id,
+                    "status": st.get("status", "unknown"),
+                    "hit_port": st.get("hit_port"),
+                    "has_output": "output" in st,
+                    "output": st.get("output"),
+                    "error": st.get("error"),
+                }
+                for node_id, st in states.items()
+                if isinstance(st, dict)
+            ]
+            result["flow_run"] = {
+                "id": run.id,
+                "flow_id": run.flow_id,
+                "flow_name": flow.name if flow else "",
+                "status": run.status,
+                "steps": steps,
+                "created_at": run.created_at,
+                "finished_at": run.finished_at,
+            }
+    return result
 
 
 async def _probe_deps() -> dict:

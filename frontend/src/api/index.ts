@@ -200,6 +200,7 @@ export const platformApi = {
 export const dashboardApi = {
   overview: () => client.get<any, any>('/api/dashboard/overview'),
   flowRunTrace: (runId: string) => client.get<any, any>(`/api/dashboard/flow-runs/${runId}/trace`),
+  execDetail: (executionId: string) => client.get<any, any>(`/api/dashboard/exec/${executionId}`),
 }
 
 export const versionApi = {
