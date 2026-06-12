@@ -46,35 +46,45 @@ def build_cloudbuild_config(
     gpu: bool = False,
     cuda_version: str = "12.4",
 ) -> dict[str, Any]:
-    """生成 Cloud Build 配置（含 wheel 安装 + 依赖审计）。"""
+    """生成 Cloud Build 配置（含 wheel 安装 + 依赖审计）。
+
+    @gcs:/@wheel: wheel 文件由 pyflow-hub（有 GCS Workload Identity）在 _upload_build_context
+    中提前下载后打包进 context tarball，Dockerfile 直接 COPY，无需 Docker build 阶段 curl GCS。
+    """
     parsed = validate_requirements(requirements_text, settings)
     wheel_urls = resolve_wheel_urls(parsed, settings)
     pypi_text = render_pypi_requirements(parsed)
     sdist = {x.strip().lower() for x in settings.pip_allow_sdist_packages.split(",") if x.strip()}
-    install_sh = build_install_script(wheel_urls, allow_sdist=sdist, pypi_text=pypi_text)
+    # embed_wheels=True：wheels 通过 context 打包，install_deps.sh 无需 curl
+    has_wheels = bool(wheel_urls)
+    install_sh = build_install_script(
+        wheel_urls, allow_sdist=sdist, pypi_text=pypi_text, embed_wheels=has_wheels
+    )
 
     base_image = (
         f"nvidia/cuda:{cuda_version}-runtime-ubuntu22.04" if gpu else "python:3.11-slim"
     )
-    index_args = ""
-    if settings.pip_index_url:
-        index_args = f"--index-url {settings.pip_index_url}"
 
-    dockerfile = "\n".join([
+    # 若有 wheel：COPY wheels/ /tmp/wheels/ 让 install_deps.sh 可直接 pip install
+    wheel_copy_line = "COPY wheels/ /tmp/wheels/" if has_wheels else ""
+    dockerfile_lines = [
         f"FROM {base_image}",
-        "RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \\",
-        "    && rm -rf /var/lib/apt/lists/* || true",
         "RUN useradd -u 65534 -m nobody || true",
         "WORKDIR /app",
         "COPY install_deps.sh /tmp/install_deps.sh",
         "COPY requirements_pypi.txt /tmp/requirements_pypi.txt",
+    ]
+    if wheel_copy_line:
+        dockerfile_lines.append(wheel_copy_line)
+    dockerfile_lines += [
         "RUN chmod +x /tmp/install_deps.sh && /tmp/install_deps.sh",
         "COPY pyflow_runtime/ /app/pyflow_runtime/",
         "COPY runner/ /app/runner/",
         f"ENV PIP_INDEX_URL={settings.pip_index_url or ''}",
         "USER 65534",
         'ENTRYPOINT ["python", "-m", "runner.entrypoint"]',
-    ])
+    ]
+    dockerfile = "\n".join(dockerfile_lines)
 
     staging_object = f"deps/{image_tag.rsplit(':', 1)[-1]}/context.tar.gz"
     bucket = settings.effective_cloudbuild_staging_bucket()
@@ -113,6 +123,7 @@ def build_cloudbuild_config(
         "_dockerfile": dockerfile,
         "_install_sh": install_sh,
         "_pypi_text": pypi_text,
+        "_wheel_urls": wheel_urls,  # 供 _upload_build_context 下载并打入 tarball
         "_staging_bucket": bucket,
         "_staging_object": staging_object,
     }
@@ -149,7 +160,11 @@ async def ensure_dependency_image(
 
 
 async def _upload_build_context(config: dict[str, Any]) -> None:
-    """打包 Dockerfile + install 脚本 + pyflow_runtime/runner 上传到 GCS staging。"""
+    """打包 Dockerfile + install 脚本 + pyflow_runtime/runner + wheels 上传到 GCS staging。
+
+    @gcs: wheel 文件由本函数通过 GCS client（Workload Identity）提前下载并内嵌进 tarball，
+    Docker build 阶段只需 COPY 本地文件，无需 curl 访问私有 GCS。
+    """
 
     def _do() -> None:
         from pathlib import Path
@@ -159,6 +174,7 @@ async def _upload_build_context(config: dict[str, Any]) -> None:
         except ImportError as exc:
             raise BusinessException(PYFLOW_K8S_DEPLOY_FAILED, "google-cloud-storage not available") from exc
 
+        gcs_client = gcs.Client()
         root = Path(__file__).resolve().parents[4]
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -172,6 +188,28 @@ async def _upload_build_context(config: dict[str, Any]) -> None:
             add_text("install_deps.sh", config["_install_sh"])
             add_text("requirements_pypi.txt", config["_pypi_text"])
 
+            # 下载 @gcs: wheel 文件并打包进 context（Docker COPY wheels/ /tmp/wheels/）
+            for wheel_url in config.get("_wheel_urls", []):
+                if not wheel_url.startswith("https://storage.googleapis.com/"):
+                    continue
+                # 解析 bucket 和 object path
+                # URL 格式：https://storage.googleapis.com/{bucket}/{object_path}
+                path_part = wheel_url[len("https://storage.googleapis.com/"):]
+                bucket_name_w, obj_path = path_part.split("/", 1)
+                fname = obj_path.rsplit("/", 1)[-1]
+                try:
+                    whl_blob = gcs_client.bucket(bucket_name_w).blob(obj_path)
+                    whl_data = whl_blob.download_as_bytes(timeout=60)
+                    whl_info = tarfile.TarInfo(name=f"wheels/{fname}")
+                    whl_info.size = len(whl_data)
+                    tar.addfile(whl_info, io.BytesIO(whl_data))
+                    logger.info("wheel_embedded_in_context", fname=fname, size=len(whl_data))
+                except Exception as exc:  # noqa: BLE001
+                    raise BusinessException(
+                        PYFLOW_K8S_DEPLOY_FAILED,
+                        f"下载 wheel {fname} 失败（{exc}），请确认文件已上传至 GCS",
+                    ) from exc
+
             for folder in ("pyflow_runtime", "runner"):
                 base = root / folder
                 if not base.is_dir():
@@ -183,9 +221,8 @@ async def _upload_build_context(config: dict[str, Any]) -> None:
 
         bucket_name = config["_staging_bucket"]
         obj_name = config["_staging_object"]
-        client = gcs.Client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(obj_name)
+        bucket_obj = gcs_client.bucket(bucket_name)
+        blob = bucket_obj.blob(obj_name)
         buf.seek(0)
         try:
             blob.upload_from_file(buf, content_type="application/gzip", timeout=120)

@@ -117,15 +117,28 @@ def render_pypi_requirements(parsed: ParsedRequirements) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-def build_install_script(wheel_urls: list[str], *, allow_sdist: set[str], pypi_text: str) -> str:
-    """生成 install_deps.sh（Cloud Build 上下文内执行；requirements_pypi.txt 单独 COPY）。"""
+def build_install_script(
+    wheel_urls: list[str],
+    *,
+    allow_sdist: set[str],
+    pypi_text: str,
+    embed_wheels: bool = False,
+) -> str:
+    """生成 install_deps.sh（Cloud Build 上下文内执行；requirements_pypi.txt 单独 COPY）。
+
+    embed_wheels=True 时跳过 curl（wheel 已通过 build context 打包进来），直接 pip install。
+    """
     sdist_flags = " ".join(f"--no-binary {pkg}" for pkg in sorted(allow_sdist))
     lines = ["#!/bin/bash", "set -euo pipefail", "mkdir -p /tmp/wheels"]
     if wheel_urls:
-        for u in wheel_urls:
-            fname = u.split("/")[-1]
-            lines.append(f'curl -fsSL "{u}" -o "/tmp/wheels/{fname}"')
-        lines.append("pip install --no-cache-dir /tmp/wheels/*.whl")
+        if embed_wheels:
+            # wheels 已通过 context tarball 打包到 wheels/ 目录，直接安装
+            lines.append("pip install --no-cache-dir /tmp/wheels/*.whl")
+        else:
+            for u in wheel_urls:
+                fname = u.split("/")[-1]
+                lines.append(f'curl -fsSL "{u}" -o "/tmp/wheels/{fname}"')
+            lines.append("pip install --no-cache-dir /tmp/wheels/*.whl")
     lines.append("if [ -s /tmp/requirements_pypi.txt ]; then")
     if sdist_flags:
         lines.append(
