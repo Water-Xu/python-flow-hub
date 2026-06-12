@@ -61,28 +61,26 @@ def build_cloudbuild_config(
         wheel_urls, allow_sdist=sdist, pypi_text=pypi_text, embed_wheels=has_wheels
     )
 
-    base_image = (
-        f"nvidia/cuda:{cuda_version}-runtime-ubuntu22.04" if gpu else "python:3.11-slim"
-    )
+    # 依赖镜像直接基于 base runner 镜像叠加，无需重新 COPY pyflow_runtime/runner
+    # GPU 模式使用 GPU runner 基础镜像
+    if gpu:
+        base_image = settings.gpu_runner_image
+    else:
+        base_image = settings.runner_image
 
     # 若有 wheel：COPY wheels/ /tmp/wheels/ 让 install_deps.sh 可直接 pip install
-    wheel_copy_line = "COPY wheels/ /tmp/wheels/" if has_wheels else ""
     dockerfile_lines = [
         f"FROM {base_image}",
-        "RUN useradd -u 65534 -m nobody || true",
-        "WORKDIR /app",
+        "USER root",
         "COPY install_deps.sh /tmp/install_deps.sh",
         "COPY requirements_pypi.txt /tmp/requirements_pypi.txt",
     ]
-    if wheel_copy_line:
-        dockerfile_lines.append(wheel_copy_line)
+    if has_wheels:
+        dockerfile_lines.append("COPY wheels/ /tmp/wheels/")
     dockerfile_lines += [
         "RUN chmod +x /tmp/install_deps.sh && /tmp/install_deps.sh",
-        "COPY pyflow_runtime/ /app/pyflow_runtime/",
-        "COPY runner/ /app/runner/",
         f"ENV PIP_INDEX_URL={settings.pip_index_url or ''}",
         "USER 65534",
-        'ENTRYPOINT ["python", "-m", "runner.entrypoint"]',
     ]
     dockerfile = "\n".join(dockerfile_lines)
 
@@ -167,15 +165,12 @@ async def _upload_build_context(config: dict[str, Any]) -> None:
     """
 
     def _do() -> None:
-        from pathlib import Path
-
         try:
             from google.cloud import storage as gcs  # type: ignore
         except ImportError as exc:
             raise BusinessException(PYFLOW_K8S_DEPLOY_FAILED, "google-cloud-storage not available") from exc
 
         gcs_client = gcs.Client()
-        root = Path(__file__).resolve().parents[4]
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
             def add_text(name: str, text: str) -> None:
@@ -210,14 +205,7 @@ async def _upload_build_context(config: dict[str, Any]) -> None:
                         f"下载 wheel {fname} 失败（{exc}），请确认文件已上传至 GCS",
                     ) from exc
 
-            for folder in ("pyflow_runtime", "runner"):
-                base = root / folder
-                if not base.is_dir():
-                    continue
-                for path in base.rglob("*"):
-                    if path.is_file() and "__pycache__" not in path.parts:
-                        arc = f"{folder}/{path.relative_to(base).as_posix()}"
-                        tar.add(path, arcname=arc)
+            # pyflow_runtime/ 和 runner/ 已在 base runner 镜像中，无需打包进 context
 
         bucket_name = config["_staging_bucket"]
         obj_name = config["_staging_object"]
