@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -10,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.rbac import Role, require_role
 from app.core.k8s import orchestrator
 from app.db import get_session
-from app.errors import PYFLOW_FLOW_NOT_FOUND, BusinessException
+from app.errors import PYFLOW_EXEC_INPUT_INVALID, PYFLOW_FLOW_NOT_FOUND, BusinessException
 from app.models.deployment import FlowDeployment
 
 router = APIRouter(prefix="/api/deployments", tags=["deployments"])
@@ -50,6 +52,13 @@ class DeploymentResourceRequest(BaseModel):
     """部署级 Pod 资源覆盖：{block_id: BlockResourceSpec}。"""
 
     resource_overrides: dict[str, BlockResourceSpec] = {}
+
+
+class DependencyInstallRequest(BaseModel):
+    """安装依赖到部署的块 requirements（重新部署后生效）。"""
+
+    package: str = Field(..., min_length=1, max_length=256)
+    block_ids: list[str] | None = None  # None 表示全部块
 
 
 def _dep_dict(d: FlowDeployment) -> dict:
@@ -363,3 +372,133 @@ async def destroy_deployment(
     await session.delete(dep)
     await session.commit()
     return {"deleted": True}
+
+
+def _parse_requirements_text(text: str) -> list[dict]:
+    """解析 requirements.txt 文本为结构化包信息列表。"""
+    packages = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("@gcs:") or stripped.startswith("@wheel:"):
+            pkg_type = "wheel"
+            fname = stripped.rsplit("/", 1)[-1]
+            if fname.endswith(".whl"):
+                fname = fname[:-4]
+            packages.append({"spec": stripped, "type": pkg_type, "name": fname, "version_spec": ""})
+        elif stripped.startswith("-") or stripped.startswith("--"):
+            packages.append({"spec": stripped, "type": "option", "name": stripped, "version_spec": ""})
+        else:
+            m = re.match(r"^([a-zA-Z0-9][a-zA-Z0-9._-]*(?:\[[^\]]+\])?)\s*([=<>!~].+)?$", stripped)
+            if m:
+                name = m.group(1)
+                version_spec = (m.group(2) or "").strip()
+                packages.append({"spec": stripped, "type": "pypi", "name": name, "version_spec": version_spec})
+            else:
+                packages.append({"spec": stripped, "type": "other", "name": stripped, "version_spec": ""})
+    return packages
+
+
+@router.get("/{deployment_id}/dependencies")
+async def list_deployment_dependencies(
+    deployment_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.VIEWER)),
+):
+    """列出该部署所有块的 Python 依赖声明（来自 draft_requirements）。"""
+    from app.models.block import Block
+    from app.models.flow import FlowNode
+
+    dep = await _get(session, deployment_id)
+    nodes = (await session.execute(
+        select(FlowNode).where(FlowNode.flow_id == dep.flow_id, FlowNode.node_type == "block")
+    )).scalars().all()
+
+    blocks_data = []
+    seen_block_ids: set[str] = set()
+    merged: dict[str, dict] = {}
+
+    for node in nodes:
+        if not node.block_id or node.block_id in seen_block_ids:
+            continue
+        seen_block_ids.add(node.block_id)
+        block = await session.get(Block, node.block_id)
+        if block is None:
+            continue
+        packages = _parse_requirements_text(block.draft_requirements or "")
+        blocks_data.append({
+            "block_id": block.id,
+            "name": block.name,
+            "packages": packages,
+            "requirements_raw": block.draft_requirements or "",
+        })
+        for pkg in packages:
+            key = pkg["name"].lower().replace("-", "_")
+            if key not in merged:
+                merged[key] = pkg
+
+    return {
+        "deployment_id": dep.id,
+        "deployment_type": getattr(dep, "deployment_type", "block_mode"),
+        "blocks": blocks_data,
+        "merged": list(merged.values()),
+    }
+
+
+@router.post("/{deployment_id}/dependencies/install")
+async def install_deployment_dependency(
+    deployment_id: str,
+    req: DependencyInstallRequest,
+    session: AsyncSession = Depends(get_session),
+    _: str = Depends(require_role(Role.DEPLOYER)),
+):
+    """在该部署块的 draft_requirements 中追加依赖（重新部署后生效）。"""
+    from app.models.block import Block
+    from app.models.flow import FlowNode
+
+    pkg_spec = req.package.strip()
+    # 允许 PyPI 包规范或 @gcs:/@wheel: wheel 引用
+    if not re.match(r"^(@(gcs|wheel):.*|[a-zA-Z0-9][a-zA-Z0-9._-]*([\s\[=<>!~].*)?)$", pkg_spec):
+        raise BusinessException(PYFLOW_EXEC_INPUT_INVALID, f"包规范非法：{pkg_spec!r}")
+
+    dep = await _get(session, deployment_id)
+    nodes = (await session.execute(
+        select(FlowNode).where(FlowNode.flow_id == dep.flow_id, FlowNode.node_type == "block")
+    )).scalars().all()
+
+    updated_blocks: list[str] = []
+    seen_block_ids: set[str] = set()
+
+    # 提取待添加包名（用于去重判断）
+    pkg_name_key = re.split(r"[\s\[=<>!~]", pkg_spec.lstrip("@").split(":", 1)[-1] if pkg_spec.startswith("@") else pkg_spec, maxsplit=1)[0].lower().replace("-", "_")
+
+    for node in nodes:
+        if not node.block_id or node.block_id in seen_block_ids:
+            continue
+        seen_block_ids.add(node.block_id)
+        if req.block_ids is not None and node.block_id not in req.block_ids:
+            continue
+        block = await session.get(Block, node.block_id)
+        if block is None:
+            continue
+
+        # 已存在则跳过（避免重复添加）
+        current = block.draft_requirements or ""
+        existing_keys = {
+            re.split(r"[\s\[=<>!~]", ln.strip(), maxsplit=1)[0].lower().replace("-", "_")
+            for ln in current.splitlines()
+            if ln.strip() and not ln.strip().startswith("#") and not ln.strip().startswith("@")
+        }
+        if pkg_name_key in existing_keys:
+            continue
+
+        block.draft_requirements = (current.rstrip("\n") + "\n" + pkg_spec + "\n").lstrip("\n")
+        updated_blocks.append(block.name)
+
+    await session.commit()
+    return {
+        "installed": pkg_spec,
+        "updated_blocks": updated_blocks,
+        "message": f"已添加到 {len(updated_blocks)} 个块的 requirements（重新部署后生效）",
+    }

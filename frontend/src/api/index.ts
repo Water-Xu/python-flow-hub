@@ -146,6 +146,36 @@ export const deploymentApi = {
     if (opts?.previous) p.set('previous', 'true')
     return client.get<any, { logs: string }>(`/api/deployments/${id}/pods/${podName}/logs?${p}`)
   },
+  /** 列出该部署所有块的 Python 依赖声明（来自 draft_requirements） */
+  listDependencies: (id: string) =>
+    client.get<any, DeploymentDependencies>(`/api/deployments/${id}/dependencies`),
+  /** 在该部署块的 draft_requirements 中追加依赖（重新部署后生效） */
+  installDependency: (id: string, data: { package: string; block_ids?: string[] }) =>
+    client.post<any, { installed: string; updated_blocks: string[]; message: string }>(
+      `/api/deployments/${id}/dependencies/install`,
+      data,
+    ),
+}
+
+export interface DepPackage {
+  spec: string
+  type: 'pypi' | 'wheel' | 'option' | 'other'
+  name: string
+  version_spec: string
+}
+
+export interface BlockDependencies {
+  block_id: string
+  name: string
+  packages: DepPackage[]
+  requirements_raw: string
+}
+
+export interface DeploymentDependencies {
+  deployment_id: string
+  deployment_type: string
+  blocks: BlockDependencies[]
+  merged: DepPackage[]
 }
 
 export interface FlowResourceSummary {

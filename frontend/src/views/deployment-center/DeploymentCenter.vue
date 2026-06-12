@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch, computed, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { deploymentApi, flowApi, type BlockResource, type FlowResourceSummary } from '@/api'
+import { deploymentApi, flowApi, type BlockResource, type FlowResourceSummary, type DeploymentDependencies, type DepPackage } from '@/api'
 
 const deployments = ref<any[]>([])
 const flows = ref<any[]>([])
@@ -165,6 +165,62 @@ const resSummaryTip = computed(() =>
     ? 'FlowRunner 为整流单 Pod，所有块在同一进程内执行。常驻请求为容量闸门（min≥1 副本）；KEDA 对整个 Flow 级扩缩（0→N），峰值上界按 limit×maxReplica 估算，不计入常驻。'
     : '常驻请求为容量闸门（各块 min≥1 副本按 request 累加）；KEDA 仅作用于各 MQ 接口的 Flow-Consumer（0→N 按队列扩缩），峰值上界按各块 limit×maxReplica 估算，不计入常驻。'
 )
+
+// ── 依赖列表 ──
+const depsData = ref<DeploymentDependencies | null>(null)
+const depsLoading = ref(false)
+const depsFilterText = ref('')
+const installPkgInput = ref('')
+const installLoading = ref(false)
+const installDialogVisible = ref(false)
+const selectedBlockIds = ref<string[]>([])
+
+const filteredMerged = computed(() => {
+  const q = depsFilterText.value.trim().toLowerCase()
+  if (!q || !depsData.value) return depsData.value?.merged ?? []
+  return depsData.value.merged.filter(
+    (p) => p.name.toLowerCase().includes(q) || p.spec.toLowerCase().includes(q),
+  )
+})
+
+async function loadDependencies() {
+  if (!detail.value) return
+  depsLoading.value = true
+  try {
+    depsData.value = await deploymentApi.listDependencies(detail.value.id)
+    selectedBlockIds.value = depsData.value?.blocks.map((b) => b.block_id) ?? []
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '加载依赖失败')
+  } finally {
+    depsLoading.value = false
+  }
+}
+
+async function doInstallDependency() {
+  if (!detail.value || !installPkgInput.value.trim()) return
+  installLoading.value = true
+  try {
+    const res = await deploymentApi.installDependency(detail.value.id, {
+      package: installPkgInput.value.trim(),
+      block_ids: selectedBlockIds.value.length < (depsData.value?.blocks.length ?? 0)
+        ? selectedBlockIds.value
+        : undefined,
+    })
+    ElMessage.success(res.message)
+    installPkgInput.value = ''
+    installDialogVisible.value = false
+    await loadDependencies()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '安装失败')
+  } finally {
+    installLoading.value = false
+  }
+}
+
+function pkgTypeTag(type: DepPackage['type']): string {
+  const map: Record<string, string> = { pypi: 'success', wheel: 'warning', option: 'info', other: '' }
+  return map[type] ?? ''
+}
 
 let _loadInFlight = false
 
@@ -436,6 +492,9 @@ async function openDetail(row: any) {
   podList.value = []
   selectedPod.value = ''
   podLogs.value = ''
+  depsData.value = null
+  depsFilterText.value = ''
+  installPkgInput.value = ''
   stopLogRefresh()
   loadEnvRows(row)
   if (row.environment === 'k8s') {
@@ -568,6 +627,7 @@ onBeforeUnmount(() => {
         @tab-change="(n: any) => {
           if (n === 'resources' && resourceRows.length === 0) loadResources()
           if (n === 'logs') { loadPodList(); startLogRefresh() }
+          if (n === 'deps' && !depsData) loadDependencies()
           if (n !== 'logs') stopLogRefresh()
         }"
       >
@@ -826,6 +886,130 @@ onBeforeUnmount(() => {
           </div>
         </el-tab-pane>
 
+        <!-- ── 依赖列表 ── -->
+        <el-tab-pane label="依赖列表" name="deps">
+          <div class="deps-toolbar">
+            <el-input
+              v-model="depsFilterText"
+              placeholder="搜索包名…"
+              size="small"
+              clearable
+              style="width: 220px"
+            >
+              <template #prefix><el-icon><Search /></el-icon></template>
+            </el-input>
+            <el-button size="small" :loading="depsLoading" @click="loadDependencies">
+              <el-icon><Refresh /></el-icon> 刷新
+            </el-button>
+            <el-button size="small" type="primary" @click="installDialogVisible = true">
+              <el-icon><Plus /></el-icon> 安装依赖
+            </el-button>
+            <el-tag v-if="depsData" size="small" effect="plain" style="margin-left:auto">
+              共 {{ depsData.merged.length }} 个包 · {{ depsData.blocks.length }} 个块
+            </el-tag>
+          </div>
+
+          <div v-loading="depsLoading">
+            <!-- flow_mode：合并视图 -->
+            <template v-if="depsData?.deployment_type === 'flow_mode'">
+              <div class="deps-section-title">
+                <el-tag type="success" size="small" effect="dark">flow_mode · 合并依赖</el-tag>
+                <span class="dim">整流单 Pod，所有块依赖合并构建为同一镜像</span>
+              </div>
+              <transition-group name="dep-list" tag="div" class="deps-grid">
+                <div
+                  v-for="pkg in filteredMerged"
+                  :key="pkg.spec"
+                  class="dep-card"
+                >
+                  <div class="dep-card-head">
+                    <span class="dep-name">{{ pkg.name }}</span>
+                    <el-tag :type="pkgTypeTag(pkg.type)" size="small" effect="plain">{{ pkg.type }}</el-tag>
+                  </div>
+                  <div class="dep-spec">{{ pkg.version_spec || (pkg.type === 'wheel' ? 'wheel 包' : '任意版本') }}</div>
+                  <div class="dep-raw dim">{{ pkg.spec }}</div>
+                </div>
+              </transition-group>
+              <el-empty v-if="!depsLoading && filteredMerged.length === 0" description="暂无依赖声明" :image-size="64" />
+            </template>
+
+            <!-- block_mode：按块展开 -->
+            <template v-else-if="depsData">
+              <el-collapse v-if="depsData.blocks.length" accordion>
+                <el-collapse-item
+                  v-for="block in depsData.blocks"
+                  :key="block.block_id"
+                  :name="block.block_id"
+                >
+                  <template #title>
+                    <div class="block-dep-title">
+                      <span class="dep-name">{{ block.name }}</span>
+                      <el-tag size="small" effect="plain" type="info">{{ block.packages.length }} 个包</el-tag>
+                    </div>
+                  </template>
+                  <transition-group name="dep-list" tag="div" class="deps-grid">
+                    <div
+                      v-for="pkg in block.packages.filter(p => !depsFilterText || p.name.toLowerCase().includes(depsFilterText.toLowerCase()) || p.spec.toLowerCase().includes(depsFilterText.toLowerCase()))"
+                      :key="pkg.spec"
+                      class="dep-card"
+                    >
+                      <div class="dep-card-head">
+                        <span class="dep-name">{{ pkg.name }}</span>
+                        <el-tag :type="pkgTypeTag(pkg.type)" size="small" effect="plain">{{ pkg.type }}</el-tag>
+                      </div>
+                      <div class="dep-spec">{{ pkg.version_spec || (pkg.type === 'wheel' ? 'wheel 包' : '任意版本') }}</div>
+                      <div class="dep-raw dim">{{ pkg.spec }}</div>
+                    </div>
+                  </transition-group>
+                  <el-empty v-if="block.packages.length === 0" description="该块无依赖声明" :image-size="48" />
+                </el-collapse-item>
+              </el-collapse>
+              <el-empty v-else description="该流程暂无可部署的块" :image-size="64" />
+            </template>
+            <el-empty v-else-if="!depsLoading" description="点击「刷新」加载依赖列表" :image-size="64" />
+          </div>
+
+          <!-- 安装新依赖对话框 -->
+          <el-dialog v-model="installDialogVisible" title="安装新依赖" width="480px" append-to-body>
+            <el-form label-width="90px">
+              <el-form-item label="包规范">
+                <el-input
+                  v-model="installPkgInput"
+                  placeholder="如: numpy>=1.24  或  torch==2.1.0  或  @gcs:path/pkg.whl"
+                  clearable
+                  @keyup.enter="doInstallDependency"
+                />
+                <div class="dim" style="margin-top:6px;font-size:12px;line-height:1.6">
+                  支持 PyPI 包名（含版本约束）或 <code>@gcs:</code> / <code>@wheel:</code> 开头的私有 wheel 引用。<br>
+                  添加后需重新 <b>部署</b> 使镜像更新生效。
+                </div>
+              </el-form-item>
+              <el-form-item v-if="depsData?.deployment_type !== 'flow_mode'" label="目标块">
+                <el-select
+                  v-model="selectedBlockIds"
+                  multiple
+                  collapse-tags
+                  style="width: 100%"
+                  placeholder="默认添加到全部块"
+                >
+                  <el-option
+                    v-for="b in depsData?.blocks"
+                    :key="b.block_id"
+                    :label="b.name"
+                    :value="b.block_id"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-form>
+            <template #footer>
+              <el-button @click="installDialogVisible = false">取消</el-button>
+              <el-button type="primary" :loading="installLoading" :disabled="!installPkgInput.trim()" @click="doInstallDependency">
+                添加到 requirements
+              </el-button>
+            </template>
+          </el-dialog>
+        </el-tab-pane>
+
         <!-- ── 节点日志 ── -->
         <el-tab-pane label="节点日志" name="logs">
           <div class="log-toolbar">
@@ -1068,6 +1252,77 @@ onBeforeUnmount(() => {
     transform: translateY(0);
   }
 }
+
+/* ── 依赖列表 ── */
+.deps-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--el-fill-color-light, #f5f7fa);
+}
+.deps-section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.deps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+.dep-card {
+  padding: 12px 14px;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5);
+  border-radius: 10px;
+  background: var(--pf-panel, #fff);
+  transition: box-shadow 0.22s ease, border-color 0.22s ease, transform 0.22s ease;
+  overflow: hidden;
+}
+.dep-card:hover {
+  border-color: var(--pf-accent, #409eff);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+  transform: translateY(-2px);
+}
+.dep-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.dep-name {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dep-spec {
+  font-size: 12px;
+  color: var(--el-color-primary, #409eff);
+  margin-bottom: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.dep-raw {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+}
+.block-dep-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dep-list-enter-active { transition: all 0.25s ease; }
+.dep-list-enter-from { opacity: 0; transform: scale(0.95) translateY(6px); }
+.dep-list-move { transition: transform 0.25s ease; }
 
 /* ── 节点日志 ── */
 .log-toolbar {
