@@ -225,26 +225,45 @@ def _build_call_chain(
     api: PublishedApi | None,
     steps: list[dict],
     total_ms: int | None,
+    executions: list[dict] | None = None,
 ) -> dict:
     """构建完整调用链路结构（基础设施节点 + 业务执行节点）。"""
     overall_ok = run.status in ("succeeded", "running")
 
-    # 业务执行节点（来自 steps）
-    flow_nodes = [
-        {
-            "id": f"step_{step['node_id']}",
-            "type": "block",
-            "label": step.get("node_name") or step["node_id"][:8],
-            "node_id": step["node_id"],
-            "block_id": step.get("block_id"),
-            "status": step["status"],
-            "duration_ms": step.get("duration_ms"),
-            "hit_port": step.get("hit_port"),
-            "error": step.get("error"),
-            "has_output": step.get("has_output", False),
-        }
-        for step in steps
-    ]
+    # 业务执行节点优先从 steps（node_states），fallback 到 executions 列表
+    if steps:
+        flow_nodes = [
+            {
+                "id": f"step_{step['node_id']}",
+                "type": "block",
+                "label": step.get("node_name") or step["node_id"][:8],
+                "node_id": step["node_id"],
+                "block_id": step.get("block_id"),
+                "status": step["status"],
+                "duration_ms": step.get("duration_ms"),
+                "hit_port": step.get("hit_port"),
+                "error": step.get("error"),
+                "has_output": step.get("has_output", False),
+            }
+            for step in steps
+        ]
+    elif executions:
+        # node_states 为空时（如块模式执行未回写 state）从 ExecutionRecord 重建
+        flow_nodes = [
+            {
+                "id": f"exec_{ex['id'][:8]}",
+                "type": "block",
+                "label": ex.get("block_name") or ex["block_id"][:8],
+                "block_id": ex.get("block_id"),
+                "status": "done" if ex["status"] in ("success", "succeeded") else ex["status"],
+                "duration_ms": ex.get("duration_ms"),
+                "error": ex.get("stderr") or None,
+                "has_output": bool(ex.get("output")),
+            }
+            for ex in executions
+        ]
+    else:
+        flow_nodes = []
 
     # Flow 编排包装节点
     orchestrator_node = {
@@ -262,9 +281,9 @@ def _build_call_chain(
             {"id": "client", "type": "client", "label": "调用客户端",
              "status": "ok", "detail": "HTTP 请求方"},
             {"id": "network", "type": "network", "label": "网络传输",
-             "status": "ok", "detail": "TCP / TLS 握手", "note": "耗时未采集"},
+             "status": "ok", "detail": "TCP / TLS 握手"},
             {"id": "gateway", "type": "gateway", "label": "API 网关",
-             "status": "ok", "detail": "路由 & 负载均衡", "note": "耗时未采集"},
+             "status": "ok", "detail": "路由 & 负载均衡"},
             {"id": "portal", "type": "service", "label": "API Portal",
              "status": "ok" if overall_ok else "error",
              "detail": f"POST /api/public/{api.path if api else '?'}",
@@ -406,22 +425,40 @@ async def flow_run_trace(
             "started_at": exec_started_at.isoformat() if exec_started_at else None,
         })
 
-    # 流级别入参 / 出参：
-    # 入参 = 入口块 ExecutionRecord 的 inputs
-    # 出参 = 最后执行块的 output（或 node_states 中最后节点的 output）
+    # 流级别入参 / 出参
     flow_inputs: dict | None = None
     flow_output: dict | None = None
     if recs:
-        flow_inputs = recs[0].ExecutionRecord.inputs or None
+        # 取第一条有非空 inputs 的记录
+        for r in recs:
+            v = r.ExecutionRecord.inputs
+            if v and isinstance(v, dict) and v:
+                flow_inputs = v
+                break
+        # 取最后一条有非空 output 的记录
         for r in reversed(recs):
-            if r.ExecutionRecord.output:
-                flow_output = r.ExecutionRecord.output
+            v = r.ExecutionRecord.output
+            if v and isinstance(v, dict) and v:
+                flow_output = v
                 break
 
     total_ms = _calc_dur(run)
-
     trigger_src = run.trigger_source or "manual"
-    call_chain = _build_call_chain(trigger_src, run, api, steps, total_ms)
+
+    # executions 列表（供 call_chain 降级使用）
+    exec_list = [
+        {
+            "id": r.ExecutionRecord.id,
+            "block_id": r.ExecutionRecord.block_id,
+            "block_name": r.block_name or "",
+            "status": r.ExecutionRecord.status,
+            "duration_ms": r.ExecutionRecord.duration_ms,
+            "stderr": r.ExecutionRecord.stderr or "",
+            "output": r.ExecutionRecord.output,
+        }
+        for r in recs
+    ]
+    call_chain = _build_call_chain(trigger_src, run, api, steps, total_ms, exec_list)
 
     return {
         "run": {

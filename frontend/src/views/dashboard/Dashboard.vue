@@ -395,6 +395,7 @@ onUnmounted(() => {
                     <el-icon size="12"><Download /></el-icon> 入参（触发时传入）
                   </div>
                   <pre class="tl-output" v-if="trace.run?.inputs != null">{{ JSON.stringify(trace.run.inputs, null, 2) }}</pre>
+                  <pre class="tl-output" v-else-if="trace.executions?.[0]?.inputs && Object.keys(trace.executions[0].inputs).length">{{ JSON.stringify(trace.executions[0].inputs, null, 2) }}</pre>
                   <div class="dim" style="font-size:12px;padding:8px 0" v-else>暂无入参记录</div>
                 </div>
                 <div class="io-block" style="margin-top:14px">
@@ -402,6 +403,7 @@ onUnmounted(() => {
                     <el-icon size="12"><Upload /></el-icon> 出参（流程最终返回值）
                   </div>
                   <pre class="tl-output" v-if="trace.run?.output != null">{{ JSON.stringify(trace.run.output, null, 2) }}</pre>
+                  <pre class="tl-output" v-else-if="trace.executions?.slice().reverse().find((e: any) => e.output && Object.keys(e.output).length)">{{ JSON.stringify(trace.executions.slice().reverse().find((e: any) => e.output && Object.keys(e.output).length).output, null, 2) }}</pre>
                   <div class="dim" style="font-size:12px;padding:8px 0" v-else>暂无出参记录</div>
                 </div>
               </div>

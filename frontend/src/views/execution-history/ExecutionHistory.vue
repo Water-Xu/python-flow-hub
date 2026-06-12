@@ -296,6 +296,7 @@ onMounted(load)
                     入参（触发时传入）
                   </div>
                   <pre class="code-pre" v-if="trace.run?.inputs != null">{{ JSON.stringify(trace.run.inputs, null, 2) }}</pre>
+                  <pre class="code-pre" v-else-if="trace.executions?.[0]?.inputs && Object.keys(trace.executions[0].inputs).length">{{ JSON.stringify(trace.executions[0].inputs, null, 2) }}</pre>
                   <div class="io-empty dim" v-else>
                     <template v-if="selectedRun?.trigger_source === 'mq'">MQ 消息体数据请查看 MQ 监控</template>
                     <template v-else>暂无入参记录</template>
@@ -307,6 +308,7 @@ onMounted(load)
                     出参（流程最终返回值）
                   </div>
                   <pre class="code-pre code-out" v-if="trace.run?.output != null">{{ JSON.stringify(trace.run.output, null, 2) }}</pre>
+                  <pre class="code-pre code-out" v-else-if="trace.executions?.slice().reverse().find((e: any) => e.output && Object.keys(e.output).length)">{{ JSON.stringify(trace.executions.slice().reverse().find((e: any) => e.output && Object.keys(e.output).length).output, null, 2) }}</pre>
                   <div class="io-empty dim" v-else>暂无出参记录</div>
                 </div>
               </div>

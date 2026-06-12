@@ -29,317 +29,301 @@ const props = defineProps<{
   chain: CallChain
 }>()
 
-const emit = defineEmits<{
-  nodeClick: [node: ChainNode]
-}>()
+const emit = defineEmits<{ nodeClick: [node: ChainNode] }>()
 
-const expandedId = ref<string | null>(null)
+const expanded = ref<Record<string, boolean>>({})
 
-const nodeMeta: Record<string, { icon: string; accentColor: string; bgColor: string }> = {
-  client:       { icon: 'M', accentColor: '#6b7280', bgColor: 'rgba(107,114,128,0.06)' },
-  network:      { icon: 'N', accentColor: '#0891b2', bgColor: 'rgba(8,145,178,0.06)' },
-  gateway:      { icon: 'G', accentColor: '#7c3aed', bgColor: 'rgba(124,58,237,0.06)' },
-  service:      { icon: 'S', accentColor: '#2563eb', bgColor: 'rgba(37,99,235,0.06)' },
-  auth:         { icon: 'A', accentColor: '#d97706', bgColor: 'rgba(217,119,6,0.06)' },
-  orchestrator: { icon: 'O', accentColor: '#2563eb', bgColor: 'rgba(37,99,235,0.04)' },
-  block:        { icon: 'B', accentColor: '#2563eb', bgColor: 'rgba(37,99,235,0.05)' },
-  mq_broker:    { icon: 'R', accentColor: '#d97706', bgColor: 'rgba(217,119,6,0.06)' },
-  mq_exchange:  { icon: 'E', accentColor: '#ea580c', bgColor: 'rgba(234,88,12,0.06)' },
-  mq_route:     { icon: '→', accentColor: '#f59e0b', bgColor: 'rgba(245,158,11,0.05)' },
-  mq_queue:     { icon: 'Q', accentColor: '#d97706', bgColor: 'rgba(217,119,6,0.06)' },
-  filter:       { icon: 'F', accentColor: '#0d9488', bgColor: 'rgba(13,148,136,0.06)' },
-  response:     { icon: '✓', accentColor: '#16a34a', bgColor: 'rgba(22,163,74,0.06)' },
+function toggle(id: string) {
+  expanded.value[id] = !expanded.value[id]
 }
-
-const statusConfig: Record<string, { color: string; bg: string; label: string }> = {
-  ok:        { color: '#16a34a', bg: 'rgba(22,163,74,0.08)',   label: 'OK' },
-  done:      { color: '#16a34a', bg: 'rgba(22,163,74,0.08)',   label: '完成' },
-  succeeded: { color: '#16a34a', bg: 'rgba(22,163,74,0.08)',   label: '成功' },
-  success:   { color: '#16a34a', bg: 'rgba(22,163,74,0.08)',   label: '成功' },
-  failed:    { color: '#dc2626', bg: 'rgba(220,38,38,0.08)',   label: '失败' },
-  error:     { color: '#dc2626', bg: 'rgba(220,38,38,0.08)',   label: '错误' },
-  nack:      { color: '#dc2626', bg: 'rgba(220,38,38,0.08)',   label: 'NACK' },
-  running:   { color: '#d97706', bg: 'rgba(217,119,6,0.08)',   label: '运行中' },
-  warning:   { color: '#d97706', bg: 'rgba(217,119,6,0.08)',   label: '警告' },
-  skipped:   { color: '#9ca3af', bg: 'rgba(156,163,175,0.08)', label: '跳过' },
-  unknown:   { color: '#9ca3af', bg: 'rgba(156,163,175,0.08)', label: '未知' },
-}
-
-const triggerInfo: Record<string, { label: string; color: string; icon: string }> = {
-  http:   { label: 'HTTP API 调用',   color: '#2563eb', icon: 'H' },
-  stream: { label: 'HTTP SSE 流式',  color: '#0891b2', icon: 'S' },
-  mq:     { label: 'MQ 消息触发',    color: '#d97706', icon: 'M' },
-  manual: { label: '手动触发',       color: '#6b7280', icon: '✦' },
-}
-
-function getMeta(type: string) {
-  return nodeMeta[type] || nodeMeta['service']
-}
-
-function getStatus(status?: string) {
-  return statusConfig[status || 'ok'] || statusConfig['unknown']
-}
-
-function isError(node: ChainNode) {
-  return node.status === 'error' || node.status === 'failed' || node.status === 'nack'
-}
-
-function fmtDur(ms: number | null | undefined): string {
-  if (ms == null) return ''
-  if (ms >= 1000) return (ms / 1000).toFixed(2) + 's'
-  return ms + 'ms'
-}
-
-function toggleExpand(id: string) {
-  expandedId.value = expandedId.value === id ? null : id
-}
-
 function onNodeClick(node: ChainNode) {
-  toggleExpand(node.id)
+  toggle(node.id)
   emit('nodeClick', node)
 }
 
-const maxDur = computed(() => {
-  let m = 0
-  for (const node of props.chain.nodes) {
-    if (node.duration_ms) m = Math.max(m, node.duration_ms)
-    if (node.children) for (const c of node.children) if (c.duration_ms) m = Math.max(m, c.duration_ms)
-  }
-  return m || 1
-})
-
-function durPct(ms: number | null | undefined) {
-  return ms ? Math.min(100, (ms / maxDur.value) * 100) : 0
+// ─── 节点类型元数据 ───
+const NODE_META: Record<string, { label: string; iconBg: string; iconColor: string; icon: string }> = {
+  client:       { label: '客户端',   iconBg: '#f0f4ff', iconColor: '#4f46e5', icon: 'C' },
+  network:      { label: '网络',     iconBg: '#ecfeff', iconColor: '#0891b2', icon: 'N' },
+  gateway:      { label: '网关',     iconBg: '#f5f3ff', iconColor: '#7c3aed', icon: 'G' },
+  service:      { label: '服务',     iconBg: '#eff6ff', iconColor: '#2563eb', icon: 'S' },
+  auth:         { label: '鉴权',     iconBg: '#fffbeb', iconColor: '#d97706', icon: 'A' },
+  orchestrator: { label: '编排',     iconBg: '#eff6ff', iconColor: '#2563eb', icon: 'O' },
+  block:        { label: '调用块',   iconBg: '#f0fdf4', iconColor: '#16a34a', icon: 'B' },
+  mq_broker:    { label: 'MQ 代理', iconBg: '#fff7ed', iconColor: '#ea580c', icon: 'R' },
+  mq_exchange:  { label: '交换机',   iconBg: '#fff7ed', iconColor: '#ea580c', icon: 'E' },
+  mq_route:     { label: '路由',     iconBg: '#fefce8', iconColor: '#ca8a04', icon: '→' },
+  mq_queue:     { label: '队列',     iconBg: '#fff7ed', iconColor: '#ea580c', icon: 'Q' },
+  filter:       { label: '过滤',     iconBg: '#f0fdfa', iconColor: '#0d9488', icon: 'F' },
+  response:     { label: '响应',     iconBg: '#f0fdf4', iconColor: '#16a34a', icon: '✓' },
 }
 
-const tInfo = computed(() => triggerInfo[props.chain.type] || triggerInfo['manual'])
+// ─── 状态配置 ───
+const STATUS: Record<string, { color: string; bg: string; text: string; dot: string }> = {
+  ok:        { color: '#16a34a', bg: '#dcfce7', text: '正常', dot: '#22c55e' },
+  done:      { color: '#16a34a', bg: '#dcfce7', text: '完成', dot: '#22c55e' },
+  succeeded: { color: '#16a34a', bg: '#dcfce7', text: '成功', dot: '#22c55e' },
+  success:   { color: '#16a34a', bg: '#dcfce7', text: '成功', dot: '#22c55e' },
+  failed:    { color: '#dc2626', bg: '#fee2e2', text: '失败', dot: '#ef4444' },
+  error:     { color: '#dc2626', bg: '#fee2e2', text: '错误', dot: '#ef4444' },
+  nack:      { color: '#dc2626', bg: '#fee2e2', text: 'NACK', dot: '#ef4444' },
+  running:   { color: '#d97706', bg: '#fef3c7', text: '运行中', dot: '#f59e0b' },
+  warning:   { color: '#d97706', bg: '#fef3c7', text: '警告',  dot: '#f59e0b' },
+  skipped:   { color: '#6b7280', bg: '#f3f4f6', text: '跳过',  dot: '#9ca3af' },
+  unknown:   { color: '#6b7280', bg: '#f3f4f6', text: '未知',  dot: '#9ca3af' },
+}
 
-const childStats = computed(() => {
+const TRIGGER: Record<string, { label: string; color: string; bg: string }> = {
+  http:   { label: 'HTTP API 调用',   color: '#2563eb', bg: '#eff6ff' },
+  stream: { label: 'HTTP SSE 流式',  color: '#0891b2', bg: '#ecfeff' },
+  mq:     { label: 'MQ 消息触发',    color: '#ea580c', bg: '#fff7ed' },
+  manual: { label: '手动触发',       color: '#6b7280', bg: '#f9fafb' },
+}
+
+function getMeta(type: string) { return NODE_META[type] || NODE_META['service'] }
+function getStatus(s?: string) { return STATUS[s || 'ok'] || STATUS['unknown'] }
+function isErr(s?: string) { return s === 'failed' || s === 'error' || s === 'nack' }
+function fmtMs(ms?: number | null) {
+  if (ms == null || ms === 0) return null
+  return ms >= 1000 ? (ms / 1000).toFixed(2) + 's' : ms + 'ms'
+}
+
+const triggerInfo = computed(() => TRIGGER[props.chain.type] || TRIGGER['manual'])
+
+const maxDur = computed(() => {
+  let m = 1
+  const walk = (nodes: ChainNode[]) => {
+    for (const n of nodes) {
+      if (n.duration_ms) m = Math.max(m, n.duration_ms)
+      if (n.children) walk(n.children)
+    }
+  }
+  walk(props.chain.nodes)
+  return m
+})
+
+function pct(ms?: number | null) { return ms ? Math.min(100, (ms / maxDur.value) * 100) : 0 }
+
+const chainStats = computed(() => {
   const orch = props.chain.nodes.find(n => n.type === 'orchestrator')
   if (!orch?.children?.length) return null
   const total = orch.children.length
-  const done = orch.children.filter(c => ['done','succeeded','success','ok'].includes(c.status||'')).length
-  const failed = orch.children.filter(c => ['failed','error','nack'].includes(c.status||'')).length
-  const skipped = orch.children.filter(c => c.status === 'skipped').length
-  return { total, done, failed, skipped }
+  const ok = orch.children.filter(c => ['done','succeeded','success','ok'].includes(c.status || '')).length
+  const err = orch.children.filter(c => isErr(c.status)).length
+  const skip = orch.children.filter(c => c.status === 'skipped').length
+  return { total, ok, err, skip }
 })
 
 const timelineNodes = computed(() => {
   const items: ChainNode[] = []
   for (const n of props.chain.nodes) {
-    if (n.type === 'orchestrator' && n.children?.length) items.push(...n.children)
-    else if (n.duration_ms != null && n.type !== 'orchestrator') items.push(n)
+    if (n.type === 'orchestrator') {
+      if (n.children?.length) items.push(...n.children.filter(c => c.duration_ms != null))
+    } else if (n.duration_ms != null) {
+      items.push(n)
+    }
   }
-  return items.filter(n => n.duration_ms != null)
+  return items
 })
 </script>
 
 <template>
-  <div class="cc-root">
-    <!-- ── 顶部摘要栏 ── -->
-    <div class="cc-summary-bar">
-      <div class="cc-trigger-badge" :style="{ color: tInfo.color, borderColor: tInfo.color + '33', background: tInfo.color + '0d' }">
-        <span class="trigger-icon">{{ tInfo.icon }}</span>
-        <span>{{ tInfo.label }}</span>
-      </div>
-
-      <div class="cc-stats">
-        <div v-if="chain.total_ms != null" class="stat-item">
-          <span class="stat-label">总耗时</span>
-          <span class="stat-value mono" :class="{ 'val-slow': (chain.total_ms || 0) > 5000 }">{{ fmtDur(chain.total_ms) }}</span>
-        </div>
-        <div v-if="childStats" class="stat-item">
-          <span class="stat-label">节点</span>
-          <span class="stat-value">
-            <span class="val-ok">{{ childStats.done }}</span>
-            <span class="stat-sep"> / </span>
-            <span>{{ childStats.total }}</span>
-            <span v-if="childStats.failed" class="val-err"> · {{ childStats.failed }} 失败</span>
-            <span v-if="childStats.skipped" class="val-dim"> · {{ childStats.skipped }} 跳过</span>
+  <div class="cc">
+    <!-- ── 顶部摘要条 ── -->
+    <div class="cc-bar">
+      <span class="cc-trigger" :style="{ color: triggerInfo.color, background: triggerInfo.bg }">
+        {{ triggerInfo.label }}
+      </span>
+      <div class="cc-bar-stats">
+        <template v-if="chain.total_ms != null">
+          <span class="cc-stat-label">总耗时</span>
+          <span class="cc-stat-val" :class="{ 'cc-slow': chain.total_ms > 5000 }">{{ fmtMs(chain.total_ms) }}</span>
+        </template>
+        <template v-if="chainStats">
+          <span class="cc-stat-sep">·</span>
+          <span class="cc-stat-label">节点</span>
+          <span class="cc-stat-val">
+            <span class="cc-ok">{{ chainStats.ok }}</span>/<span>{{ chainStats.total }}</span>
+            <span v-if="chainStats.err" class="cc-err"> · {{ chainStats.err }} 失败</span>
+            <span v-if="chainStats.skip" class="cc-dim"> · {{ chainStats.skip }} 跳过</span>
           </span>
-        </div>
-        <div v-if="chain.status" class="stat-item">
-          <span
-            class="status-pill"
-            :style="{ color: getStatus(chain.status).color, background: getStatus(chain.status).bg }"
-          >{{ getStatus(chain.status).label }}</span>
-        </div>
+        </template>
+        <template v-if="chain.status">
+          <span class="cc-stat-sep">·</span>
+          <span class="cc-status-pill" :style="{ color: getStatus(chain.status).color, background: getStatus(chain.status).bg }">
+            {{ getStatus(chain.status).text }}
+          </span>
+        </template>
       </div>
     </div>
 
     <!-- ── 竖向链路 ── -->
     <div class="cc-chain">
       <template v-for="(node, i) in chain.nodes" :key="node.id">
-
-        <!-- 普通节点卡片 -->
+        <!-- ── 普通节点 ── -->
         <template v-if="node.type !== 'orchestrator'">
           <div
-            class="cc-node"
-            :class="{ 'cc-node--error': isError(node), 'cc-node--expanded': expandedId === node.id }"
-            :style="{ '--accent': getMeta(node.type).accentColor, animationDelay: `${i * 55}ms` }"
+            class="cc-card"
+            :class="{ 'cc-card--err': isErr(node.status), 'cc-card--open': expanded[node.id] }"
+            :style="{ '--ic': getMeta(node.type).iconColor, animationDelay: `${i * 50}ms` }"
             @click="onNodeClick(node)"
           >
-            <!-- 左侧彩色竖条 -->
-            <div class="node-accent-bar" />
-
-            <!-- 图标区 -->
-            <div class="node-icon-col">
-              <div
-                class="node-icon-circle"
-                :style="{ background: getMeta(node.type).bgColor, color: getMeta(node.type).accentColor, borderColor: getMeta(node.type).accentColor + '40' }"
-              >{{ getMeta(node.type).icon }}</div>
+            <!-- 彩色头条 -->
+            <div class="cc-card-head" :style="{ background: getMeta(node.type).iconBg }">
+              <div class="cc-icon" :style="{ background: getMeta(node.type).iconColor, color: '#fff' }">
+                {{ getMeta(node.type).icon }}
+              </div>
+              <div class="cc-head-content">
+                <span class="cc-node-label">{{ node.label }}</span>
+                <span v-if="node.detail" class="cc-node-detail">{{ node.detail }}</span>
+              </div>
+              <div class="cc-head-right">
+                <span v-if="node.sub" class="cc-node-sub">{{ node.sub }}</span>
+                <span v-if="fmtMs(node.duration_ms)" class="cc-dur" :class="{ 'cc-slow': (node.duration_ms || 0) > 3000 }">
+                  {{ fmtMs(node.duration_ms) }}
+                </span>
+                <span
+                  class="cc-dot"
+                  :style="{ background: getStatus(node.status).dot }"
+                  :class="{ 'cc-dot--pulse': node.status === 'running' }"
+                />
+              </div>
             </div>
 
-            <!-- 内容区 -->
-            <div class="node-content">
-              <div class="node-main-row">
-                <span class="node-label">{{ node.label }}</span>
-                <div class="node-right">
-                  <span v-if="node.note" class="node-note">{{ node.note }}</span>
-                  <span v-if="node.duration_ms != null" class="node-dur mono" :class="{ 'val-slow': node.duration_ms > 3000 }">{{ fmtDur(node.duration_ms) }}</span>
-                  <span
-                    v-if="node.status"
-                    class="status-dot"
-                    :style="{ background: getStatus(node.status).color }"
-                    :title="getStatus(node.status).label"
-                  />
+            <!-- 进度条（有耗时时展示） -->
+            <div v-if="node.duration_ms != null && node.duration_ms > 0" class="cc-progress">
+              <div class="cc-progress-fill" :style="{ width: pct(node.duration_ms) + '%', background: getMeta(node.type).iconColor }" />
+            </div>
+
+            <!-- 展开详情（独立行，不参与 flex） -->
+            <Transition name="cc-expand">
+              <div v-if="expanded[node.id]" class="cc-detail-panel" @click.stop>
+                <div v-if="node.detail" class="cc-dp-row">
+                  <span class="cc-dp-key">路径</span><span class="cc-dp-val">{{ node.detail }}</span>
                 </div>
-              </div>
-              <div class="node-detail-row" v-if="node.detail || node.sub">
-                <span v-if="node.detail" class="node-detail">{{ node.detail }}</span>
-                <span v-if="node.sub" class="node-sub">{{ node.sub }}</span>
-              </div>
-              <!-- 耗时进度条 -->
-              <div v-if="node.duration_ms != null" class="node-progress">
-                <div class="progress-fill" :style="{ width: durPct(node.duration_ms) + '%', background: getMeta(node.type).accentColor }" />
-              </div>
-            </div>
-
-            <!-- 展开详情面板 -->
-            <Transition name="expand">
-              <div v-if="expandedId === node.id" class="node-expand-panel" @click.stop>
-                <div class="ep-row" v-if="node.detail"><span class="ep-key">路径</span><span class="ep-val">{{ node.detail }}</span></div>
-                <div class="ep-row" v-if="node.note"><span class="ep-key">备注</span><span class="ep-val">{{ node.note }}</span></div>
-                <div class="ep-row" v-if="node.duration_ms != null"><span class="ep-key">耗时</span><span class="ep-val mono">{{ fmtDur(node.duration_ms) }}</span></div>
-                <div class="ep-row" v-if="node.hit_port"><span class="ep-key">端口</span><span class="ep-val">{{ node.hit_port }}</span></div>
-                <div class="ep-row ep-row--err" v-if="node.error"><span class="ep-key">错误</span><span class="ep-val">{{ node.error }}</span></div>
+                <div v-if="fmtMs(node.duration_ms)" class="cc-dp-row">
+                  <span class="cc-dp-key">耗时</span><span class="cc-dp-val cc-mono">{{ fmtMs(node.duration_ms) }}</span>
+                </div>
+                <div v-if="node.hit_port" class="cc-dp-row">
+                  <span class="cc-dp-key">端口</span><span class="cc-dp-val">{{ node.hit_port }}</span>
+                </div>
+                <div v-if="node.error" class="cc-dp-row cc-dp-err">
+                  <span class="cc-dp-key">错误</span><span class="cc-dp-val">{{ node.error }}</span>
+                </div>
               </div>
             </Transition>
           </div>
-
-          <!-- 竖向连接线 -->
-          <div v-if="i < chain.nodes.length - 1" class="cc-connector" :style="{ animationDelay: `${i * 55 + 28}ms` }">
-            <div class="connector-line" />
-            <div class="connector-arrow" />
-          </div>
         </template>
 
-        <!-- Orchestrator 容器 -->
+        <!-- ── Orchestrator 容器 ── -->
         <template v-else>
           <div
             class="cc-orch"
-            :class="{ 'cc-orch--error': node.status === 'failed' }"
-            :style="{ animationDelay: `${i * 55}ms` }"
+            :class="{ 'cc-orch--err': isErr(node.status) }"
+            :style="{ animationDelay: `${i * 50}ms` }"
           >
             <!-- 容器头部 -->
-            <div class="orch-header" @click="onNodeClick(node)">
-              <div
-                class="node-icon-circle orch-icon"
-                :style="{ background: 'rgba(37,99,235,0.08)', color: '#2563eb', borderColor: 'rgba(37,99,235,0.25)' }"
-              >O</div>
-              <span class="orch-label">{{ node.label }}</span>
-              <span v-if="node.detail" class="orch-detail">{{ node.detail }}</span>
-              <div class="orch-right">
-                <span v-if="node.duration_ms != null" class="node-dur mono">{{ fmtDur(node.duration_ms) }}</span>
-                <span v-if="node.status" class="status-pill" :style="{ color: getStatus(node.status).color, background: getStatus(node.status).bg }">{{ getStatus(node.status).label }}</span>
-                <span class="orch-toggle" :class="{ rotated: expandedId === node.id }" @click.stop="toggleExpand(node.id)">›</span>
+            <div class="cc-orch-head" @click="onNodeClick(node)">
+              <div class="cc-icon cc-icon--sm" :style="{ background: '#2563eb', color: '#fff' }">O</div>
+              <span class="cc-orch-label">{{ node.label }}</span>
+              <span v-if="node.detail" class="cc-orch-detail">{{ node.detail }}</span>
+              <div class="cc-orch-right">
+                <span v-if="fmtMs(node.duration_ms)" class="cc-dur">{{ fmtMs(node.duration_ms) }}</span>
+                <span v-if="node.status" class="cc-status-pill" :style="{ color: getStatus(node.status).color, background: getStatus(node.status).bg }">
+                  {{ getStatus(node.status).text }}
+                </span>
               </div>
             </div>
 
-            <!-- 子节点列表（竖向排列） -->
-            <div v-if="node.children?.length" class="orch-blocks">
+            <!-- 子节点列表 -->
+            <div v-if="node.children?.length" class="cc-blocks">
               <template v-for="(child, ci) in node.children" :key="child.id">
                 <div
-                  class="block-node"
+                  class="cc-block"
                   :class="{
-                    'block-node--error': child.status === 'failed' || child.status === 'error',
-                    'block-node--skip': child.status === 'skipped',
-                    'block-node--expanded': expandedId === child.id,
+                    'cc-block--err': isErr(child.status),
+                    'cc-block--skip': child.status === 'skipped',
+                    'cc-block--open': expanded[child.id],
                   }"
-                  :style="{ '--accent': getStatus(child.status).color, animationDelay: `${i * 55 + ci * 60 + 80}ms` }"
-                  @click="onNodeClick(child)"
+                  :style="{ '--bc': getStatus(child.status).dot, animationDelay: `${i * 50 + ci * 55 + 60}ms` }"
+                  @click.stop="onNodeClick(child)"
                 >
-                  <!-- 序号 -->
-                  <div class="block-seq">{{ ci + 1 }}</div>
-
-                  <!-- 内容 -->
-                  <div class="block-content">
-                    <div class="block-main-row">
-                      <span class="block-label">{{ child.label }}</span>
-                      <div class="block-right">
-                        <span v-if="child.hit_port" class="block-port">{{ child.hit_port }}</span>
-                        <span v-if="child.duration_ms != null" class="node-dur mono" :class="{ 'val-slow': child.duration_ms > 3000 }">{{ fmtDur(child.duration_ms) }}</span>
-                        <span
-                          class="status-pill status-pill--sm"
-                          :style="{ color: getStatus(child.status).color, background: getStatus(child.status).bg }"
-                        >{{ getStatus(child.status).label }}</span>
-                      </div>
+                  <!-- 块头部 -->
+                  <div class="cc-block-head">
+                    <div class="cc-block-seq">{{ ci + 1 }}</div>
+                    <div class="cc-block-info">
+                      <span class="cc-block-label">{{ child.label }}</span>
                     </div>
-
-                    <!-- 进度条 -->
-                    <div v-if="child.duration_ms != null" class="node-progress" style="margin-top:6px">
-                      <div class="progress-fill" :style="{ width: durPct(child.duration_ms) + '%', background: getStatus(child.status).color }" />
+                    <div class="cc-block-right">
+                      <span v-if="child.hit_port" class="cc-port">{{ child.hit_port }}</span>
+                      <span v-if="fmtMs(child.duration_ms)" class="cc-dur cc-mono" :class="{ 'cc-slow': (child.duration_ms || 0) > 3000 }">
+                        {{ fmtMs(child.duration_ms) }}
+                      </span>
+                      <span class="cc-status-pill cc-status-pill--sm" :style="{ color: getStatus(child.status).color, background: getStatus(child.status).bg }">
+                        {{ getStatus(child.status).text }}
+                      </span>
                     </div>
+                  </div>
 
-                    <!-- 错误信息 -->
-                    <div v-if="isError(child) && child.error" class="block-error-msg">{{ child.error }}</div>
+                  <!-- 进度条 -->
+                  <div v-if="child.duration_ms != null && child.duration_ms > 0" class="cc-progress">
+                    <div class="cc-progress-fill" :style="{ width: pct(child.duration_ms) + '%', background: getStatus(child.status).dot }" />
                   </div>
 
                   <!-- 展开详情 -->
-                  <Transition name="expand">
-                    <div v-if="expandedId === child.id" class="node-expand-panel" @click.stop>
-                      <div class="ep-row" v-if="child.node_id"><span class="ep-key">节点 ID</span><code class="ep-code">{{ child.node_id.slice(0, 12) }}…</code></div>
-                      <div class="ep-row" v-if="child.block_id"><span class="ep-key">块 ID</span><code class="ep-code">{{ child.block_id.slice(0, 12) }}…</code></div>
-                      <div class="ep-row" v-if="child.duration_ms != null"><span class="ep-key">执行耗时</span><span class="ep-val mono">{{ fmtDur(child.duration_ms) }}</span></div>
-                      <div class="ep-row" v-if="child.hit_port"><span class="ep-key">激活端口</span><span class="ep-val">{{ child.hit_port }}</span></div>
-                      <div class="ep-row ep-row--err" v-if="child.error"><span class="ep-key">错误</span><span class="ep-val">{{ child.error }}</span></div>
+                  <Transition name="cc-expand">
+                    <div v-if="expanded[child.id]" class="cc-detail-panel" @click.stop>
+                      <div v-if="child.node_id" class="cc-dp-row">
+                        <span class="cc-dp-key">节点 ID</span><code class="cc-dp-code">{{ child.node_id.slice(0,12) }}…</code>
+                      </div>
+                      <div v-if="child.block_id" class="cc-dp-row">
+                        <span class="cc-dp-key">块 ID</span><code class="cc-dp-code">{{ child.block_id.slice(0,12) }}…</code>
+                      </div>
+                      <div v-if="fmtMs(child.duration_ms)" class="cc-dp-row">
+                        <span class="cc-dp-key">执行耗时</span><span class="cc-dp-val cc-mono">{{ fmtMs(child.duration_ms) }}</span>
+                      </div>
+                      <div v-if="child.hit_port" class="cc-dp-row">
+                        <span class="cc-dp-key">激活端口</span><span class="cc-dp-val">{{ child.hit_port }}</span>
+                      </div>
+                      <div v-if="child.error" class="cc-dp-row cc-dp-err">
+                        <span class="cc-dp-key">错误</span><span class="cc-dp-val">{{ child.error }}</span>
+                      </div>
                     </div>
                   </Transition>
                 </div>
 
-                <!-- 块间连接线 -->
-                <div v-if="ci < (node.children?.length ?? 0) - 1" class="block-connector" :style="{ animationDelay: `${i * 55 + ci * 60 + 110}ms` }">
-                  <div class="connector-line" style="height: 16px" />
-                  <div class="connector-arrow" />
+                <!-- 块间连接 -->
+                <div v-if="ci < (node.children?.length ?? 0) - 1" class="cc-mini-connector">
+                  <div class="cc-mini-line" />
+                  <div class="cc-mini-arrow" />
                 </div>
               </template>
             </div>
-            <div v-else class="orch-empty">暂无执行步骤</div>
-          </div>
 
-          <!-- Orchestrator 后连接线 -->
-          <div v-if="i < chain.nodes.length - 1" class="cc-connector" :style="{ animationDelay: `${i * 55 + 28}ms` }">
-            <div class="connector-line" />
-            <div class="connector-arrow" />
+            <div v-else class="cc-orch-empty">
+              <span>Flow 内部执行步骤暂未采集</span>
+            </div>
           </div>
         </template>
 
+        <!-- ── 节点间连接线 ── -->
+        <div v-if="i < chain.nodes.length - 1" class="cc-connector" :style="{ animationDelay: `${i * 50 + 25}ms` }">
+          <div class="cc-conn-line" />
+          <div class="cc-conn-arrow" />
+        </div>
       </template>
     </div>
 
-    <!-- ── 耗时分布（甘特图） ── -->
-    <div v-if="timelineNodes.length > 1" class="cc-timeline">
-      <div class="tl-title">耗时分布</div>
-      <div class="tl-list">
-        <div v-for="n in timelineNodes" :key="`tl-${n.id}`" class="tl-row">
-          <div class="tl-name">{{ n.label }}</div>
-          <div class="tl-track">
-            <div
-              class="tl-fill"
-              :style="{ width: durPct(n.duration_ms) + '%', background: getStatus(n.status).color }"
-            />
+    <!-- ── 耗时分布 ── -->
+    <div v-if="timelineNodes.length >= 2" class="cc-timeline">
+      <div class="cc-tl-title">耗时分布</div>
+      <div class="cc-tl-list">
+        <div v-for="n in timelineNodes" :key="`tl-${n.id}`" class="cc-tl-row">
+          <div class="cc-tl-name">{{ n.label }}</div>
+          <div class="cc-tl-track">
+            <div class="cc-tl-fill" :style="{ width: pct(n.duration_ms) + '%', background: getStatus(n.status).dot }" />
           </div>
-          <div class="tl-val mono">{{ fmtDur(n.duration_ms) }}</div>
+          <div class="cc-tl-val cc-mono">{{ fmtMs(n.duration_ms) }}</div>
         </div>
       </div>
     </div>
@@ -348,392 +332,298 @@ const timelineNodes = computed(() => {
 
 <style scoped>
 /* ── 动画 ── */
-@keyframes cc-fade-in {
-  from { opacity: 0; transform: translateY(10px); }
+@keyframes cc-in {
+  from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
-@keyframes progress-grow {
+@keyframes cc-progress-in {
   from { width: 0 !important; }
-  to   { /* 由 style 决定 */ }
 }
-@keyframes connector-grow {
-  from { opacity: 0; transform: scaleY(0.4); }
-  to   { opacity: 1; transform: scaleY(1); }
+@keyframes cc-err-ring {
+  0%,100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.12); }
+  50%     { box-shadow: 0 0 0 6px rgba(220,38,38,0); }
 }
-@keyframes err-ring {
-  0%,100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.15); }
-  50%     { box-shadow: 0 0 0 5px rgba(220,38,38,0); }
+@keyframes cc-dot-pulse {
+  0%,100% { opacity: 1; transform: scale(1); }
+  50%     { opacity: 0.6; transform: scale(0.8); }
 }
 
-.expand-enter-active { animation: cc-fade-in 0.2s ease; }
-.expand-leave-active { animation: cc-fade-in 0.15s ease reverse; }
+.cc-expand-enter-active { animation: cc-in 0.2s ease; }
+.cc-expand-leave-active { animation: cc-in 0.15s ease reverse; }
 
 /* ── 根容器 ── */
-.cc-root {
+.cc {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 4px 2px;
-}
-
-/* ── 摘要栏 ── */
-.cc-summary-bar {
-  display: flex;
-  align-items: center;
   gap: 12px;
-  flex-wrap: wrap;
-  padding: 10px 16px;
-  background: var(--pf-panel);
-  border: 1px solid var(--pf-border);
-  border-radius: 10px;
-  box-shadow: var(--pf-shadow-sm);
 }
-.cc-trigger-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 4px 12px;
-  border-radius: 20px;
-  border: 1px solid;
-  letter-spacing: 0.2px;
-}
-.trigger-icon {
-  font-size: 11px;
-  font-weight: 800;
-  font-style: normal;
-}
-.cc-stats {
+
+/* ── 摘要条 ── */
+.cc-bar {
   display: flex;
   align-items: center;
-  gap: 16px;
-  margin-left: auto;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.cc-trigger {
+  font-size: 12px; font-weight: 600;
+  padding: 3px 10px; border-radius: 20px;
+  white-space: nowrap;
+}
+.cc-bar-stats {
+  display: flex; align-items: center;
+  gap: 6px; margin-left: auto;
   flex-wrap: wrap;
 }
-.stat-item { display: flex; align-items: center; gap: 6px; }
-.stat-label { font-size: 12px; color: var(--pf-text-dim); }
-.stat-value { font-size: 12px; color: var(--pf-text); font-weight: 500; }
-.stat-sep { color: var(--pf-text-dim); }
-.val-ok  { color: #16a34a; font-weight: 600; }
-.val-err { color: #dc2626; font-weight: 600; }
-.val-dim { color: #9ca3af; }
-.val-slow { color: #d97706 !important; }
-.mono { font-family: 'SF Mono', 'Fira Code', monospace; }
+.cc-stat-label { font-size: 12px; color: #9ca3af; }
+.cc-stat-val   { font-size: 12px; color: #374151; font-weight: 500; }
+.cc-stat-sep   { color: #d1d5db; font-size: 12px; }
+.cc-ok  { color: #16a34a; font-weight: 600; }
+.cc-err { color: #dc2626; font-weight: 600; }
+.cc-dim { color: #9ca3af; }
+.cc-slow { color: #d97706 !important; }
+.cc-mono { font-family: 'SF Mono','Fira Code',ui-monospace,monospace; }
 
-/* ── 竖向主链路容器 ── */
+/* ── 竖向链路 ── */
 .cc-chain {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 0;
 }
 
-/* ── 通用节点卡片 ── */
-.cc-node {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
-  background: var(--pf-panel);
-  border: 1px solid var(--pf-border);
+/* ── 卡片通用 ── */
+.cc-card {
+  background: #fff;
+  border: 1px solid #e5e7eb;
   border-radius: 10px;
-  cursor: pointer;
-  position: relative;
   overflow: hidden;
-  transition: border-color 0.18s, box-shadow 0.18s, transform 0.18s;
-  animation: cc-fade-in 0.38s ease both;
+  cursor: pointer;
+  transition: border-color 0.16s, box-shadow 0.16s, transform 0.16s;
+  animation: cc-in 0.35s ease both;
 }
-.cc-node:hover {
-  border-color: var(--accent, var(--pf-accent));
-  box-shadow: var(--pf-shadow-md);
+.cc-card:hover {
+  border-color: var(--ic, #2563eb);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.07);
   transform: translateY(-1px);
 }
-.cc-node--expanded {
-  border-color: var(--pf-accent);
-  box-shadow: 0 0 0 3px var(--pf-accent-soft);
+.cc-card--open {
+  border-color: var(--ic, #2563eb);
+  box-shadow: 0 0 0 3px rgba(37,99,235,0.1);
 }
-.cc-node--error {
-  border-color: rgba(220,38,38,0.35);
-  animation: cc-fade-in 0.38s ease both, err-ring 2.2s ease infinite 0.5s;
-}
-
-/* 左侧彩色竖条 */
-.node-accent-bar {
-  position: absolute;
-  left: 0; top: 0; bottom: 0;
-  width: 3px;
-  background: var(--accent, var(--pf-accent));
-  border-radius: 10px 0 0 10px;
+.cc-card--err {
+  border-color: rgba(220,38,38,0.3);
+  animation: cc-in 0.35s ease both, cc-err-ring 2.4s ease infinite 0.6s;
 }
 
-/* 图标圆圈 */
-.node-icon-col { flex-shrink: 0; padding-top: 2px; }
-.node-icon-circle {
-  width: 32px; height: 32px;
-  border-radius: 8px;
-  border: 1px solid;
+/* ── 卡片彩色头条 ── */
+.cc-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+}
+.cc-icon {
+  width: 32px; height: 32px; border-radius: 8px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 12px; font-weight: 700;
+  font-size: 13px; font-weight: 800;
   flex-shrink: 0;
-  transition: transform 0.15s;
+  letter-spacing: -0.5px;
 }
-.cc-node:hover .node-icon-circle { transform: scale(1.05); }
+.cc-icon--sm { width: 26px; height: 26px; font-size: 11px; border-radius: 6px; }
 
-/* 内容区 */
-.node-content { flex: 1; min-width: 0; }
-.node-main-row {
-  display: flex; align-items: center;
-  gap: 8px;
+.cc-head-content {
+  display: flex; flex-direction: column;
+  gap: 1px; flex: 1; min-width: 0;
 }
-.node-label {
-  font-size: 13px; font-weight: 600;
-  color: var(--pf-text);
-  flex: 1; min-width: 0;
-}
-.node-right {
-  display: flex; align-items: center; gap: 8px;
-  flex-shrink: 0;
-}
-.node-note {
-  font-size: 11px; color: var(--pf-text-dim);
-  background: var(--pf-panel-2);
-  padding: 2px 6px; border-radius: 4px;
-}
-.node-dur {
-  font-size: 12px; color: var(--pf-text-dim);
-  font-weight: 500;
-}
-.status-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  flex-shrink: 0;
-}
-.node-detail-row {
-  margin-top: 4px;
-  display: flex; gap: 8px;
-}
-.node-detail {
-  font-size: 11px; color: var(--pf-text-dim);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.node-sub {
-  font-size: 11px; color: var(--pf-text-dim);
-}
+.cc-node-label  { font-size: 13px; font-weight: 600; color: #1f2329; }
+.cc-node-detail { font-size: 11px; color: #6b7280; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-head-right  { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.cc-node-sub    { font-size: 11px; color: #6b7280; }
+.cc-dur         { font-size: 12px; color: #374151; font-weight: 600; font-family: 'SF Mono','Fira Code',ui-monospace,monospace; }
 
-/* 进度条 */
-.node-progress {
+.cc-dot {
+  width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+}
+.cc-dot--pulse { animation: cc-dot-pulse 1.2s ease-in-out infinite; }
+
+/* ── 进度条 ── */
+.cc-progress {
   height: 3px;
-  background: var(--pf-border);
-  border-radius: 2px;
-  overflow: hidden;
-  margin-top: 8px;
+  background: #f3f4f6;
+  margin: 0;
 }
-.progress-fill {
-  height: 100%; border-radius: 2px;
-  animation: progress-grow 0.9s ease both;
+.cc-progress-fill {
+  height: 100%;
+  animation: cc-progress-in 0.8s ease both;
   transition: width 0.3s ease;
 }
 
-/* 展开面板 */
-.node-expand-panel {
-  width: 100%;
-  margin-top: 12px;
-  padding: 10px 12px;
-  background: var(--pf-panel-2);
-  border-radius: 8px;
-  display: flex; flex-direction: column; gap: 6px;
-  grid-column: 1 / -1;
+/* ── 展开详情面板（全宽，不参与 card-head flex）── */
+.cc-detail-panel {
+  padding: 10px 14px 12px;
+  background: #f9fafb;
+  border-top: 1px solid #f0f2f5;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
-.ep-row {
-  display: flex; align-items: flex-start; gap: 10px;
-  font-size: 12px;
+.cc-dp-row {
+  display: flex; align-items: flex-start;
+  gap: 10px; font-size: 12px;
 }
-.ep-row--err .ep-key { color: #dc2626; }
-.ep-row--err .ep-val { color: #dc2626; }
-.ep-key {
-  font-weight: 600; color: var(--pf-text-dim);
-  min-width: 64px; flex-shrink: 0;
-  font-size: 11px;
+.cc-dp-err .cc-dp-key { color: #dc2626; }
+.cc-dp-err .cc-dp-val { color: #dc2626; }
+.cc-dp-key {
+  font-size: 11px; font-weight: 600; color: #9ca3af;
+  min-width: 60px; flex-shrink: 0; padding-top: 1px;
 }
-.ep-val { color: var(--pf-text); word-break: break-all; }
-.ep-code {
-  font-family: 'SF Mono','Fira Code',monospace;
-  font-size: 11px; color: var(--pf-text);
-  background: var(--pf-panel);
-  padding: 1px 5px; border-radius: 4px;
-  border: 1px solid var(--pf-border);
+.cc-dp-val { color: #374151; word-break: break-all; }
+.cc-dp-code {
+  font-family: 'SF Mono','Fira Code',ui-monospace,monospace;
+  font-size: 11px; color: #374151;
+  background: #fff; padding: 1px 5px;
+  border-radius: 4px; border: 1px solid #e5e7eb;
 }
 
-/* ── 竖向连接线 ── */
+/* ── 连接线 ── */
 .cc-connector {
   display: flex; flex-direction: column; align-items: center;
-  padding: 2px 0;
-  animation: connector-grow 0.3s ease both;
-  flex-shrink: 0;
+  padding: 4px 0;
+  animation: cc-in 0.25s ease both;
 }
-.connector-line {
+.cc-conn-line {
   width: 2px; height: 20px;
-  background: linear-gradient(180deg, var(--pf-border) 0%, var(--pf-accent-soft) 100%);
-  border-radius: 1px;
+  background: linear-gradient(180deg, #e5e7eb 0%, #dbeafe 100%);
 }
-.connector-arrow {
+.cc-conn-arrow {
   width: 0; height: 0;
   border-left: 5px solid transparent;
   border-right: 5px solid transparent;
-  border-top: 6px solid rgba(37,99,235,0.3);
+  border-top: 6px solid #bfdbfe;
   margin-top: -1px;
 }
 
 /* ── Orchestrator 容器 ── */
 .cc-orch {
-  border: 1.5px dashed rgba(37,99,235,0.25);
+  border: 1.5px dashed #bfdbfe;
   border-radius: 12px;
-  background: rgba(37,99,235,0.02);
   overflow: hidden;
-  animation: cc-fade-in 0.4s ease both;
-  transition: border-color 0.18s, box-shadow 0.18s;
+  background: #f8faff;
+  animation: cc-in 0.38s ease both;
+  transition: border-color 0.16s, box-shadow 0.16s;
 }
-.cc-orch:hover { border-color: rgba(37,99,235,0.45); box-shadow: var(--pf-shadow-sm); }
-.cc-orch--error { border-color: rgba(220,38,38,0.35); background: rgba(220,38,38,0.02); }
+.cc-orch:hover { border-color: #93c5fd; box-shadow: 0 2px 8px rgba(37,99,235,0.08); }
+.cc-orch--err  { border-color: #fca5a5; background: #fff8f8; }
 
-.orch-header {
+.cc-orch-head {
   display: flex; align-items: center;
-  gap: 10px; padding: 14px 16px 10px;
-  cursor: pointer; border-bottom: 1px solid rgba(37,99,235,0.1);
+  gap: 10px; padding: 12px 14px;
+  background: #eff6ff;
+  cursor: pointer;
+  border-bottom: 1px dashed #bfdbfe;
   transition: background 0.15s;
 }
-.orch-header:hover { background: rgba(37,99,235,0.04); }
-.orch-icon { flex-shrink: 0; }
-.orch-label { font-size: 13px; font-weight: 600; color: var(--pf-text); }
-.orch-detail { font-size: 11px; color: var(--pf-text-dim); }
-.orch-right { display: flex; align-items: center; gap: 8px; margin-left: auto; }
-.orch-toggle {
-  font-size: 18px; color: var(--pf-text-dim); font-weight: 300;
-  transition: transform 0.2s; display: inline-block;
-  cursor: pointer; user-select: none; line-height: 1;
-}
-.orch-toggle.rotated { transform: rotate(90deg); }
-.orch-empty { padding: 16px; font-size: 12px; color: var(--pf-text-dim); text-align: center; }
+.cc-orch-head:hover { background: #dbeafe; }
+.cc-orch-label  { font-size: 13px; font-weight: 700; color: #1e40af; }
+.cc-orch-detail { font-size: 11px; color: #3b82f6; font-family: 'SF Mono','Fira Code',ui-monospace,monospace; }
+.cc-orch-right  { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.cc-orch-empty  { padding: 14px; text-align: center; font-size: 12px; color: #9ca3af; }
 
-/* 子节点列表 */
-.orch-blocks {
+/* ── 块列表 ── */
+.cc-blocks {
   display: flex; flex-direction: column;
-  padding: 12px 16px 14px;
+  padding: 10px 12px 12px;
   gap: 0;
 }
 
-/* Block 子节点 */
-.block-node {
-  display: flex; align-items: flex-start;
-  gap: 10px; padding: 10px 14px;
-  background: var(--pf-panel);
-  border: 1px solid var(--pf-border);
+/* ── 单个块 ── */
+.cc-block {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-left: 3px solid var(--bc, #22c55e);
   border-radius: 8px;
+  overflow: hidden;
   cursor: pointer;
-  position: relative; overflow: hidden;
-  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
-  animation: cc-fade-in 0.35s ease both;
+  transition: border-color 0.14s, box-shadow 0.14s, transform 0.14s;
+  animation: cc-in 0.32s ease both;
 }
-.block-node::before {
-  content: '';
-  position: absolute; left: 0; top: 0; bottom: 0;
-  width: 3px; border-radius: 8px 0 0 8px;
-  background: var(--accent, #16a34a);
+.cc-block:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.07);
+  transform: translateX(2px);
 }
-.block-node:hover {
-  border-color: var(--accent, var(--pf-accent));
-  box-shadow: var(--pf-shadow-sm);
-  transform: translateY(-1px);
-}
-.block-node--expanded {
-  border-color: var(--pf-accent);
-  box-shadow: 0 0 0 2px var(--pf-accent-soft);
-}
-.block-node--error {
-  border-color: rgba(220,38,38,0.3);
-  animation: cc-fade-in 0.35s ease both, err-ring 2s ease infinite 0.5s;
-}
-.block-node--skip { opacity: 0.55; }
+.cc-block--open  { box-shadow: 0 0 0 2px rgba(37,99,235,0.15); }
+.cc-block--err   { border-left-color: #ef4444; animation: cc-in 0.32s ease both, cc-err-ring 2s ease infinite 0.5s; }
+.cc-block--skip  { opacity: 0.55; }
 
-/* 序号 */
-.block-seq {
-  width: 20px; height: 20px; border-radius: 50%;
-  background: var(--pf-panel-2); border: 1px solid var(--pf-border);
-  font-size: 11px; font-weight: 600; color: var(--pf-text-dim);
+.cc-block-head {
+  display: flex; align-items: center;
+  gap: 10px; padding: 9px 12px;
+}
+.cc-block-seq {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: #f3f4f6; border: 1px solid #e5e7eb;
+  font-size: 11px; font-weight: 700; color: #6b7280;
   display: flex; align-items: center; justify-content: center;
-  flex-shrink: 0; margin-top: 1px;
+  flex-shrink: 0;
+}
+.cc-block-info { flex: 1; min-width: 0; }
+.cc-block-label { font-size: 13px; font-weight: 600; color: #1f2329; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.cc-block-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+.cc-port {
+  font-size: 10px; color: #6b7280;
+  background: #f3f4f6; padding: 1px 6px;
+  border-radius: 4px; border: 1px solid #e5e7eb;
 }
 
-.block-content { flex: 1; min-width: 0; }
-.block-main-row { display: flex; align-items: center; gap: 8px; }
-.block-label {
-  font-size: 13px; font-weight: 600; color: var(--pf-text);
-  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+/* 块间连接 */
+.cc-mini-connector {
+  display: flex; flex-direction: column; align-items: flex-start;
+  padding: 2px 0 2px 22px; /* 对齐序号中心 */
 }
-.block-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-.block-port {
-  font-size: 11px; color: var(--pf-text-dim);
-  background: var(--pf-panel-2); padding: 1px 6px;
-  border-radius: 4px; border: 1px solid var(--pf-border);
-  white-space: nowrap;
+.cc-mini-line {
+  width: 2px; height: 10px;
+  background: #e5e7eb;
+  margin-left: 10px;
 }
-.block-error-msg {
-  margin-top: 6px; padding: 6px 8px;
-  background: rgba(220,38,38,0.05);
-  border-left: 2px solid #dc2626;
-  border-radius: 0 4px 4px 0;
-  font-size: 11px; color: #dc2626;
-  word-break: break-all;
+.cc-mini-arrow {
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid #d1d5db;
+  margin-left: 8px; margin-top: -1px;
 }
 
-/* 块间连接线（比外部连接线短一些） */
-.block-connector {
-  display: flex; flex-direction: column; align-items: center;
-  padding: 0;
-  animation: connector-grow 0.25s ease both;
-}
-
-/* 状态标签 */
-.status-pill {
-  display: inline-flex; align-items: center;
+/* ── 状态标签 ── */
+.cc-status-pill {
   font-size: 11px; font-weight: 600;
   padding: 2px 8px; border-radius: 10px;
-  white-space: nowrap;
+  white-space: nowrap; flex-shrink: 0;
 }
-.status-pill--sm { font-size: 10px; padding: 1px 6px; }
+.cc-status-pill--sm { font-size: 10px; padding: 1px 6px; }
 
 /* ── 耗时分布 ── */
 .cc-timeline {
-  padding: 14px 16px;
-  background: var(--pf-panel);
-  border: 1px solid var(--pf-border);
+  padding: 12px 14px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
   border-radius: 10px;
-  box-shadow: var(--pf-shadow-sm);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
-.tl-title {
-  font-size: 11px; font-weight: 600;
-  color: var(--pf-text-dim);
-  text-transform: uppercase; letter-spacing: 0.6px;
-  margin-bottom: 12px;
+.cc-tl-title {
+  font-size: 11px; font-weight: 600; color: #9ca3af;
+  text-transform: uppercase; letter-spacing: 0.7px;
+  margin-bottom: 10px;
 }
-.tl-list { display: flex; flex-direction: column; gap: 8px; }
-.tl-row { display: flex; align-items: center; gap: 10px; }
-.tl-name {
-  font-size: 12px; color: var(--pf-text);
-  width: 110px; flex-shrink: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.tl-track {
-  flex: 1; height: 6px;
-  background: var(--pf-panel-2);
-  border-radius: 3px; overflow: hidden;
-}
-.tl-fill {
-  height: 100%; border-radius: 3px;
-  animation: progress-grow 0.9s ease both;
-}
-.tl-val {
-  font-size: 11px; color: var(--pf-text-dim);
-  width: 50px; flex-shrink: 0; text-align: right;
-}
+.cc-tl-list { display: flex; flex-direction: column; gap: 7px; }
+.cc-tl-row  { display: flex; align-items: center; gap: 10px; }
+.cc-tl-name { font-size: 12px; color: #374151; width: 100px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-tl-track { flex: 1; height: 6px; background: #f3f4f6; border-radius: 3px; overflow: hidden; }
+.cc-tl-fill  { height: 100%; border-radius: 3px; animation: cc-progress-in 0.9s ease both; }
+.cc-tl-val   { font-size: 11px; color: #6b7280; width: 50px; flex-shrink: 0; text-align: right; }
 </style>
