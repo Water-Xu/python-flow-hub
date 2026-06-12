@@ -391,7 +391,7 @@ class ConsumerManager:
             flow_run = FlowRun(
                 flow_id=flow_id, status="running",
                 dag_snapshot={"entry_node_id": effective_entry_node_id, "mode": "mq"},
-                node_states={},
+                node_states={}, api_id=api.id, trigger_source="mq",
             )
             session.add(flow_run)
             await session.flush()
@@ -480,14 +480,18 @@ class ConsumerManager:
                 flow_run.node_states = states
                 await session.commit()
 
+            import time as _time
+            _mq_start = _time.time()
             try:
                 outputs = await run_flow(nodes, edges, inputs, node_executor, checkpoint)
                 flow_run.status = "succeeded"
                 flow_run.finished_at = _utcnow()
+                flow_run.duration_ms = int((_time.time() - _mq_start) * 1000)
                 await session.commit()
             except Exception:
                 flow_run.status = "failed"
                 flow_run.finished_at = _utcnow()
+                flow_run.duration_ms = int((_time.time() - _mq_start) * 1000)
                 await session.commit()
                 raise
             return outputs

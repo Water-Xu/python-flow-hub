@@ -129,10 +129,12 @@ async def _recent_executions(session: AsyncSession, limit: int = 15) -> list[dic
     } for r in rows]
 
 
-async def _recent_flow_runs(session: AsyncSession, limit: int = 12) -> list[dict]:
+async def _recent_flow_runs(session: AsyncSession, limit: int = 20) -> list[dict]:
     rows = (await session.execute(
-        select(FlowRun, Flow.name.label("flow_name"))
+        select(FlowRun, Flow.name.label("flow_name"), PublishedApi.name.label("api_name"),
+               PublishedApi.path.label("api_path"))
         .outerjoin(Flow, FlowRun.flow_id == Flow.id)
+        .outerjoin(PublishedApi, FlowRun.api_id == PublishedApi.id)
         .order_by(FlowRun.created_at.desc())
         .limit(limit)
     )).all()
@@ -140,13 +142,23 @@ async def _recent_flow_runs(session: AsyncSession, limit: int = 12) -> list[dict
     for row in rows:
         r = row.FlowRun
         states = r.node_states or {}
-        done = sum(1 for s in states.values() if isinstance(s, dict) and s.get("status") == "done")
+        done = sum(1 for s in states.values() if isinstance(s, dict) and s.get("status") in ("done", "succeeded"))
         skipped = sum(1 for s in states.values() if isinstance(s, dict) and s.get("status") == "skipped")
+        # duration_ms：优先用记录值，其次用 finished_at - created_at 推算
+        dur = r.duration_ms
+        if dur is None and r.finished_at and r.created_at:
+            fa = r.finished_at if r.finished_at.tzinfo else r.finished_at.replace(tzinfo=timezone.utc)
+            ca = r.created_at if r.created_at.tzinfo else r.created_at.replace(tzinfo=timezone.utc)
+            dur = int((fa - ca).total_seconds() * 1000)
         out.append({
             "id": r.id, "flow_id": r.flow_id, "flow_name": row.flow_name or "",
             "flow_deployment_id": r.flow_deployment_id,
+            "api_id": r.api_id, "api_name": row.api_name or "",
+            "api_path": row.api_path or "",
+            "trigger_source": r.trigger_source or "manual",
             "status": r.status, "node_total": len(states), "node_done": done,
             "node_skipped": skipped, "owner_pod": r.owner_pod,
+            "duration_ms": dur,
             "created_at": r.created_at, "finished_at": r.finished_at,
         })
     return out

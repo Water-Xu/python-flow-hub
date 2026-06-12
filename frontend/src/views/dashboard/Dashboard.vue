@@ -262,68 +262,68 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="grid-2">
-      <!-- 最近整流链路 -->
-      <div class="pf-card list-card">
-        <div class="card-title"><el-icon><Share /></el-icon> 最近整流链路（点击查看 trace）</div>
-        <transition-group name="list" tag="div" class="run-list">
-          <div
-            v-for="run in recentRuns"
-            :key="run.id"
-            class="run-item"
-            @click="openTrace(run)"
-          >
-            <div class="run-head">
-              <div class="run-name-id">
-                <span class="run-name" v-if="run.flow_name">{{ run.flow_name }}</span>
-                <code class="run-id">{{ shortId(run.id) }}</code>
-              </div>
-              <el-tag :type="runStatusType[run.status] || 'info'" size="small" effect="dark">{{ run.status }}</el-tag>
-            </div>
-            <div class="run-progress">
-              <div class="rp-bar">
-                <div
-                  class="rp-fill"
-                  :style="{ width: `${run.node_total ? (run.node_done / run.node_total) * 100 : 0}%` }"
-                />
-              </div>
-              <span class="rp-text">{{ run.node_done }}/{{ run.node_total }} 节点</span>
-            </div>
-            <div class="run-meta dim">
-              <span>{{ fmtTime(run.created_at) }}</span>
-              <span v-if="run.owner_pod" class="run-pod">{{ run.owner_pod }}</span>
-            </div>
-          </div>
-        </transition-group>
-        <el-empty v-if="!recentRuns.length" description="暂无整流执行" :image-size="60" />
+    <!-- 调用记录（整流链路 + 发布 API 调用统一展示） -->
+    <div class="pf-card calls-card">
+      <div class="calls-head">
+        <div class="card-title" style="margin-bottom:0"><el-icon><List /></el-icon> 调用记录（点击查看执行 trace）</div>
+        <div class="calls-legend">
+          <span class="legend-item"><span class="src-dot src-http" />HTTP</span>
+          <span class="legend-item"><span class="src-dot src-stream" />Stream</span>
+          <span class="legend-item"><span class="src-dot src-mq" />MQ</span>
+          <span class="legend-item"><span class="src-dot src-manual" />手动</span>
+        </div>
       </div>
-
-      <!-- 最近执行（块 + flow 均可） -->
-      <div class="pf-card list-card">
-        <div class="card-title"><el-icon><Histogram /></el-icon> 最近执行</div>
-        <transition-group name="list" tag="div" class="exec-list">
-          <div
-            v-for="exec in recentExec"
-            :key="exec.id"
-            class="exec-item"
-            @click="openExecDetail(exec)"
-          >
-            <div class="exec-item-head">
-              <div class="exec-name-wrap">
-                <span class="exec-block-name" v-if="exec.block_name">{{ exec.block_name }}</span>
-                <code class="exec-id-code">{{ shortId(exec.block_id) }}</code>
-                <el-tag v-if="exec.flow_run_id" size="small" type="info" class="exec-flow-badge">整流</el-tag>
-              </div>
-              <el-tag :type="execStatusType[exec.status] || 'info'" size="small" effect="dark">{{ exec.status }}</el-tag>
-            </div>
-            <div class="exec-item-meta dim">
-              <span>{{ exec.duration_ms != null ? exec.duration_ms + 'ms' : '-' }}</span>
-              <span>{{ fmtTime(exec.created_at) }}</span>
-            </div>
+      <transition-group name="list" tag="div" class="calls-list">
+        <div
+          v-for="(run, i) in recentRuns"
+          :key="run.id"
+          class="call-row"
+          :style="{ animationDelay: `${i * 30}ms` }"
+          @click="openTrace(run)"
+        >
+          <!-- 来源指示点 -->
+          <div class="call-src">
+            <span class="src-dot" :class="`src-${run.trigger_source || 'manual'}`" :title="run.trigger_source || 'manual'" />
           </div>
-        </transition-group>
-        <el-empty v-if="!recentExec.length" description="暂无执行记录" :image-size="60" />
-      </div>
+          <!-- API 名称 / Flow 名称 -->
+          <div class="call-name">
+            <span class="call-api-name" v-if="run.api_name">{{ run.api_name }}</span>
+            <span class="call-api-name dim" v-else>{{ run.flow_name || '未知流程' }}</span>
+            <span class="call-sub dim" v-if="run.api_path">
+              <el-icon size="10"><Link /></el-icon> /api/public/{{ run.api_path }}
+            </span>
+            <span class="call-sub dim" v-else>
+              <el-icon size="10"><Share /></el-icon> {{ run.flow_name }}
+            </span>
+          </div>
+          <!-- 节点进度 -->
+          <div class="call-nodes" v-if="run.node_total > 0">
+            <div class="rp-bar-sm">
+              <div
+                class="rp-fill-sm"
+                :class="run.status === 'failed' ? 'rp-fill-err' : ''"
+                :style="{ width: `${run.node_total ? (run.node_done / run.node_total) * 100 : 100}%` }"
+              />
+            </div>
+            <span class="call-node-txt dim">{{ run.node_done }}/{{ run.node_total }}</span>
+          </div>
+          <div class="call-nodes dim" v-else>—</div>
+          <!-- 耗时 -->
+          <div class="call-dur">
+            <span v-if="run.duration_ms != null" class="dur-val" :class="run.duration_ms > 5000 ? 'dur-slow' : ''">
+              {{ run.duration_ms >= 1000 ? (run.duration_ms / 1000).toFixed(1) + 's' : run.duration_ms + 'ms' }}
+            </span>
+            <span v-else class="dim">—</span>
+          </div>
+          <!-- 状态 -->
+          <div class="call-status">
+            <el-tag :type="runStatusType[run.status] || 'info'" size="small" effect="dark">{{ run.status }}</el-tag>
+          </div>
+          <!-- 时间 -->
+          <div class="call-time dim">{{ fmtTime(run.created_at) }}</div>
+        </div>
+      </transition-group>
+      <el-empty v-if="!recentRuns.length" description="暂无调用记录" :image-size="60" />
     </div>
 
     <!-- 链路 trace 抽屉 -->
@@ -604,42 +604,68 @@ onUnmounted(() => {
 .dep-state { font-size: 12px; text-transform: uppercase; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
-/* 两栏 */
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-@media (max-width: 1100px) { .grid-2 { grid-template-columns: 1fr; } }
-.list-card { padding: 16px 20px; animation: slide-up 0.55s ease both; }
-.run-list { display: flex; flex-direction: column; gap: 8px; max-height: 460px; overflow-y: auto; }
-.run-item {
-  padding: 10px 12px; border-radius: 10px;
-  background: var(--pf-panel-2); border: 1px solid var(--pf-border);
-  cursor: pointer; transition: transform 0.15s ease, box-shadow 0.2s ease;
+/* 调用记录表格 */
+.calls-card { padding: 16px 20px; animation: slide-up 0.55s ease both; }
+.calls-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.calls-legend { display: flex; gap: 12px; align-items: center; }
+.legend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--pf-text-dim); }
+.calls-list {
+  display: flex; flex-direction: column; gap: 0;
+  max-height: 500px; overflow-y: auto;
+  border: 1px solid var(--pf-border); border-radius: 10px; overflow: hidden;
 }
-.run-item:hover { transform: translateX(3px); box-shadow: var(--pf-shadow-sm); }
-.run-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-.run-name-id { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.run-name { font-size: 13px; font-weight: 600; color: var(--pf-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
-.run-id { color: var(--pf-accent); font-size: 12px; opacity: 0.7; }
-.run-progress { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.rp-bar { flex: 1; height: 6px; background: var(--pf-border); border-radius: 3px; overflow: hidden; }
-.rp-fill { height: 100%; background: linear-gradient(90deg, #4f46e5, #22c55e); border-radius: 3px; transition: width 0.6s ease; }
-.rp-text { font-size: 11px; color: var(--pf-text-dim); white-space: nowrap; }
-.run-meta { display: flex; gap: 12px; font-size: 11px; margin: 0; }
-.run-pod { font-family: monospace; }
+.call-row {
+  display: grid;
+  grid-template-columns: 20px 1fr 110px 72px 88px 140px;
+  align-items: center; gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--pf-border);
+  cursor: pointer;
+  transition: background 0.15s ease;
+  animation: slide-up 0.3s ease both;
+}
+.call-row:last-child { border-bottom: none; }
+.call-row:hover { background: var(--pf-panel-2); }
 
-/* 最近执行列表 */
-.exec-list { display: flex; flex-direction: column; gap: 6px; max-height: 460px; overflow-y: auto; }
-.exec-item {
-  padding: 10px 12px; border-radius: 10px;
-  background: var(--pf-panel-2); border: 1px solid var(--pf-border);
-  cursor: pointer; transition: transform 0.15s ease, box-shadow 0.2s ease;
+/* 来源点 */
+.call-src { display: flex; align-items: center; justify-content: center; }
+.src-dot {
+  width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0;
 }
-.exec-item:hover { transform: translateX(3px); box-shadow: var(--pf-shadow-sm); }
-.exec-item-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
-.exec-name-wrap { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.exec-block-name { font-size: 13px; font-weight: 600; color: var(--pf-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
-.exec-id-code { color: var(--pf-accent); font-size: 12px; opacity: 0.7; }
-.exec-flow-badge { margin-left: 2px; }
-.exec-item-meta { display: flex; gap: 12px; font-size: 11px; margin: 0; }
+.src-http    { background: #4f46e5; box-shadow: 0 0 5px rgba(79,70,229,0.5); }
+.src-stream  { background: #0891b2; box-shadow: 0 0 5px rgba(8,145,178,0.5); }
+.src-mq      { background: #f59e0b; box-shadow: 0 0 5px rgba(245,158,11,0.5); }
+.src-manual  { background: #94a3b8; }
+
+/* 名称 */
+.call-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.call-api-name {
+  font-size: 13px; font-weight: 600; color: var(--pf-text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.call-sub {
+  display: flex; align-items: center; gap: 3px;
+  font-size: 11px; margin: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* 节点进度 */
+.call-nodes { display: flex; align-items: center; gap: 6px; }
+.rp-bar-sm { flex: 1; height: 4px; background: var(--pf-border); border-radius: 2px; overflow: hidden; min-width: 40px; }
+.rp-fill-sm { height: 100%; background: linear-gradient(90deg, #4f46e5, #22c55e); border-radius: 2px; transition: width 0.6s ease; }
+.rp-fill-err { background: #ef4444; }
+.call-node-txt { font-size: 11px; white-space: nowrap; }
+
+/* 耗时 */
+.call-dur { text-align: right; }
+.dur-val { font-size: 12px; font-weight: 600; color: var(--pf-text); font-family: monospace; }
+.dur-slow { color: #f59e0b; }
+
+/* 状态 */
+.call-status { display: flex; justify-content: center; }
+
+/* 时间 */
+.call-time { font-size: 11px; text-align: right; }
 
 /* trace 抽屉 */
 .trace-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }

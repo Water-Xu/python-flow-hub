@@ -28,6 +28,11 @@ class FlowRun(Base, UUIDMixin, TimestampMixin):
     fence_token: Mapped[int] = mapped_column(Integer, default=0)
     lease_expire_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 调用来源追踪（dashboard 展示用）
+    api_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # http | mq | manual | stream
+    trigger_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class ExecutionRecord(Base, UUIDMixin, TimestampMixin):

@@ -779,7 +779,7 @@ async def invoke_api(
         run = FlowRun(
             flow_id=flow_id, status="running",
             dag_snapshot={"entry_node_id": effective_entry_node_id, "mode": "flow_runner"},
-            node_states={},
+            node_states={}, api_id=api.id, trigger_source="http",
         )
         session.add(run)
         await session.flush()
@@ -789,6 +789,7 @@ async def invoke_api(
             if runner_result.get("status") == "failed":
                 run.status = "failed"
                 run.finished_at = _utcnow()
+                run.duration_ms = int((time.time() - start_ts) * 1000)
                 api.total_calls += 1
                 api.error_calls += 1
                 await session.commit()
@@ -796,6 +797,7 @@ async def invoke_api(
             elapsed = (time.time() - start_ts) * 1000
             run.status = "succeeded"
             run.finished_at = _utcnow()
+            run.duration_ms = int(elapsed)
             # 保存 runner 返回的节点状态（若有）供 trace 使用
             if runner_result.get("node_states"):
                 run.node_states = runner_result["node_states"]
@@ -812,6 +814,7 @@ async def invoke_api(
             if run.status == "running":
                 run.status = "failed"
                 run.finished_at = _utcnow()
+                run.duration_ms = int((time.time() - start_ts) * 1000)
                 api.total_calls += 1
                 api.error_calls += 1
             await session.commit()
@@ -819,6 +822,7 @@ async def invoke_api(
         except Exception as exc:
             run.status = "failed"
             run.finished_at = _utcnow()
+            run.duration_ms = int((time.time() - start_ts) * 1000)
             api.total_calls += 1
             api.error_calls += 1
             await session.commit()
@@ -843,7 +847,7 @@ async def invoke_api(
     run = FlowRun(
         flow_id=flow_id, status="running",
         dag_snapshot={"entry_node_id": effective_entry_node_id, "mode": "orchestrated"},
-        node_states={},
+        node_states={}, api_id=api.id, trigger_source="http",
     )
     session.add(run)
     await session.flush()
@@ -877,6 +881,7 @@ async def invoke_api(
 
         run.status = "succeeded"
         run.finished_at = _utcnow()
+        run.duration_ms = int(elapsed)
         api.total_calls += 1
         api.success_calls += 1
         # 滚动平均
@@ -897,6 +902,7 @@ async def invoke_api(
     except BusinessException:
         run.status = "failed"
         run.finished_at = _utcnow()
+        run.duration_ms = int((time.time() - start_ts) * 1000)
         api.total_calls += 1
         api.error_calls += 1
         await session.commit()
@@ -999,7 +1005,7 @@ async def invoke_api_stream(
     stream_run = FlowRun(
         flow_id=flow_id, status="running",
         dag_snapshot={"entry_node_id": effective_entry_node_id, "mode": "stream"},
-        node_states={},
+        node_states={}, api_id=api.id, trigger_source="stream",
     )
     session.add(stream_run)
     await session.flush()
@@ -1097,6 +1103,7 @@ async def invoke_api_stream(
         if error_detail is not None:
             stream_run.status = "failed"
             stream_run.finished_at = _utcnow()
+            stream_run.duration_ms = int(elapsed)
             api.total_calls += 1
             api.error_calls += 1
             await session.commit()
@@ -1106,6 +1113,7 @@ async def invoke_api_stream(
 
         stream_run.status = "succeeded"
         stream_run.finished_at = _utcnow()
+        stream_run.duration_ms = int(elapsed)
         api.total_calls += 1
         api.success_calls += 1
         n = api.total_calls
