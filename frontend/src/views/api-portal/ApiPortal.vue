@@ -264,7 +264,7 @@ onMounted(load)
                 <span class="ig-label">调用地址</span>
                 <div class="ig-uri">
                   <span class="method-badge-sm">POST</span>
-                  <code class="uri-full">{{ docsData.invoke_path || `/lhy-styon-pyflow/api/public/${docsData.path}` }}</code>
+                  <code class="uri-full">{{ docsData.invoke_path || docsData.path }}</code>
                   <button class="copy-xs" @click="copyPath(selectedApi!)"><el-icon><CopyDocument /></el-icon></button>
                 </div>
               </div>
