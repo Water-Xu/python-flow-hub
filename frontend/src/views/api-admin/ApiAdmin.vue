@@ -1199,17 +1199,20 @@ onMounted(load)
     <el-dialog
       v-model="triggerDialogVisible"
       :title="`触发配置 - ${triggerApi?.name || ''}`"
-      width="640px"
+      width="860px"
       destroy-on-close
+      class="trigger-dialog"
     >
-      <MqTriggerForm
-        v-if="triggerApi"
-        ref="triggerFormRef"
-        :api-id="triggerApi.id"
-        :trigger-type="triggerApi.trigger_type"
-        :mq-config="triggerApi.mq_config"
-        :http-config="triggerApi.http_config"
-      />
+      <div class="trigger-dialog-body">
+        <MqTriggerForm
+          v-if="triggerApi"
+          ref="triggerFormRef"
+          :api-id="triggerApi.id"
+          :trigger-type="triggerApi.trigger_type"
+          :mq-config="triggerApi.mq_config"
+          :http-config="triggerApi.http_config"
+        />
+      </div>
       <template #footer>
         <el-button @click="triggerDialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="triggerSaving" @click="saveTrigger">保存</el-button>
@@ -1219,6 +1222,25 @@ onMounted(load)
 </template>
 
 <style scoped>
+/* 触发配置对话框：固定最大高度 + 内容区滚动 */
+.trigger-dialog :deep(.el-dialog__body) {
+  padding: 0;
+}
+.trigger-dialog-body {
+  max-height: calc(90vh - 130px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 20px 24px;
+  scrollbar-width: thin;
+}
+.trigger-dialog-body::-webkit-scrollbar {
+  width: 5px;
+}
+.trigger-dialog-body::-webkit-scrollbar-thumb {
+  background: var(--pf-border-strong, #cbd5e1);
+  border-radius: 4px;
+}
+
 .page-head {
   margin-bottom: 24px;
 }

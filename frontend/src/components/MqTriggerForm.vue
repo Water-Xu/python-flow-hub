@@ -694,6 +694,8 @@ public void onReply(Map&lt;String, Object&gt; result) {
   white-space: pre;
   overflow-x: auto;
   line-height: 1.6;
+  max-height: 180px;
+  overflow-y: auto;
 }
 
 /* ── 透传字段 ─────────────────────────── */
