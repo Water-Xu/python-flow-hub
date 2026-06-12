@@ -328,7 +328,7 @@ onUnmounted(() => {
     </div>
 
     <!-- 链路 trace 抽屉 -->
-    <el-drawer v-model="traceDrawer" size="820px" :with-header="true">
+    <el-drawer v-model="traceDrawer" size="560px" :with-header="true">
       <template #header>
         <div class="trace-head">
           <el-icon color="var(--pf-accent)"><Share /></el-icon>

@@ -255,7 +255,7 @@ onMounted(load)
     </div>
 
     <!-- 详情抽屉 -->
-    <el-drawer v-model="drawer" size="800px" :with-header="true" class="detail-drawer">
+    <el-drawer v-model="drawer" size="560px" :with-header="true" class="detail-drawer">
       <template #header>
         <div class="drawer-head">
           <div class="drawer-title">
