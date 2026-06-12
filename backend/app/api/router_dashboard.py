@@ -29,6 +29,15 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _calc_dur(run: FlowRun) -> int | None:
+    dur = run.duration_ms
+    if dur is None and run.finished_at and run.created_at:
+        fa = run.finished_at if run.finished_at.tzinfo else run.finished_at.replace(tzinfo=timezone.utc)
+        ca = run.created_at if run.created_at.tzinfo else run.created_at.replace(tzinfo=timezone.utc)
+        dur = int((fa - ca).total_seconds() * 1000)
+    return dur
+
+
 async def _counts(session: AsyncSession) -> dict:
     blocks = (await session.execute(select(func.count()).select_from(Block))).scalar() or 0
     flows = (await session.execute(select(func.count()).select_from(Flow))).scalar() or 0
@@ -144,12 +153,7 @@ async def _recent_flow_runs(session: AsyncSession, limit: int = 20) -> list[dict
         states = r.node_states or {}
         done = sum(1 for s in states.values() if isinstance(s, dict) and s.get("status") in ("done", "succeeded"))
         skipped = sum(1 for s in states.values() if isinstance(s, dict) and s.get("status") == "skipped")
-        # duration_ms：优先用记录值，其次用 finished_at - created_at 推算
-        dur = r.duration_ms
-        if dur is None and r.finished_at and r.created_at:
-            fa = r.finished_at if r.finished_at.tzinfo else r.finished_at.replace(tzinfo=timezone.utc)
-            ca = r.created_at if r.created_at.tzinfo else r.created_at.replace(tzinfo=timezone.utc)
-            dur = int((fa - ca).total_seconds() * 1000)
+        dur = _calc_dur(r)
         out.append({
             "id": r.id, "flow_id": r.flow_id, "flow_name": row.flow_name or "",
             "flow_deployment_id": r.flow_deployment_id,
@@ -190,57 +194,270 @@ async def overview(
     }
 
 
+def _get_node_name_from_dag(dag_snapshot: dict, node_id: str) -> str:
+    """从 dag_snapshot 中提取节点显示名称。"""
+    nodes = dag_snapshot.get("nodes", [])
+    for node in nodes:
+        if node.get("id") == node_id:
+            data = node.get("data", {})
+            # 按优先级取名：label > name > block_name > entrypoint > id[:8]
+            return (
+                data.get("label") or data.get("name") or
+                data.get("block_name") or data.get("entrypoint") or
+                node_id[:8]
+            )
+    return node_id[:8]
+
+
+def _build_node_block_map(dag_snapshot: dict) -> dict[str, str]:
+    """构建 node_id -> block_id 映射（用于关联 ExecutionRecord）。"""
+    result = {}
+    for node in dag_snapshot.get("nodes", []):
+        block_id = node.get("data", {}).get("block_id")
+        if block_id:
+            result[node["id"]] = block_id
+    return result
+
+
+def _build_call_chain(
+    trigger_src: str,
+    run: FlowRun,
+    api: PublishedApi | None,
+    steps: list[dict],
+    total_ms: int | None,
+) -> dict:
+    """构建完整调用链路结构（基础设施节点 + 业务执行节点）。"""
+    overall_ok = run.status in ("succeeded", "running")
+
+    # 业务执行节点（来自 steps）
+    flow_nodes = [
+        {
+            "id": f"step_{step['node_id']}",
+            "type": "block",
+            "label": step.get("node_name") or step["node_id"][:8],
+            "node_id": step["node_id"],
+            "block_id": step.get("block_id"),
+            "status": step["status"],
+            "duration_ms": step.get("duration_ms"),
+            "hit_port": step.get("hit_port"),
+            "error": step.get("error"),
+            "has_output": step.get("has_output", False),
+        }
+        for step in steps
+    ]
+
+    # Flow 编排包装节点
+    orchestrator_node = {
+        "id": "orchestrator",
+        "type": "orchestrator",
+        "label": "Flow 编排",
+        "detail": f"flow_run {run.id[:8]}",
+        "status": "done" if overall_ok else "failed",
+        "duration_ms": total_ms,
+        "children": flow_nodes,
+    }
+
+    if trigger_src == "http":
+        nodes = [
+            {"id": "client", "type": "client", "label": "调用客户端",
+             "status": "ok", "detail": "HTTP 请求方"},
+            {"id": "network", "type": "network", "label": "网络传输",
+             "status": "ok", "detail": "TCP / TLS 握手", "note": "耗时未采集"},
+            {"id": "gateway", "type": "gateway", "label": "API 网关",
+             "status": "ok", "detail": "路由 & 负载均衡", "note": "耗时未采集"},
+            {"id": "portal", "type": "service", "label": "API Portal",
+             "status": "ok" if overall_ok else "error",
+             "detail": f"POST /api/public/{api.path if api else '?'}",
+             "sub": api.name if api else ""},
+            {"id": "auth", "type": "auth", "label": "鉴权 & 限流",
+             "status": "ok", "detail": "Token 校验 / 频率限制"},
+            orchestrator_node,
+            {"id": "response", "type": "response", "label": "HTTP 响应",
+             "status": "ok" if overall_ok else "error",
+             "detail": "200 OK" if overall_ok else "执行失败",
+             "duration_ms": total_ms},
+        ]
+    elif trigger_src == "stream":
+        nodes = [
+            {"id": "client", "type": "client", "label": "调用客户端",
+             "status": "ok", "detail": "HTTP SSE 请求"},
+            {"id": "gateway", "type": "gateway", "label": "API 网关",
+             "status": "ok", "detail": "路由 & 长连接保持"},
+            {"id": "portal", "type": "service", "label": "API Portal (Stream)",
+             "status": "ok" if overall_ok else "error",
+             "detail": f"POST /api/public/{api.path if api else '?'}/stream",
+             "sub": api.name if api else ""},
+            {"id": "auth", "type": "auth", "label": "鉴权 & 限流",
+             "status": "ok", "detail": "Token 校验"},
+            orchestrator_node,
+            {"id": "sse", "type": "response", "label": "SSE 流式推送",
+             "status": "ok" if overall_ok else "error",
+             "detail": "text/event-stream", "duration_ms": total_ms},
+        ]
+    elif trigger_src == "mq":
+        mq_cfg = (api.mq_config or {}) if api else {}
+        api_short = (run.api_id or "?")[:8]
+        exchange = mq_cfg.get("exchange", f"flow.{api_short}")
+        routing_key = mq_cfg.get("routing_key", "")
+        queue_name = mq_cfg.get("queue", f"flow.{api_short}.queue")
+        nodes = [
+            {"id": "publisher", "type": "client", "label": "消息发布者",
+             "status": "ok", "detail": "AMQP publish"},
+            {"id": "broker", "type": "mq_broker", "label": "RabbitMQ Broker",
+             "status": "ok", "detail": "消息代理 (AMQP 0-9-1)"},
+            {"id": "exchange", "type": "mq_exchange", "label": "Exchange",
+             "status": "ok", "detail": exchange, "sub": "topic 类型"},
+            {"id": "route", "type": "mq_route", "label": "路由绑定",
+             "status": "ok", "detail": routing_key or "#"},
+            {"id": "queue", "type": "mq_queue", "label": "消息队列",
+             "status": "ok", "detail": queue_name},
+            {"id": "consumer", "type": "service", "label": "Flow Consumer",
+             "status": "ok", "detail": "消息消费 & 反序列化"},
+            {"id": "idempotent", "type": "filter", "label": "幂等校验",
+             "status": "ok", "detail": "Redis 去重 (message_id)"},
+            orchestrator_node,
+            {"id": "ack", "type": "response", "label": "消息确认",
+             "status": "ok" if overall_ok else "nack",
+             "detail": "basic.ack" if overall_ok else "basic.nack (重入队列)"},
+        ]
+    else:
+        # manual
+        nodes = [
+            {"id": "user", "type": "client", "label": "用户 / Flow Editor",
+             "status": "ok", "detail": "手动触发执行"},
+            {"id": "api", "type": "service", "label": "控制面 API",
+             "status": "ok", "detail": "POST /api/flows/{id}/run"},
+            orchestrator_node,
+            {"id": "result", "type": "response", "label": "执行结果",
+             "status": "ok" if overall_ok else "error", "duration_ms": total_ms},
+        ]
+
+    return {
+        "type": trigger_src,
+        "nodes": nodes,
+        "total_ms": total_ms,
+        "status": run.status,
+    }
+
+
 @router.get("/flow-runs/{run_id}/trace")
 async def flow_run_trace(
     run_id: str,
     session: AsyncSession = Depends(get_session),
     _: str = Depends(require_role(Role.VIEWER)),
 ):
-    """单次整流链路 trace：按节点状态还原执行步骤（成功/跳过/失败 + 输出），含块名称与完整日志。"""
+    """单次整流链路 trace：含节点名称、每步耗时、触发源、流程入参出参、完整 call_chain 结构。"""
     run = await session.get(FlowRun, run_id)
     if run is None:
         raise BusinessException(PYFLOW_FLOW_NOT_FOUND, run_id)
+
     flow = await session.get(Flow, run.flow_id) if run.flow_id else None
+    api = await session.get(PublishedApi, run.api_id) if run.api_id else None
+
+    # 从 dag_snapshot 提取节点名称 和 node_id -> block_id 映射
+    dag = run.dag_snapshot or {}
+    node_block_map = _build_node_block_map(dag)
+
     states = run.node_states or {}
-    steps = []
-    for node_id, st in states.items():
-        if not isinstance(st, dict):
-            continue
-        steps.append({
-            "node_id": node_id,
-            "status": st.get("status", "unknown"),
-            "hit_port": st.get("hit_port"),
-            "has_output": "output" in st,
-            "output": st.get("output"),
-            "error": st.get("error"),
-        })
-    # 单块执行明细（关联 flow_run_id），含块名称与完整 stdout/stderr
+
+    # 查询关联块执行，按时间排序
     recs = (await session.execute(
         select(ExecutionRecord, Block.name.label("block_name"))
         .outerjoin(Block, ExecutionRecord.block_id == Block.id)
         .where(ExecutionRecord.flow_run_id == run_id)
         .order_by(ExecutionRecord.created_at)
     )).all()
+
+    # block_id -> [ExecutionRecord, ...] 映射（按创建时间顺序，供逐一匹配）
+    exec_by_block: dict[str, list] = {}
+    for r in recs:
+        bid = r.ExecutionRecord.block_id
+        exec_by_block.setdefault(bid, []).append(r)
+
+    # 构建 steps（含 node_name、duration_ms）
+    steps = []
+    for node_id, st in states.items():
+        if not isinstance(st, dict):
+            continue
+        node_name = _get_node_name_from_dag(dag, node_id)
+        block_id = node_block_map.get(node_id)
+
+        # 按顺序取同一 block 的第一条 execution（匹配本次节点执行）
+        exec_dur: int | None = None
+        exec_started_at = None
+        exec_status_ok = True
+        if block_id and block_id in exec_by_block and exec_by_block[block_id]:
+            ex_row = exec_by_block[block_id].pop(0)
+            ex = ex_row.ExecutionRecord
+            exec_dur = ex.duration_ms
+            exec_started_at = ex.created_at
+            exec_status_ok = ex.status in ("success", "done")
+
+        steps.append({
+            "node_id": node_id,
+            "node_name": node_name,
+            "block_id": block_id,
+            "status": st.get("status", "unknown"),
+            "hit_port": st.get("hit_port"),
+            "has_output": "output" in st,
+            "output": st.get("output"),
+            "error": st.get("error"),
+            "duration_ms": exec_dur,
+            "started_at": exec_started_at.isoformat() if exec_started_at else None,
+        })
+
+    # 流级别入参 / 出参：
+    # 入参 = 入口块 ExecutionRecord 的 inputs
+    # 出参 = 最后执行块的 output（或 node_states 中最后节点的 output）
+    flow_inputs: dict | None = None
+    flow_output: dict | None = None
+    if recs:
+        flow_inputs = recs[0].ExecutionRecord.inputs or None
+        for r in reversed(recs):
+            if r.ExecutionRecord.output:
+                flow_output = r.ExecutionRecord.output
+                break
+
+    total_ms = _calc_dur(run)
+
+    trigger_src = run.trigger_source or "manual"
+    call_chain = _build_call_chain(trigger_src, run, api, steps, total_ms)
+
     return {
         "run": {
-            "id": run.id, "flow_id": run.flow_id, "flow_name": flow.name if flow else "",
-            "status": run.status, "owner_pod": run.owner_pod,
+            "id": run.id,
+            "flow_id": run.flow_id,
+            "flow_name": flow.name if flow else "",
+            "api_id": run.api_id,
+            "api_name": api.name if api else "",
+            "api_path": api.path if api else "",
+            "trigger_source": trigger_src,
+            "status": run.status,
+            "owner_pod": run.owner_pod,
             "fence_token": run.fence_token,
-            "created_at": run.created_at, "finished_at": run.finished_at,
+            "duration_ms": total_ms,
+            "created_at": run.created_at,
+            "finished_at": run.finished_at,
+            "inputs": flow_inputs,
+            "output": flow_output,
         },
         "steps": steps,
-        "executions": [{
-            "id": r.ExecutionRecord.id,
-            "block_id": r.ExecutionRecord.block_id,
-            "block_name": r.block_name or "",
-            "status": r.ExecutionRecord.status,
-            "duration_ms": r.ExecutionRecord.duration_ms,
-            "inputs": r.ExecutionRecord.inputs,
-            "output": r.ExecutionRecord.output,
-            "stdout": r.ExecutionRecord.stdout or "",
-            "stderr": r.ExecutionRecord.stderr or "",
-            "created_at": r.ExecutionRecord.created_at,
-        } for r in recs],
+        "executions": [
+            {
+                "id": r.ExecutionRecord.id,
+                "block_id": r.ExecutionRecord.block_id,
+                "block_name": r.block_name or "",
+                "status": r.ExecutionRecord.status,
+                "duration_ms": r.ExecutionRecord.duration_ms,
+                "inputs": r.ExecutionRecord.inputs,
+                "output": r.ExecutionRecord.output,
+                "stdout": r.ExecutionRecord.stdout or "",
+                "stderr": r.ExecutionRecord.stderr or "",
+                "created_at": r.ExecutionRecord.created_at,
+            }
+            for r in recs
+        ],
+        "call_chain": call_chain,
     }
 
 
@@ -275,10 +492,12 @@ async def exec_detail(
         run = await session.get(FlowRun, r.flow_run_id)
         if run:
             flow = await session.get(Flow, run.flow_id) if run.flow_id else None
+            dag = run.dag_snapshot or {}
             states = run.node_states or {}
             steps = [
                 {
                     "node_id": node_id,
+                    "node_name": _get_node_name_from_dag(dag, node_id),
                     "status": st.get("status", "unknown"),
                     "hit_port": st.get("hit_port"),
                     "has_output": "output" in st,
@@ -292,8 +511,10 @@ async def exec_detail(
                 "id": run.id,
                 "flow_id": run.flow_id,
                 "flow_name": flow.name if flow else "",
+                "trigger_source": run.trigger_source or "manual",
                 "status": run.status,
                 "steps": steps,
+                "duration_ms": _calc_dur(run),
                 "created_at": run.created_at,
                 "finished_at": run.finished_at,
             }

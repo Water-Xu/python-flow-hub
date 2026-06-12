@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { dashboardApi } from '@/api'
+import CallChain from '@/components/CallChain.vue'
 
 const data = ref<any>(null)
 const loading = ref(false)
@@ -327,77 +328,119 @@ onUnmounted(() => {
     </div>
 
     <!-- 链路 trace 抽屉 -->
-    <el-drawer v-model="traceDrawer" size="600px" :with-header="true">
+    <el-drawer v-model="traceDrawer" size="820px" :with-header="true">
       <template #header>
         <div class="trace-head">
           <el-icon color="var(--pf-accent)"><Share /></el-icon>
           <span>
-            链路 trace ·
-            <span v-if="trace?.run?.flow_name" class="trace-flow-name">{{ trace.run.flow_name }}</span>
+            调用链路
+            <span v-if="trace?.run?.flow_name" class="trace-flow-name">· {{ trace.run.flow_name }}</span>
             <code class="trace-run-id">{{ shortId(traceRunId) }}</code>
           </span>
+          <div class="trace-head-meta" v-if="trace?.run">
+            <el-tag :type="runStatusType[trace.run.status] || 'info'" size="small" effect="dark">{{ trace.run.status }}</el-tag>
+            <span class="dim" v-if="trace.run.duration_ms != null">
+              ⏱ {{ trace.run.duration_ms >= 1000 ? (trace.run.duration_ms / 1000).toFixed(1) + 's' : trace.run.duration_ms + 'ms' }}
+            </span>
+            <span class="dim" v-else-if="trace.run.finished_at">
+              ⏱ {{ Math.round((new Date(trace.run.finished_at).getTime() - new Date(trace.run.created_at).getTime())) }}ms
+            </span>
+          </div>
         </div>
       </template>
       <div v-loading="traceLoading" class="trace-body">
         <template v-if="trace">
-          <div class="trace-summary">
-            <el-tag :type="runStatusType[trace.run.status] || 'info'" effect="dark">{{ trace.run.status }}</el-tag>
-            <span class="dim">flow: {{ displayName(trace.run.flow_name, trace.run.flow_id) }}</span>
-            <span class="dim" v-if="trace.run.fence_token != null">fence: {{ trace.run.fence_token }}</span>
-            <span class="dim" v-if="trace.run.finished_at">
-              耗时: {{ Math.round((new Date(trace.run.finished_at).getTime() - new Date(trace.run.created_at).getTime())) }}ms
-            </span>
-          </div>
-
-          <div class="timeline">
-            <div v-for="(step, i) in trace.steps" :key="i" class="tl-item" :style="{ animationDelay: `${i * 50}ms` }">
-              <div
-                class="tl-dot"
-                :class="{ 'tl-dot-fail': step.status === 'failed' }"
-                :style="{ background: step.status === 'failed' ? '#ef4444' : (stepStatusColor[step.status] || '#94a3b8') }"
-              >
-                <span v-if="step.status === 'failed'" class="tl-dot-x">✕</span>
+          <el-tabs class="trace-tabs" model-value="chain">
+            <!-- 可视化调用链路 -->
+            <el-tab-pane name="chain">
+              <template #label><span>🔗 调用链路图</span></template>
+              <div v-if="trace.call_chain">
+                <CallChain :chain="trace.call_chain" />
               </div>
-              <div class="tl-content">
-                <div class="tl-row">
-                  <code>{{ shortId(step.node_id) }}</code>
-                  <el-tag size="small" :style="{ color: stepStatusColor[step.status] || '#94a3b8', borderColor: stepStatusColor[step.status] || '#94a3b8' }">{{ step.status }}</el-tag>
-                  <span v-if="step.hit_port" class="dim">→ {{ step.hit_port }}</span>
-                  <span v-if="step.status === 'failed'" class="fail-label">执行失败</span>
+              <div v-else class="trace-no-chain">
+                <!-- 降级：无 call_chain 时展示旧版 timeline -->
+                <div class="trace-summary">
+                  <el-tag :type="runStatusType[trace.run.status] || 'info'" effect="dark">{{ trace.run.status }}</el-tag>
+                  <span class="dim">flow: {{ displayName(trace.run.flow_name, trace.run.flow_id) }}</span>
                 </div>
-                <pre v-if="step.has_output" class="tl-output">{{ JSON.stringify(step.output, null, 2) }}</pre>
-                <pre v-if="step.error" class="tl-error">{{ step.error }}</pre>
+                <div class="timeline">
+                  <div v-for="(step, i) in trace.steps" :key="i" class="tl-item" :style="{ animationDelay: `${i * 50}ms` }">
+                    <div
+                      class="tl-dot"
+                      :class="{ 'tl-dot-fail': step.status === 'failed' }"
+                      :style="{ background: step.status === 'failed' ? '#ef4444' : (stepStatusColor[step.status] || '#94a3b8') }"
+                    >
+                      <span v-if="step.status === 'failed'" class="tl-dot-x">✕</span>
+                    </div>
+                    <div class="tl-content">
+                      <div class="tl-row">
+                        <code>{{ step.node_name || shortId(step.node_id) }}</code>
+                        <el-tag size="small" :style="{ color: stepStatusColor[step.status] || '#94a3b8', borderColor: stepStatusColor[step.status] || '#94a3b8' }">{{ step.status }}</el-tag>
+                        <span v-if="step.hit_port" class="dim">→ {{ step.hit_port }}</span>
+                        <span v-if="step.duration_ms != null" class="dim">{{ step.duration_ms }}ms</span>
+                      </div>
+                      <pre v-if="step.has_output" class="tl-output">{{ JSON.stringify(step.output, null, 2) }}</pre>
+                      <pre v-if="step.error" class="tl-error">{{ step.error }}</pre>
+                    </div>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
+            </el-tab-pane>
 
-          <div v-if="trace.executions?.length" class="trace-exec">
-            <div class="card-title">关联块执行</div>
-            <div v-for="ex in trace.executions" :key="ex.id" class="te-item">
-              <div class="te-item-head">
-                <el-tag :type="execStatusType[ex.status] || 'info'" size="small" effect="dark">{{ ex.status }}</el-tag>
-                <span class="te-block-name" v-if="ex.block_name">{{ ex.block_name }}</span>
-                <code class="te-block-id">{{ shortId(ex.block_id) }}</code>
-                <span class="dim">{{ ex.duration_ms }}ms</span>
+            <!-- 入参 / 出参 -->
+            <el-tab-pane name="io" label="入参 / 出参">
+              <div class="trace-io-section">
+                <div class="io-block">
+                  <div class="te-io-label">
+                    <el-icon size="12"><Download /></el-icon> 入参（触发时传入）
+                  </div>
+                  <pre class="tl-output" v-if="trace.run?.inputs != null">{{ JSON.stringify(trace.run.inputs, null, 2) }}</pre>
+                  <div class="dim" style="font-size:12px;padding:8px 0" v-else>暂无入参记录</div>
+                </div>
+                <div class="io-block" style="margin-top:14px">
+                  <div class="te-io-label">
+                    <el-icon size="12"><Upload /></el-icon> 出参（流程最终返回值）
+                  </div>
+                  <pre class="tl-output" v-if="trace.run?.output != null">{{ JSON.stringify(trace.run.output, null, 2) }}</pre>
+                  <div class="dim" style="font-size:12px;padding:8px 0" v-else>暂无出参记录</div>
+                </div>
               </div>
-              <div v-if="ex.inputs && Object.keys(ex.inputs || {}).length" class="te-io-section">
-                <span class="te-io-label">入参</span>
-                <pre class="tl-output">{{ JSON.stringify(ex.inputs, null, 2) }}</pre>
+            </el-tab-pane>
+
+            <!-- 关联块执行 -->
+            <el-tab-pane v-if="trace.executions?.length" name="execs">
+              <template #label>
+                关联块执行
+                <el-badge :value="trace.executions.length" type="info" style="margin-left:4px" />
+              </template>
+              <div class="trace-exec">
+                <div v-for="ex in trace.executions" :key="ex.id" class="te-item">
+                  <div class="te-item-head">
+                    <el-tag :type="execStatusType[ex.status] || 'info'" size="small" effect="dark">{{ ex.status }}</el-tag>
+                    <span class="te-block-name" v-if="ex.block_name">{{ ex.block_name }}</span>
+                    <code class="te-block-id">{{ shortId(ex.block_id) }}</code>
+                    <span class="dim">{{ ex.duration_ms }}ms</span>
+                  </div>
+                  <div v-if="ex.inputs && Object.keys(ex.inputs || {}).length" class="te-io-section">
+                    <span class="te-io-label">入参</span>
+                    <pre class="tl-output">{{ JSON.stringify(ex.inputs, null, 2) }}</pre>
+                  </div>
+                  <div v-if="ex.output != null" class="te-io-section">
+                    <span class="te-io-label">出参</span>
+                    <pre class="tl-output">{{ JSON.stringify(ex.output, null, 2) }}</pre>
+                  </div>
+                  <div v-if="ex.stdout" class="te-io-section">
+                    <span class="te-io-label">stdout</span>
+                    <pre class="tl-log">{{ ex.stdout }}</pre>
+                  </div>
+                  <div v-if="ex.stderr" class="te-io-section">
+                    <span class="te-io-label err-label">stderr</span>
+                    <pre class="tl-error">{{ ex.stderr }}</pre>
+                  </div>
+                </div>
               </div>
-              <div v-if="ex.output != null" class="te-io-section">
-                <span class="te-io-label">出参</span>
-                <pre class="tl-output">{{ JSON.stringify(ex.output, null, 2) }}</pre>
-              </div>
-              <div v-if="ex.stdout" class="te-io-section">
-                <span class="te-io-label">stdout</span>
-                <pre class="tl-log">{{ ex.stdout }}</pre>
-              </div>
-              <div v-if="ex.stderr" class="te-io-section">
-                <span class="te-io-label err-label">stderr</span>
-                <pre class="tl-error">{{ ex.stderr }}</pre>
-              </div>
-            </div>
-          </div>
+            </el-tab-pane>
+          </el-tabs>
         </template>
       </div>
     </el-drawer>
@@ -668,7 +711,12 @@ onUnmounted(() => {
 .call-time { font-size: 11px; text-align: right; }
 
 /* trace 抽屉 */
-.trace-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.trace-head { display: flex; align-items: center; gap: 8px; font-weight: 600; flex-wrap: wrap; }
+.trace-head-meta { display: flex; align-items: center; gap: 8px; margin-left: 8px; }
+.trace-tabs { --el-tabs-header-height: 36px; }
+.trace-io-section { display: flex; flex-direction: column; gap: 6px; padding-top: 4px; }
+.io-block { display: flex; flex-direction: column; gap: 6px; }
+.trace-no-chain { display: flex; flex-direction: column; gap: 14px; }
 .trace-flow-name { color: var(--pf-text); font-weight: 600; margin-right: 4px; }
 .trace-run-id { color: var(--pf-accent); font-size: 13px; opacity: 0.8; }
 .trace-body { display: flex; flex-direction: column; gap: 16px; }
