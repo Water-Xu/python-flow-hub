@@ -352,6 +352,7 @@ function handleMoreCmd(cmd: string, row: PublishedApi) {
   }
 }
 
+
 // ── 文档编辑（备注/示例/变更日志）───────────────────────────────────────────
 const remarksDrawerVisible = ref(false)
 const remarksApi = ref<PublishedApi | null>(null)
@@ -451,9 +452,21 @@ onMounted(load)
 
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
-          <el-tag :type="statusType[row.status] || 'info'" size="small" effect="light">
+          <!-- <el-tag :type="statusType[row.status] || 'info'" size="small" effect="light">
             {{ row.status }}
-          </el-tag>
+          </el-tag> -->
+              <!-- 状态快切：运行中 / 已暂停 -->
+              <el-tooltip :content="row.status === 'active' ? '点击暂停' : '点击激活'">
+              <span
+                class="status-toggle"
+                :class="row.status === 'active' ? 'st-active' : 'st-paused'"
+                :style="row.is_locked ? 'opacity:.45;cursor:not-allowed' : ''"
+                @click="!row.is_locked && toggleStatus(row)"
+              >
+                <span class="st-dot" />
+                {{ row.status === 'active' ? '运行中' : '已暂停' }}
+              </span>
+            </el-tooltip>
         </template>
       </el-table-column>
 
@@ -473,55 +486,44 @@ onMounted(load)
 
       <el-table-column label="策略" width="160">
         <template #default="{ row }">
-          <div class="policy-tags">
-            <el-tag v-if="row.rate_limit_enabled" size="small" type="warning" effect="plain">
+          <div class="policy-tags"  >
+            <el-tag v-if="row.rate_limit_enabled" size="small" type="warning" effect="plain" @click="openPolicy(row)">
               限流 {{ row.rate_limit_per_minute }}/min
             </el-tag>
-            <el-tag size="small" type="info" effect="plain">
+            <el-tag size="small" type="info" effect="plain" @click="openPolicy(row)">
               {{ lbLabels[row.load_balance_strategy] || row.load_balance_strategy }}
             </el-tag>
-            <el-tag v-if="row.degradation_enabled" size="small" type="danger" effect="plain">
+            <el-tag v-if="row.degradation_enabled" size="small" type="danger" effect="plain" @click="openPolicy(row)">
               降级开
             </el-tag>
           </div>
         </template>
       </el-table-column>
 
-      <el-table-column label="操作" width="310" fixed="right">
+      <el-table-column label="操作" width="150" fixed="right">
         <template #default="{ row }">
           <div class="act-bar">
             <!-- 主操作：文档 + 策略 + 触发 -->
-            <el-button size="small" class="act-btn" @click="openDocs(row)">
+            <!-- <el-button size="small" class="act-btn" @click="openDocs(row)">
               <el-icon><Document /></el-icon>文档
-            </el-button>
-            <el-button size="small" class="act-btn act-btn-primary" @click="openPolicy(row)">
-              <el-icon><Setting /></el-icon>策略
-            </el-button>
+            </el-button> -->
+            <!-- <el-button size="small" class="act-btn act-btn-primary" @click="openPolicy(row)">
+              <el-icon><Setting /></el-icon>限流
+            </el-button> -->
             <el-button size="small" class="act-btn act-btn-primary" :disabled="row.is_locked" @click="openTriggerConfig(row)">
               <el-icon><MessageBox /></el-icon>触发
             </el-button>
 
-            <!-- 状态快切：运行中 / 已暂停 -->
-            <el-tooltip :content="row.status === 'active' ? '点击暂停' : '点击激活'">
-              <span
-                class="status-toggle"
-                :class="row.status === 'active' ? 'st-active' : 'st-paused'"
-                :style="row.is_locked ? 'opacity:.45;cursor:not-allowed' : ''"
-                @click="!row.is_locked && toggleStatus(row)"
-              >
-                <span class="st-dot" />
-                {{ row.status === 'active' ? '运行中' : '已暂停' }}
-              </span>
-            </el-tooltip>
+
 
             <!-- 更多操作下拉 -->
-            <el-dropdown trigger="click" @command="(cmd: string) => handleMoreCmd(cmd, row)">
+            <el-dropdown trigger="click" @command="(cmd) => handleMoreCmd(cmd, row)">
               <el-button size="small" class="act-btn act-more">
                 更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
               </el-button>
               <template #dropdown>
                 <el-dropdown-menu class="more-menu">
-                  <el-dropdown-item command="docs" icon="Document">查看文档</el-dropdown-item>
+                  <!-- <el-dropdown-item command="docs" icon="Document">查看文档</el-dropdown-item> -->
                   <el-dropdown-item command="instances" icon="Monitor">实例负载</el-dropdown-item>
                   <el-dropdown-item command="version" icon="Switch">版本切换</el-dropdown-item>
                   <el-dropdown-item divided command="encryption" icon="Lock">
